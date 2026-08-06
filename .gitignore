@@ -94,3 +94,13 @@ c/tiny_inkling/
 
 # Claude Code working directory (agent worktrees, session scratch) — never a repo artifact
 .claude/
+
+# Read-only upstream checkouts consulted while planning (e.g. the llama.cpp
+# TurboQuant fork). 500+ MB of someone else's history — never a repo artifact.
+reference/
+references/
+
+# Papers consulted while planning. Third-party copyright: read locally, don't
+# redistribute through this repo. plans/paper-deepseek-v4.md carries the notes.
+paper.pdf
+*.paper.pdf

@@ -1,0 +1,260 @@
+# 04 — TurboQuant (2/3/4 Bit)
+
+Voraussetzung: [00-reference.md](00-reference.md), [03-kv-codec.md](03-kv-codec.md)
+
+*Commits:*
+1. `feat: TurboQuant 2/3/4-bit KV codec`
+2. `perf: keep V4 attention in the WHT domain, one inverse per head` (optional)
+
+## Ziel
+
+Die drei Turbo-Codecs in das Interface aus Plan 03 einhängen.
+
+**Der Vergleichsmaßstab hat sich durch das Paper verschoben.** Turbo tritt nicht
+mehr gegen f32 an, sondern gegen `native` (fp8+bf16, 583 B) — das ist der
+verlustfreie Stand nach Plan 03. Die ehrliche Rechnung:
+
+| | Zeile @512 | vs f32 | vs `native` | verlustfrei |
+|---|---|---|---|---|
+| f32 (vor Plan 03) | 2048 B | 1× | — | — |
+| `native` | 583 B | 3.5× | 1× | **ja** |
+| turbo4 | 264 B | 7.8× | 2.2× | nein |
+| turbo3 | 200 B | 10.2× | **2.9×** | nein |
+| turbo2 | 136 B | 15.1× | 4.3× | nein |
+
+Turbo holt also noch einmal einen Faktor ~3 heraus — real, aber nicht mehr die
+Größenordnung, die es vor Plan 03 zu sein schien. Das ändert nichts an der
+Umsetzung, wohl aber an der Erwartung: **wenn Plan 03 fertig ist und das
+VRAM-Budget schließt, ist Plan 04 optional.**
+
+Wo er sich klar lohnt: bei 1M Kontext (3.4 → 1.3 GiB Cache, 100 → 34 MB/Token
+Lesebandbreite) und für den Indexer-Cache, dessen `index_head_dim = 128` genau
+eine Turbo-Gruppe ist.
+
+## Die zusätzliche Unsicherheit
+
+Nach Plan 03 sind die zu quantisierenden Werte **bereits fp8-quantisiert** —
+`bf16_round(e4m3_decode(q) · scale)`, also Werte auf einem groben, ungleichmäßigen
+Gitter statt einer kontinuierlichen Verteilung. Die Fork-Referenzwerte (turbo3
+Cosine ≈ 1.0, turbo4 ≈ 0.9956) wurden auf **kontinuierlichen** Daten gemessen.
+
+Die WHT-Rotation sollte das Gitter wieder in Richtung Gauß verschmieren — genau
+dafür ist sie da, und dass DeepSeek für den Indexer selbst Hadamard-vor-FP4 wählt,
+spricht dafür. Aber es ist eine Annahme, keine Messung.
+
+**Deshalb misst der Codec-Test beides:** Round-trip auf kontinuierlichen Daten
+(vergleichbar mit dem Fork) und auf fp8-vorquantisierten Daten (der reale Fall).
+Fällt Zweiteres deutlich ab, ist das ein Ergebnis und turbo bleibt für die
+Hauptzeilen aus.
+
+## Quelle und Umfang
+
+`reference/llama-cpp-turboquant/ggml/src/ggml-turbo-quant.c` (1030 Zeilen, MIT).
+Zu portieren sind ~200 davon. Neuer Header `c/turbo_quant.h` mit Attribution im
+Kopfkommentar (arXiv 2504.19874, llama.cpp-Fork, MIT → Apache-2.0).
+
+**`reference/` wird nicht committet.** Vor dem ersten Commit prüfen, dass es in
+`.gitignore` steht oder nie gestaget wird.
+
+### Was übernommen wird
+
+| Element | Referenz | Anmerkung |
+|---|---|---|
+| `turbo_cpu_s1[128]`, `turbo_cpu_s2[128]` | `:203`, `:210` | ±1-Vorzeichentabellen, seed 42 |
+| `turbo_cpu_fwht` | `:219` | vorwärts, in-place |
+| `turbo_cpu_fwht_inverse` | `:245` | s1/s2 getauscht |
+| `CENTROIDS_2BIT[4]` | `:38` | |
+| `CENTROIDS_3BIT[8]` | `:41` | |
+| `CENTROIDS_4BIT[16]` | `:494` | steht dort **im Funktionskörper**, herausziehen |
+| `nearest_centroid_2/3/4bit` | `:163`, `:171`, `:183` | Midpoint-Vergleichsketten |
+| Quantisierungsablauf | `:277`–`:340` | Norm → normalisieren → WHT → runden → korrigierte Norm |
+
+### Was ausdrücklich **nicht** übernommen wird
+
+`turbo_init_rotation` (`:69`), `turbo_init_qjl` (`:128`), `matvec` (`:149`),
+`turbo_prng_*`, und die beiden statischen `float[128*128]`-Matrizen.
+
+Grund: bei `TURBO4_USE_4BIT=1` — dem Default (`ggml-common.h:312`) — ist turbo4
+reines 4-bit-PolarQuant. Der QJL-Zweig ist toter Code. Die Referenz selbst notiert,
+dass die 64 KB-Stack-Variante dort mal Stack-Overflows verursacht hat; wir erben
+das Problem gar nicht erst.
+
+## Blocklayout
+
+Unverändert zur Referenz, damit die Qualitätszahlen vergleichbar bleiben
+(`ggml-common.h:296–354`; die Byte-Kommentare dort sind veraltet, die
+`static_assert`s stimmen):
+
+```c
+#define COLI_TQ_GROUP 128
+
+typedef struct { uint16_t norm; uint8_t qs[32]; }                  ColiTurbo2Block; /* 34 B */
+typedef struct { uint16_t norm; uint8_t qs[32]; uint8_t signs[16]; } ColiTurbo3Block; /* 50 B */
+typedef struct { uint16_t norm; uint8_t qs[64]; }                  ColiTurbo4Block; /* 66 B */
+```
+
+`norm` ist fp16. Das Repo hat keinen fp16-Helfer in `native_quant.h` (nur bf16) —
+also entweder `_Float16` wo verfügbar oder eine kleine `coli_fp16_encode/decode`
+im selben Header, getestet gegen Round-trip.
+
+turbo3 packt die unteren 2 Bit des 3-Bit-Index in `qs` (4 pro Byte) und Bit 2 in
+`signs` (8 pro Byte) — nicht offensichtlich, aber die CUDA-Kernel aus Plan 05
+erwarten genau das.
+
+## Der Kern
+
+Pro 128er-Gruppe:
+
+```c
+/* 1 */ float norm_sq = Σ x[j]²;  float grp_norm = sqrtf(norm_sq);
+/* 2 */ buf[j] = x[j] / grp_norm;
+/* 3 */ turbo_cpu_fwht(buf, 128);
+/* 4 */ idx[j] = nearest_centroid_Nbit(buf[j]);  recon_sq += C[idx[j]]²;
+/* 5 */ corrected = grp_norm / sqrtf(recon_sq);   blk->norm = fp16(corrected);
+```
+
+Schritt 5 ist der Teil, den man leicht übersieht: gespeichert wird **nicht**
+`grp_norm`, sondern die um die Rekonstruktionsenergie korrigierte Norm. Ohne das
+ist die dequantisierte Zeile systematisch zu kurz.
+
+`inv_sqrt` in `turbo_cpu_fwht` ist `1/√128 = 0.08838834764831845f` für
+`group_size=128`.
+
+## Integration in Plan 03
+
+`head_dim = 512` → **vier** Gruppen pro Zeile, vier fp16-Normen:
+
+```c
+size_t coli_v4_kv_row_bytes(ColiV4KVCodec codec, int head_dim) {
+    if (codec >= COLI_V4_KV_TURBO4) {
+        if (head_dim % COLI_TQ_GROUP) return 0;      /* nicht darstellbar */
+        int groups = head_dim / COLI_TQ_GROUP;
+        switch (codec) {
+            case COLI_V4_KV_TURBO4: return groups * sizeof(ColiTurbo4Block);
+            case COLI_V4_KV_TURBO3: return groups * sizeof(ColiTurbo3Block);
+            case COLI_V4_KV_TURBO2: return groups * sizeof(ColiTurbo2Block);
+        }
+    }
+    ...
+}
+```
+
+**`head_dim % 128 != 0` gibt 0**, und `coli_v4_kv_codec_from_env` fällt mit einer
+Warnung auf f32 zurück. Das Tiny-Fixture hat `head_dim=32`
+([c/deepseek_v4_tiny/config.json:15](../c/deepseek_v4_tiny/config.json)) und
+`index_head_dim=32` — dort läuft also nie ein Turbo-Codec. Wichtig, weil die
+Zentroide auf `N(0, 1/√128)` kalibriert sind: mit 32er-Gruppen wären sie um
+`√(128/32) = 2` daneben. Stiller Fallback wäre schlimmer als kein Fallback,
+deshalb die Warnung.
+
+Beim echten Modell passt dagegen **beides**: `head_dim=512 = 4×128` und
+`index_head_dim=128 = 1×128`.
+
+`coli_v4_kv_dot` dequantisiert gruppenweise in einen 128er-Stackpuffer und
+akkumuliert — kein Heap, keine ganze Zeile im Speicher.
+
+## RoPE-Schwanz
+
+Dims 448–511 sind der RoPE-rotierte Teil ([c/deepseek_v4.c:1652](../c/deepseek_v4.c)):
+
+```c
+float *kv_rope = kv + head_dim - rope_dim;      /* rope_dim = 64 */
+coli_v4_rope_apply(kv_rope, 1, rope_dim, cosines, sines, 0);
+```
+
+Gruppe 3 (Dims 384–511) mischt damit 64 nope- mit 64 rope-Dims, die
+unterschiedliche Statistik haben.
+
+**Das Paper trennt hier ausdrücklich** (2.3.4): bf16 für die RoPE-Dimensionen, fp8
+für den Rest. Die Trennung ist also nicht meine Idee, sondern die des Modells — und
+sie ist nach Plan 03 ohnehin schon im `native`-Codec umgesetzt. Für turbo heißt das:
+die Variante mit bf16-RoPE-Tail ist die **erwartungskonforme**, die gleichförmige
+die experimentelle.
+
+Problem: `448 = 3.5 × 128` ist kein Vielfaches der Rotationsgruppe. Drei Optionen:
+
+| Variante | Layout | Bytes | Anmerkung |
+|---|---|---|---|
+| gleichförmig | 4 × turbo3(128) | 200 | mischt nope/rope in Gruppe 3 |
+| **bf16-Tail** | 3 × turbo3(128) + 64 × bf16 | **278** | Dims 384–447 fallen unter den Tisch |
+| Tail + Rest-fp8 | 3 × turbo3(128) + 64 fp8+1 scale + 64 bf16 | 343 | vollständig, paperkonform |
+
+Die mittlere Zeile stimmt nur, wenn man Dims 384–447 mitquantisiert — 448 teilt
+sich nicht in 128er-Gruppen. Sauber ist entweder die erste (alles turbo) oder die
+dritte (turbo für 0–383, `native`-fp8 für 384–447, bf16 für 448–511).
+
+**Erst die gleichförmige Variante bauen und messen**, dann entscheiden. Wenn der
+Qualitätsunterschied klein ist, gewinnt sie durch Einfachheit; wenn nicht, ist die
+dritte Variante die richtige und `V4_KV_ROPE_BF16=1` schaltet sie.
+
+Nicht vorab entscheiden — die Zahl entscheidet.
+
+## Optional: rotierter Score-Raum
+
+*Zweiter Commit, hinter `V4_KV_ROTATED=1`.*
+
+Die WHT ist orthogonal, also `<Rq, Rk> = <q, k>`. Statt jede gelesene Zeile
+zurückzudrehen:
+
+1. Q einmal pro Token und Head vorwärts-WHT (`heads × head_dim/128` Transformationen).
+2. `coli_v4_kv_dot` arbeitet direkt auf den rotierten Zentroidwerten — **keine**
+   inverse WHT pro Zeile.
+3. `coli_v4_kv_accumulate` akkumuliert im rotierten Raum.
+4. **Eine** inverse WHT auf `head_output`, *danach* `coli_bf16_round`, *danach* das
+   RoPE-Inverse ([:1720](../c/deepseek_v4.c)).
+
+Die Reihenfolge in 4 ist zwingend: `coli_v4_rope_apply(..., 1)` adressiert konkrete
+Dimensionen und braucht den Originalraum.
+
+Kosten fallen von O(topk) auf O(heads). Bei `topk` = 2048 und 64 Heads ist das
+Faktor 32 weniger WHT-Arbeit.
+
+Korrektheit folgt aus der Linearität: `Σpᵢ·R·vᵢ = R·(Σpᵢ·vᵢ)`. Nicht bit-identisch
+zum unrotierten Pfad, weil `coli_bf16_round` in einem anderen Raum landet — also
+Toleranz gegen Commit 1.
+
+## Tests
+
+`c/tests/test_v4_turbo_quant.c`, neue Make-Regel:
+
+- **WHT-Orthogonalität**: `‖fwht(x)‖ == ‖x‖` und `<fwht(x), fwht(y)> == <x, y>`
+  für Zufalls-`x`, `y`, Toleranz `1e-5` relativ. Das ist die Eigenschaft, auf der
+  der rotierte Score-Raum steht.
+- **Selbstinversität**: `fwht_inverse(fwht(x)) == x` innerhalb `1e-6`.
+- **Round-trip je Codec** auf `N(0,1)`-Vektoren, `head_dim=512`:
+  Referenzwerte aus dem Fork — turbo3 Cosine ≈ 1.0, turbo4 ≈ 0.9956. turbo2
+  entsprechend niedriger; Ist-Wert messen und als Schranke festschreiben.
+- **Normerhaltung**: `‖decode(encode(x))‖ / ‖x‖` ∈ [0.98, 1.02] — fängt einen
+  vergessenen Schritt 5.
+- **fp16-Round-trip** für die Norm, inkl. sehr kleiner und sehr großer Werte.
+- **Packing**: turbo3 `qs`/`signs` bitweise gegen eine unabhängige Referenz-
+  implementierung im Test, nicht gegen sich selbst.
+- **`head_dim % 128 != 0`** → `row_bytes == 0`, `from_env` fällt zurück und warnt.
+- Für den rotierten Pfad: gegen den unrotierten, Cosine `> 0.9999`.
+
+Dazu die Gates aus Plan 03 mit `V4_KV=turbo2|turbo3|turbo4` — am Tiny-Fixture
+greift der f32-Fallback, das ist der Punkt: der Test belegt, dass er greift.
+
+## Abnahme
+
+- Alle Round-trip-Zahlen innerhalb der Fork-Referenzwerte.
+- `V4_KV=turbo3` am Tiny-Fixture: Warnung auf stderr, f32-Fallback, token-identisch.
+- `ram_tiers` zeigt bei simuliertem `head_dim=512` (Unit-Test auf
+  `context_bytes`) den 10.2×-Effekt auf den KV-Anteil.
+- `reference/` ist nicht im Commit.
+
+## Risiken
+
+- **Zentroide sind an 128 gebunden.** Wer später eine 512-Punkt-WHT will, muss die
+  Tabellen um `√(128/512)` skalieren. Als Kommentar an die Tabellen schreiben.
+- **Die korrigierte Norm** ist der klassische Portierungsfehler. Der
+  Normerhaltungstest ist genau dafür da.
+- **turbo3-Packing** ist unintuitiv (2 Bit in `qs`, 1 Bit in `signs`). Ein Fehler
+  dort fällt im Cosine-Test möglicherweise **nicht** auf, weil die Zentroide
+  symmetrisch sind — deshalb der explizite Bit-Test.
+- **turbo2 könnte zu grob sein.** 2.125 bpw ist aggressiv; wenn die Token-Rate am
+  echten Modell einbricht, ist das ein Ergebnis, kein Fehler. Messen, dokumentieren,
+  nicht als Default anbieten.
+- **`_Float16`-Verfügbarkeit** variiert über die unterstützten Targets
+  (x86-64 und aarch64, gcc). Wenn nicht verfügbar: eigene Bit-Manipulation, wie
+  `coli_e4m3fn_encode` ([c/deepseek_v4.c:9999](../c/deepseek_v4.c)) es für fp8 vormacht.
