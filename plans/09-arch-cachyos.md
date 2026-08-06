@@ -72,7 +72,81 @@ coli_omp_tune_threads("deepseek_v4");   /* Team auf physische Kerne: siehe omp_t
 `c/Makefile.deepseek-v4` bekommt `omp_tune.h` in die Header-Abhängigkeiten,
 analog zu `c/Makefile:685` für olmoe.
 
-### Warum das sicher ist
+### Aber: der i5-13400F ist eine Hybrid-CPU
+
+**Und genau dafür ist die Linux-Erkennung blind.**
+
+Der i5-13400F hat **6 P-Cores (Golden Cove, bis 4.6 GHz) + 4 E-Cores (Gracemont,
+bis 3.3 GHz)**, 16 logische Threads. Die Linux-Zählung in `coli_physical_cores`
+([c/omp_tune.h:68](../c/omp_tune.h)) zählt eindeutige `thread_siblings_list`-Einträge:
+
+```
+6 P-Cores × je 2 Siblings  → 6 eindeutige Listen
+4 E-Cores × je 1 Sibling   → 4 eindeutige Listen
+                             = 10
+```
+
+Also ein Team aus **10 Threads über zwei ungleiche Kernklassen**. Und V4 nutzt in
+den heißen Schleifen `schedule(static)` — `head_argmax`
+([c/deepseek_v4.c:6795](../c/deepseek_v4.c)), die fp8-Matmuls
+([:10228](../c/deepseek_v4.c), [:10356](../c/deepseek_v4.c),
+[:10451](../c/deepseek_v4.c)). Statische Aufteilung über ungleiche Kerne heißt:
+**die E-Cores geben das Tempo vor.**
+
+Der Header kennt das Problem — und löst es nur für macOS
+([c/omp_tune.h:53](../c/omp_tune.h)):
+
+> *`hw.perflevel0.logicalcpu` = die PERFORMANCE-Kerne. Auf Apple Silicon zählt
+> `hw.physicalcpu` alle, E-Cores eingeschlossen (10 auf einem M1 Max), und mit
+> einer Barriere für Matmul gibt der langsamste Thread den Takt an: die E-Cores
+> bremsen das Team, statt ihm zu helfen (#707, **−4.2 % Decode**).*
+
+Dieselbe Messung, dieselbe Topologie — nur auf Intel-Hybrid nie umgesetzt, weil es
+die zur Entstehungszeit kaum gab.
+
+Grobe Abschätzung mit E ≈ 0.45 × P (Gracemont hat 2×128-bit FMA gegen 2×256-bit
+bei Golden Cove, plus niedrigeren Takt):
+
+| Konfiguration | effektive P-Äquivalente |
+|---|---|
+| `schedule(static)`, 10 Threads | ~4.5 (alle warten auf die E-Cores) |
+| nur P-Cores, 6 Threads | ~6.0 |
+| `schedule(dynamic/guided)`, 10 Threads | ~7.8 |
+
+**Änderung, als Commit 1b:** Linux-Erkennung um Hybrid-Bewusstsein erweitern. Moderne
+Kernel exportieren die Kernklassen direkt:
+
+```
+/sys/devices/system/cpu/types/intel_core_*/cpumap    → P-Cores
+/sys/devices/system/cpu/types/intel_atom_*/cpumap    → E-Cores
+```
+
+Existiert `intel_core_*`, sind das die Performance-Kerne — genau die Entsprechung
+zu `hw.perflevel0.logicalcpu`. Fehlt das Verzeichnis (ältere Kernel), bleibt es
+bei der heutigen Zählung; die Regel des Headers gilt weiter: **nicht raten, dann
+lieber den OpenMP-Default lassen.**
+
+Knopf dafür:
+
+```
+V4_OMP_CORES=perf|all|<n>     Default: perf, wenn erkennbar; sonst all
+```
+
+**Beides messen**, bevor eines Default wird — die Tabelle oben ist eine
+Abschätzung, keine Messung. Der Benchmark-Harness aus
+[01](01-measure-and-ram-budget.md) ist genau dafür da. Möglich ist auch, dass
+`schedule(guided)` über alle 10 besser abschneidet als 6 P-Cores; dann ist die
+richtige Änderung eine andere (Scheduling statt Teamgröße), und das ist ein
+Ergebnis, kein Rückschlag.
+
+**Nebeneffekt, der zum I/O-Profil passt:** Bleibt das OpenMP-Team auf den P-Cores,
+stehen die E-Cores dem Expert-Loader-Pool zur Verfügung. Der Header warnt
+ausdrücklich davor, dass ein leerlaufendes Rechenteam den I/O-Threads die Kerne
+klaut (#707, −2.2×) — auf einer Hybrid-CPU lässt sich beides sauber trennen.
+`GOMP_CPU_AFFINITY` bzw. `OMP_PLACES` sind die Werkzeuge; auch das gehört gemessen,
+nicht angenommen.
+
+### Warum das sichere Teil sicher ist
 
 Der Header trennt bewusst zwei Dinge mit **entgegengesetztem Risikoprofil** und
 implementiert nur das ungefährliche:

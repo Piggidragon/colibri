@@ -10,8 +10,9 @@ Maschine so gut wie möglich fahren.
 
 | | |
 |---|---|
-| RAM | 32 GB |
-| GPU | RTX 4070, 12 GB VRAM |
+| CPU | Intel **i5-13400F** — 6 P + 4 E Cores, 16 Threads, kein AVX-512 |
+| RAM | 32 GB, Dual-Channel |
+| GPU | RTX 4070, 12 GB — treibt auch das Display (F-CPU, keine iGPU) |
 | Laufwerk A | 1 TB NVMe Gen4, DRAM-los (HMB) |
 | Laufwerk B | 512 GB SSD Gen3, DRAM-los (HMB) |
 | OS | CachyOS (Arch-Familie) |
@@ -75,7 +76,7 @@ Die Nummern sind Kennungen, keine Reihenfolge. So wird gearbeitet:
 | Schritt | Plan | Warum hier |
 |---|---|---|
 | 1 | **01** | Der Benchmark-Harness ist der Maßstab für alles Weitere. Baseline auf `main` aufnehmen, **bevor** irgendetwas geändert wird. Die RAM-Knöpfe fallen nebenbei ab. |
-| 2 | **09 Commit 1** | `omp_tune.h`, drei Zeilen, gemessen +2.3× auf Zen3. Nichts sonst hat dieses Verhältnis. |
+| 2 | **09 Commit 1+1b** | `omp_tune.h` verdrahten (drei Zeilen), **plus** Hybrid-Bewusstsein: die Linux-Zählung sieht 6 P- und 4 E-Cores als „10 gleiche" und lässt die E-Cores in `schedule(static)` das Tempo vorgeben. |
 | 3 | **03** | Nativer KV-Codec: 3.5× / 7.5×, bit-exakt. Macht das VRAM-Budget der späteren Phasen erst schließbar. |
 | 4 | **12** | Trefferquote schlägt Durchsatz. Bei ~20 % Residenz ist das der größte verbleibende Hebel — und er braucht 01 als Messgrundlage. |
 | 5 | **02** | Flash-Attention. Eigener Gewinn, und Voraussetzung für 05. |
@@ -126,6 +127,8 @@ phase-08-vram-planner
 phase-09-arch-cachyos
 phase-10-dual-streaming
 phase-11-strip-to-v4
+phase-12-expert-cache
+phase-13-frontend
 ```
 
 - Branch von `main`, außer der Plan hängt an einem anderen — dann von dessen
@@ -246,6 +249,11 @@ Agent nichts wieder.
   komprimierten Cache und dominieren die Bandbreite bei langem Kontext.
 - **DFlash ≠ DeepSeek-V4-Flash.** In llama.cpp ist `dflash` eine Drafter-Arch;
   das 284B-Modell heißt dort `deepseek4`.
+- **`coli_physical_cores()` ist auf Linux hybrid-blind.** Es zählt eindeutige
+  `thread_siblings_list`-Einträge und liefert auf dem i5-13400F **10** — 6 P- plus
+  4 E-Cores, als wären sie gleich. Der macOS-Zweig löst genau das
+  ([c/omp_tune.h:53](c/omp_tune.h), gemessen −4.2 % Decode auf M1 Max), der
+  Linux-Zweig nicht. Siehe Plan 09.
 - **Kein separater DSpark-Download.** Der Drafter liegt im Hauptcheckpoint unter
   `mtp.<stage>.`. Wer nach einem eigenen DSpark-Repo sucht, sucht falsch.
 - **MTP-Tiefe 1, aber drei DSpark-Stufen.** Das Paper nennt

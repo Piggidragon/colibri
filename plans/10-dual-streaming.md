@@ -202,6 +202,22 @@ bewusste Entscheidung festhalten, nicht als Zufall.
   oder mit vollem SLC-Cache misst niedriger, als es im Betrieb liefert. Deshalb
   bleibt `COLI_DISK_WEIGHTS` als manueller Override — für dieses Setup ist `2,1`
   eine vernünftige feste Vorgabe.
+- **Der Probe misst die Laufwerke einzeln, benutzt werden sie gleichzeitig.**
+  `mirror_probe_bw` läuft pro Replik nacheinander ([c/colibri.c:7941](../c/colibri.c)).
+  Auf dem i5-13400F hängen die beiden Laufwerke fast sicher an verschiedenen
+  Anbindungen: 16 PCIe-5.0- plus 4 PCIe-4.0-Lanes kommen von der CPU (die x16
+  gehen an die GPU, die x4 an einen M.2-Steckplatz), weitere M.2-Plätze hängen am
+  Chipsatz und teilen sich dessen DMI-Uplink mit USB, SATA und Netzwerk.
+  DMI 4.0 ×8 (B760/H770/Z790) reicht mit ~15.8 GB/s für ein Gen3-Laufwerk locker,
+  DMI ×4 (H610) mit ~7.9 GB/s ebenfalls — aber die Summe zweier einzeln gemessener
+  Werte kann den **gleichzeitigen** Durchsatz überschätzen, und dann sind die
+  Gewichte falsch.
+  **Deshalb zusätzlich parallel messen** (beide Repliken gleichzeitig lesen) und
+  die Gewichte daraus ableiten. Weicht die parallele Summe deutlich von der
+  sequentiellen ab, teilen sich die Laufwerke einen Flaschenhals — das gehört ins
+  Tuning-Doc, weil es auch die Erwartung an das Striping ändert.
+  Zum Nachsehen, welches Laufwerk woran hängt:
+  `lspci -tv | grep -i nvme` und `ls -l /sys/block/nvme*n1/device`.
 - **Page-Cache-Doppelung** im gepufferten Modus, falls das deterministische
   Routing bricht. `DIRECT=1` umgeht das; die V4-Entsprechung ist
   `COLI_V4_DIRECT` ([:112](../c/deepseek_v4.c)). Im Profil setzen.

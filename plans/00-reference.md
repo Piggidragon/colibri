@@ -15,8 +15,9 @@ DSpark-Drafter auf genau dieser Maschine so gut wie möglich fahren**:
 
 | | |
 |---|---|
-| RAM | 32 GB |
-| GPU | RTX 4070, 12 GB |
+| CPU | Intel **i5-13400F** — 6 P-Cores + 4 E-Cores, 16 Threads, **kein AVX-512**, **keine iGPU** |
+| RAM | 32 GB, Dual-Channel |
+| GPU | RTX 4070, 12 GB — **treibt auch das Display** (F-CPU hat keine iGPU) |
 | Laufwerk A | 1 TB NVMe **Gen4**, DRAM-los (HMB) |
 | Laufwerk B | 512 GB SSD **Gen3**, DRAM-los (HMB) |
 | OS | CachyOS (Arch-Familie), **Linux x86-64 only** |

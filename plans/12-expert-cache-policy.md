@@ -135,11 +135,11 @@ Damit sie nicht vergessen, aber auch nicht ungeprüft eingebaut werden:
   hyper-connection ops`). colibri rechnet 20 Sinkhorn-Iterationen pro Layer und
   Token ([c/deepseek_v4.c:3057](../c/deepseek_v4.c) ff.). 43 × 20 pro Token ist
   nicht nichts. **Erst messen, ob es im Profil auftaucht.**
-- **AVX-512.** V4s heiße Kernel sind AVX2-Intrinsics; nur `rans.h` hat
-  AVX-512-Pfade. Auf Zen 4/5 läge da Faktor ~1.5 auf den fp8-Matmuls. `ARCH=native`
-  gibt dem Compiler AVX-512 für Autovektorisierung, aber die handgeschriebenen
-  AVX2-Pfade verbreitern sich nicht von selbst. **Lohnt nur, wenn die CPU es kann —
-  vorher `lscpu | grep avx512` prüfen.**
+- ~~**AVX-512**~~ — **erledigt, entfällt.** Der i5-13400F (Raptor Lake) hat kein
+  AVX-512; Intel hat es auf den Consumer-Hybrid-Chips deaktiviert, und die
+  Gracemont-E-Cores hatten es nie. Die vorhandenen AVX2-Pfade sind das Maximum.
+  `ARCH=native` bleibt richtig (gibt AVX2+FMA+BMI2), bringt hier aber nichts
+  darüber hinaus.
 - **io_uring.** Siehe [09-arch-cachyos.md](09-arch-cachyos.md). Nach Plan 10
   messen, dann entscheiden.
 
