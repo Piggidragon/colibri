@@ -122,6 +122,38 @@ Bei geschätzt 14 ratio-4- und 14 ratio-128-Layern sind das ~9.2 KB/Token f32.
 Ohne Checkpoint ersatzweise die Ist-Zeile des Planners aufnehmen — sie genügt für
 den Vorher/Nachher-Vergleich der Hebel 1 und 2.
 
+## Der Benchmark-Harness — wichtiger als die zwei Hebel
+
+**Ohne ihn ist „hyper-optimiert" nicht überprüfbar.** Jeder folgende Plan hat
+Abnahmekriterien mit Zahlen; ohne einen festen Messaufbau sind das Meinungen.
+
+`c/tools/bench_v4.py`, ein Lauf, eine Zeile Ausgabe:
+
+```
+bench_v4 rev=<sha> profile=<name> ctx=32768
+  prefill 3.2 tok/s | decode 1.41 tok/s | ttft 24.6 s
+  expert hit 18.3% | disk 2.41 GB/token | ram_cache 15.4 GiB slots 27
+  kv 1.68 GiB | vram —  | omp_threads 16
+```
+
+Anforderungen, damit die Zahlen über Wochen vergleichbar bleiben:
+
+- **Fester Promptsatz**, im Repo, nicht generiert. Drei Längen (kurz ~500 Token,
+  mittel ~8k, lang ~64k), damit Prefill- und Decode-Regime getrennt sichtbar sind.
+- **Feste Seeds**, greedy, keine Sampling-Varianz.
+- **Cache-Zustand explizit**: einmal kalt (`echo 3 > /proc/sys/vm/drop_caches`,
+  braucht root) und einmal warm. Ein warmer Lauf misst etwas anderes.
+- **Ausgabe als JSON-Zeile** nach `bench/<datum>-<sha>.jsonl`, damit sich eine
+  Reihe ergibt statt einzelner Screenshots.
+- **Immer mit ausgeben, was gesetzt war** — alle `V4_*`-Knöpfe, sonst ist die
+  Zeile in zwei Wochen wertlos.
+
+Die Trefferquote ist die wichtigste Zahl darin. Sie kommt aus dem Expert-Store;
+falls sie noch nicht exportiert wird, ist das der erste Commit dieses Plans.
+
+**Baseline auf `main` aufnehmen, bevor irgendetwas geändert wird.** Das ist die
+Zahl, gegen die alle elf Pläne antreten.
+
 ## Deliverable
 
 `docs/deepseek-v4-tuning-32gb.md` mit:

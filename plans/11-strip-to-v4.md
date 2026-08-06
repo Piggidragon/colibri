@@ -84,6 +84,31 @@ Tests unter `c/tests/`, ihre Tools unter `c/tools/` (`convert_glm*`,
 nicht ersetzen — sonst verliert man die Gate-Ableitung und die
 Plattform-Fallunterscheidungen, die dort über Jahre gewachsen sind.
 
+## Commit 2b — Windows
+
+Zielplattform ist **Linux, x86-64**. Alles Windows-Spezifische ist toter Code:
+
+| Weg | Wo |
+|---|---|
+| `c/build_cuda.bat`, `c/warmup.ps1` | Windows-Build- und Warmup-Skripte |
+| `c/tests/audit_win_shims.c` | testet nur die Shims |
+| `c/backend_loader.c` | die DLL-Ladepfad-Konstruktion (`LoadLibrary`/`GetProcAddress`) |
+| `_WIN32`-Zweige | `compat.h`, `st.h`, `omp_tune.h`, `telemetry.h`, `iobench.c`, `deepseek_v4.c`, `backend_cuda.h` |
+| `Makefile`-Zweige | `IS_WIN`, `EXE`, MSYS2-Pfade in `Makefile.deepseek-v4` |
+
+`compat.h` ist dabei die heikelste Datei: sie bildet `posix_memalign`,
+`compat_aligned_free`, `compat_open_direct` und einiges mehr auf Windows ab.
+Nach dem Rückbau bleiben die POSIX-Definitionen — aber **`compat_aligned_free`
+muss bleiben**, auch wenn es unter POSIX nur `free()` ist. Der Kommentar bei
+[c/deepseek_v4.c:5341](../c/deepseek_v4.c) erinnert daran, dass genau diese
+Asymmetrie schon einmal einen Bug produziert hat (`63a2c8d`). Ein
+Suchen-und-Ersetzen von `compat_aligned_free` → `free` ist die naheliegende und
+falsche Vereinfachung.
+
+`Makefile.deepseek-v4` verliert die `IS_WIN`-Verzweigung und den `-static`-Link,
+`$(EXE)` wird leer. Auch die `COLI_V4_SUPPORTED`-Gates in `c/Makefile:340` können
+auf Linux-x86-64 zusammenschrumpfen — aber erst prüfen, ob `TEST_BINS` daran hängt.
+
 ## Commit 3 — Backends und Helfer
 
 Kandidaten, jeweils **erst gegen die Hülle aus Commit 1 prüfen**:
@@ -105,6 +130,21 @@ sähe nach totem Code aus — aber Plan 09 nennt io_uring als den plausibel grö
 Storage-Gewinn nach den VRAM-Phasen, und bei ~20 % Residenz ist Storage die
 dominante Kostenstelle. Löschen hieße, sich diese Option zu nehmen. Wer es
 trotzdem tut, sollte es bewusst tun.
+
+## Was ausdrücklich bleibt
+
+Nicht löschen, auch wenn es nach Beiwerk aussieht:
+
+| Bleibt | Warum |
+|---|---|
+| `c/coli` | `chat`, `serve`, `web` — die tägliche Bedienung. Wird in [13](13-frontend-v4.md) auf V4 verschlankt, nicht entfernt. |
+| `c/openai_server.py` | trägt `coli serve` |
+| `web/` | das Dashboard |
+| `colibri/cli.py` | pip-Einstiegspunkt |
+| `c/uring.h` | siehe unten |
+| `compat.h` (POSIX-Teil) | `compat_aligned_free` ist keine Attrappe |
+
+`site/` und `desktop/` sind Ermessenssache — siehe [13](13-frontend-v4.md).
 
 ## Commit 4 — Dokumentation
 

@@ -16,10 +16,15 @@ Maschine so gut wie möglich fahren.
 | Laufwerk B | 512 GB SSD Gen3, DRAM-los (HMB) |
 | OS | CachyOS (Arch-Familie) |
 
-Die anderen Motoren des Upstreams (GLM-5.2, Inkling, Kimi K3, OLMoE) sind hier
-toter Code und werden am Ende entfernt. **Optimiere für diese Hardware**, nicht
-für Allgemeingültigkeit — aber ohne die Semantik des Modells zu ändern (siehe
-Regeln).
+**Zielplattform ist Linux x86-64.** Windows, macOS, Metal, Vulkan, HIP und die
+zugehörigen Shims sind toter Code (Rückbau in [Plan 11](plans/11-strip-to-v4.md)).
+Die anderen Motoren des Upstreams (GLM-5.2, Inkling, Kimi K3, OLMoE) ebenso.
+
+**Was bleibt:** `coli chat`, `coli serve`, `coli web` samt `openai_server.py` und
+der WebUI — das ist die tägliche Bedienung, siehe [Plan 13](plans/13-frontend-v4.md).
+
+**Optimiere für diese Hardware**, nicht für Allgemeingültigkeit — aber ohne die
+Semantik des Modells zu ändern (siehe Regeln).
 
 **Ein** Checkpoint:
 [deepseek-ai/DeepSeek-V4-Flash-0731](https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash-0731).
@@ -55,22 +60,54 @@ und nicht wiederholen.
 | 09 | [Arch / CachyOS](plans/09-arch-cachyos.md) | offen |
 | 10 | [Dual-Streaming](plans/10-dual-streaming.md) | offen |
 | 11 | [Rückbau auf V4](plans/11-strip-to-v4.md) | offen, **zuletzt** |
+| 12 | [Expert-Cache-Politik](plans/12-expert-cache-policy.md) | offen |
+| 13 | [Frontend V4-only](plans/13-frontend-v4.md) | offen, optional |
 
 Referenzdokumente ohne Nummer:
 [Paper](plans/paper-deepseek-v4.md) ·
 [llama.cpp](plans/llamacpp-deepseek-v4.md) ·
 [DeepSpec/DSpark](plans/deepspec-dspark.md)
 
-**Reihenfolge.** Die Nummern sind keine strikte Kette, aber es gibt harte
-Abhängigkeiten:
+### Empfohlene Reihenfolge
 
-- **09 Commit 1** (`omp_tune.h`) direkt nach 01 — drei Zeilen, größter billiger Gewinn
-- **02 vor 05** — der Flash-Kernel ist die Vorlage für den CUDA-Kernel
+Die Nummern sind Kennungen, keine Reihenfolge. So wird gearbeitet:
+
+| Schritt | Plan | Warum hier |
+|---|---|---|
+| 1 | **01** | Der Benchmark-Harness ist der Maßstab für alles Weitere. Baseline auf `main` aufnehmen, **bevor** irgendetwas geändert wird. Die RAM-Knöpfe fallen nebenbei ab. |
+| 2 | **09 Commit 1** | `omp_tune.h`, drei Zeilen, gemessen +2.3× auf Zen3. Nichts sonst hat dieses Verhältnis. |
+| 3 | **03** | Nativer KV-Codec: 3.5× / 7.5×, bit-exakt. Macht das VRAM-Budget der späteren Phasen erst schließbar. |
+| 4 | **12** | Trefferquote schlägt Durchsatz. Bei ~20 % Residenz ist das der größte verbleibende Hebel — und er braucht 01 als Messgrundlage. |
+| 5 | **02** | Flash-Attention. Eigener Gewinn, und Voraussetzung für 05. |
+| 6 | **05** | CUDA-Attention. Commit 1 zieht die CUDA-Bauinfrastruktur ein, die 06 und 07 brauchen. |
+| 7 | **06** | Dense in VRAM — der größte RAM-Einzelposten. |
+| 8 | **07** | Head und DSpark in VRAM. |
+| 9 | **08** | VRAM-Planner, der 05–07 zu einer Entscheidung zusammenfasst. |
+| 10 | **10** | Dual-Streaming. Unabhängig, kann ab Schritt 2 jederzeit dazwischen. |
+| 11 | **09 Rest** | THP, CUDA-Pfade, Tuning-Doku. |
+| 12 | **04** | TurboQuant — **nur wenn** das VRAM-Budget nach 03 nicht schließt. |
+| 13 | **13** | Frontend. |
+| 14 | **11** | Rückbau. |
+
+**Harte Abhängigkeiten**, die man nicht umstellen darf:
+
+- **01 vor allem** — ohne Baseline ist keine Behauptung prüfbar
+- **02 vor 05** — der CPU-Flash-Kernel ist Vorlage und Testorakel für den CUDA-Kernel
 - **03 vor 04** — Turbo hängt am Codec-Interface
-- **10 vor 11** — 11 löscht den Code, den 10 als Vorlage braucht
+- **05 Commit 1 vor 06/07** — dort entsteht der CUDA-Build für V4
+- **13 vor 11** — sonst ist der Launcher zwischenzeitlich kaputt
+- **10 vor 11** — 11 löscht den Mirror-Code, den 10 als Vorlage braucht
 - **11 zuletzt**, immer
 
-Bei knapper Zeit: `01 → 09.1 → 03 → 06` hat den meisten Ertrag pro Aufwand.
+Bei knapper Zeit: `01 → 09.1 → 03 → 12 → 06` hat den meisten Ertrag pro Aufwand.
+Das ist zugleich die Reihenfolge, in der die Gewinne am wenigsten voneinander
+abhängen.
+
+**Warum 12 so weit vorne steht:** Ein Cache-Treffer kostet null Bytes von der
+Platte, ein Fehltreffer 12.6 MB — unabhängig davon, wie schnell das Laufwerk ist.
+Die Trefferquote zu heben schlägt jede Beschleunigung der Fehltreffer. Die
+Pläne 01–11 machten alle dasselbe (mehr RAM, schnellere Reads); keiner kümmerte
+sich darum, *was* im Cache liegt.
 
 ## Branch- und PR-Regeln
 

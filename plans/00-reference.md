@@ -1,10 +1,10 @@
 # 00 — Referenzplan: DeepSeek V4 auf 32 GB RAM + RTX 4070
 
 Übergeordnetes Dokument. Hier stehen Zielbild, Hardware-Budget, Codekarte und
-Konventionen; die Phasenpläne `01`–`08` setzen das voraus und wiederholen es nicht.
+Konventionen; die Phasenpläne `01`–`13` setzen das voraus und wiederholen es nicht.
 
-- Branch: `dev/v4-kv-codec`, von `main` (`8f512fc`), Fork `Piggidragon/colibri`
-- Experimenteller Branch, gestapelte Commits, direkt darauf arbeiten
+- Pläne auf Branch `planning`; jede Phase bekommt einen eigenen Branch und PR
+  (Schema und Reihenfolge in [AGENTS.md](../AGENTS.md))
 - Lizenz: Repo ist Apache-2.0, der TurboQuant-Referenz-Fork MIT → Attribution im
   portierten Header genügt. `reference/` selbst wird **nicht** committet.
 
@@ -19,7 +19,7 @@ DSpark-Drafter auf genau dieser Maschine so gut wie möglich fahren**:
 | GPU | RTX 4070, 12 GB |
 | Laufwerk A | 1 TB NVMe **Gen4**, DRAM-los (HMB) |
 | Laufwerk B | 512 GB SSD **Gen3**, DRAM-los (HMB) |
-| OS | CachyOS (Arch-Familie) |
+| OS | CachyOS (Arch-Familie), **Linux x86-64 only** |
 
 Beide Laufwerke fassen je eine vollständige Modellkopie (167 GB < 512 GB) —
 Grundlage für Dual-Streaming, siehe [10-dual-streaming.md](10-dual-streaming.md).
@@ -368,7 +368,9 @@ daraus automatisch Gates. Keine zentrale Liste, kein Merge-Konflikt.
 | 08 | [VRAM-Planner](08-vram-planner.md) | Stufenplanung, 4070-Profil | — | — |
 | 09 | [Arch / CachyOS](09-arch-cachyos.md) | `omp_tune.h`, THP, CUDA-Pfade | — | — |
 | 10 | [Dual-Streaming](10-dual-streaming.md) | Mirror-Maschinerie nach V4, gewichtete Stripes | — | — |
-| 11 | [Rückbau auf V4](11-strip-to-v4.md) | andere Motoren raus | — | — |
+| 11 | [Rückbau auf V4](11-strip-to-v4.md) | andere Motoren + Windows raus | — | — |
+| 12 | [Expert-Cache-Politik](12-expert-cache-policy.md) | Pin-Deckel, Indexer-Select, Prefill | — | — |
+| 13 | [Frontend V4-only](13-frontend-v4.md) | WebUI, CLI, Serve auf V4 | — | — |
 
 Referenzdokumente ohne Nummer: [paper-deepseek-v4.md](paper-deepseek-v4.md) (das
 Paper), [llamacpp-deepseek-v4.md](llamacpp-deepseek-v4.md) (die
