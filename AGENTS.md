@@ -12,7 +12,7 @@ Maschine so gut wie möglich fahren.
 |---|---|
 | CPU | Intel **i5-13400F** — 6 P + 4 E Cores, 16 Threads, kein AVX-512 |
 | RAM | 32 GB, Dual-Channel |
-| GPU | RTX 4070, 12 GB — treibt auch das Display (F-CPU, keine iGPU) |
+| GPU | RTX 4070, 12 GB — **headless im V4-Betrieb**, ~11.7 GiB nutzbar |
 | Laufwerk A | 1 TB NVMe Gen4, DRAM-los (HMB) |
 | Laufwerk B | 512 GB SSD Gen3, DRAM-los (HMB) |
 | OS | CachyOS (Arch-Familie) |
@@ -86,7 +86,7 @@ Die Nummern sind Kennungen, keine Reihenfolge. So wird gearbeitet:
 | 9 | **08** | VRAM-Planner, der 05–07 zu einer Entscheidung zusammenfasst. |
 | 10 | **10** | Dual-Streaming. Unabhängig, kann ab Schritt 2 jederzeit dazwischen. |
 | 11 | **09 Rest** | THP, CUDA-Pfade, Tuning-Doku. |
-| 12 | **04** | TurboQuant — **nur wenn** das VRAM-Budget nach 03 nicht schließt. |
+| 12 | **04** | TurboQuant — **Pflicht ab ~512k Kontext**, darunter optional (siehe VRAM-Budget in 00). |
 | 13 | **13** | Frontend. |
 | 14 | **11** | Rückbau. |
 

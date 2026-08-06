@@ -163,6 +163,44 @@ quantisiert den Indexer, der die Top-k-Auswahl trifft. Sie gehört nur ins Profi
 wenn die Messung aus Plan 04 zeigt, dass die Tokenfolge stabil bleibt. Sonst
 `f32` empfehlen und den Unterschied ausweisen.
 
+## Der OOM-Pfad muss geprobt werden, nicht angenommen
+
+Headless heißt: das VRAM-Budget ist **vorhersehbar**, nicht unbegrenzt. Der
+Planner rechnet mit einer Momentaufnahme aus `coli_cuda_mem_info`; zwischen
+Planung und dem letzten Upload kann trotzdem etwas schiefgehen — ein zweiter
+Prozess, ein zu optimistisch geschätzter Workspace, ein Kontext, der länger wird
+als geplant.
+
+**Zwei getrennte Pfade, beide müssen degradieren statt abzustürzen:**
+
+1. **Planungszeit** — das Budget reicht nicht. Der Planner stuft vorher zurück.
+   Das ist der einfache Fall und der Test dafür ist reine Arithmetik.
+2. **Laufzeit** — die Planung sagte VRAM, der Upload scheitert trotzdem
+   (`coli_cuda_tensor_upload_g` gibt 0, `v4_cuda_kv_alloc` gibt NULL). Dann muss
+   die betroffene Stufe **zur Laufzeit** auf RAM zurückfallen, einmal loggen und
+   weiterlaufen.
+
+Der zweite Pfad ist der, der in der Praxis zuschlägt, und der, den man ohne
+Absicht nie durchläuft. Deshalb braucht es einen Weg, ihn zu erzwingen:
+
+```
+V4_VRAM_LIMIT_MB=<n>    kappt das gemeldete freie VRAM künstlich
+V4_VRAM_FAIL_AT=<stufe> lässt den Upload dieser Stufe absichtlich scheitern
+                        (kv|dense|head|dspark), nur unter COLI_V4_TEST_HOOKS
+```
+
+`V4_VRAM_LIMIT_MB` ist auch ohne Test nützlich: damit lässt sich das Verhalten
+auf einer kleineren Karte durchspielen, ohne eine zu besitzen.
+`V4_VRAM_FAIL_AT` folgt dem Muster der vorhandenen Fehlerinjektion
+(`coli_v4_test_fail_expert_store_open`,
+[c/deepseek_v4_internal.h:716](../c/deepseek_v4_internal.h)) und ist in
+Produktionsobjekten nicht einkompiliert.
+
+**Abnahme dafür:** Für **jede** der vier Stufen einmal den Laufzeitfehler
+injizieren und belegen, dass der Lauf durchläuft und dieselben Tokens liefert wie
+ein reiner CPU-Lauf. Nicht nur „stürzt nicht ab" — dieselben Tokens. Ein
+Rückfall, der still falsch rechnet, ist schlimmer als ein Absturz.
+
 ## Tests
 
 - `c/tests/test_v4_vram_tier.c` — neue Make-Regel:
@@ -185,8 +223,10 @@ wenn die Messung aus Plan 04 zeigt, dass die Tokenfolge stabil bleibt. Sonst
 
 - Auf dem 4070 zeigt `vram_tiers` alle vier Posten als `vram` bei `used < 10 GiB`.
 - `ram_tiers` zeigt `target_cache ≈ 29 GiB` gegen ~15 GiB auf `main`.
-- Künstlich verkleinertes VRAM-Budget (`V4_VRAM_RESERVE_MB=8000`) degradiert
-  stufenweise statt zu scheitern.
+- Künstlich verkleinertes VRAM-Budget (`V4_VRAM_LIMIT_MB`) degradiert stufenweise
+  statt zu scheitern — durchgespielt für 8, 6, 4, 2 und 0 GiB.
+- **Laufzeit-OOM je Stufe injiziert** (`V4_VRAM_FAIL_AT=kv|dense|head|dspark`):
+  läuft durch und liefert **dieselben Tokens** wie der reine CPU-Lauf.
 - Ohne GPU im System läuft alles wie auf `main`.
 - Das dokumentierte Profil ist reproduzierbar — die Zahlen im Doc stammen aus einem
   echten Lauf, nicht aus dieser Planung.

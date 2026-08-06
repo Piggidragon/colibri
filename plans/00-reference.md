@@ -75,23 +75,40 @@ Semantik.
 die Slot-Zahlen. `expert_record_bytes` misst w1/w2/w3 + Scales von
 `layers.0.ffn.experts.0` ([:892](../c/deepseek_v4.c)).
 
-## VRAM-Budget (4070, ~11.2 GiB nutzbar mit Display)
+## VRAM-Budget (4070, **headless**)
+
+Die Maschine läuft im V4-Betrieb ohne Display — kein Compositor, keine
+Browser-Beschleunigung. `nvidia-smi` meldet für einen 4070 rund 12282 MiB gesamt;
+nach Treiberreserve bleiben **~11.7 GiB** nutzbar statt der ~11.2 GiB, die mit
+Display zu erwarten wären.
 
 ```
 dense fp8          6.27   Phase 6
 head bf16          1.06   Phase 7
 DSpark             1.25   Phase 7
-KV @128k turbo3    0.35   Phase 4/5   (f32 wären 1.18)
-Indexer-KV @128k   0.24   Phase 4     (f32; turbo3 → 0.02)
 workspace         ~0.30
                   ─────
-                   9.47 GiB, Rest ~1.7 GiB
+Fixkosten          8.88 GiB   → ~2.8 GiB bleiben für den KV
 ```
 
-Das schließt **nur mit komprimiertem KV**. Codec und VRAM-Residenz sind keine
-getrennten Features, sondern Voraussetzung füreinander. Der Planner aus Phase 8
-muss pro Stufe einzeln auf RAM zurückfallen können — ein zweiter Monitor frisst
-die Reserve.
+Der KV entscheidet damit die erreichbare Kontextlänge:
+
+| Kontext | KV f32 | KV `native` | KV turbo3 | passt mit |
+|---|---|---|---|---|
+| 128k | 1.68 | **0.43** | 0.16 | native (2.4 GiB Reserve) |
+| 256k | 3.4 | **0.86** | 0.33 | native |
+| 512k | 6.7 | **1.7** | 0.65 | native (1.1 GiB Reserve) |
+| 1M | 13.4 | 3.4 ✗ | **1.3** | **nur turbo3** |
+
+**Das ändert den Status von Phase 4.** `native` (Phase 3) trägt bis etwa 512k —
+für das volle Millionen-Token-Fenster, also das Kopfmerkmal des Modells, ist
+TurboQuant nicht optional, sondern Voraussetzung. Wer bei ≤512k bleibt, kann
+Phase 4 auslassen.
+
+Codec und VRAM-Residenz sind keine getrennten Features, sondern Voraussetzung
+füreinander. Der Planner aus Phase 8 muss trotzdem pro Stufe einzeln auf RAM
+zurückfallen können — headless heißt „vorhersehbar", nicht „unbegrenzt", und ein
+Fehlschlag beim Upload muss degradieren statt abzustürzen.
 
 ## Modellgeometrie
 
