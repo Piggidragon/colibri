@@ -103,6 +103,22 @@ in einem Plan und nicht zwei Pläne.
 
 ### Ausgangslage
 
+**DSpark ist Teil des Hauptcheckpoints, kein zweites Modell.** Die Drafter-Tensoren
+liegen unter `mtp.<stage>.` in
+[DeepSeek-V4-Flash-0731](https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash-0731)
+und werden aus `engine->target_index` gelesen — `mtp.0.main_proj.weight`,
+`mtp.2.markov_head.markov_w1.weight` und so weiter
+([c/deepseek_v4.c:6325](../c/deepseek_v4.c),
+[c/deepseek_v4_dspark.inc:243](../c/deepseek_v4_dspark.inc)).
+
+Kein zweiter Modellpfad, keine zweite Index-Instanz. Für Plan 10 (Dual-Streaming)
+heißt das: die DSpark-Tensoren liegen auf denselben Shards und profitieren
+automatisch vom Mirror-Routing.
+
+Nebenbei: das Paper nennt `num_nextn_predict_layers = 1`, der Drafter fährt aber
+drei Stufen (`V4_DSPARK_STAGES 3`, geprobt `mtp.0`–`mtp.2`). MTP-Tiefe und
+Drafter-Stufen sind verschiedene Dinge — kein Widerspruch, aber eine Stolperstelle.
+
 Reserve: `v4_dspark_full_reserve_bytes` ([c/deepseek_v4.c:6306](../c/deepseek_v4.c)):
 
 ```c

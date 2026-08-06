@@ -27,9 +27,14 @@ Inferenzzeit-Mechanik, die `c/deepseek_v4_dspark.inc` nachbildet; `modeling/` un
 `trainer/` sind Trainingscode.
 
 Vorsicht: die Configs unter `config/dspark/` sind für **Qwen3** und **Gemma4** als
-Ziel, nicht für DeepSeek-V4. Die Architekturparameter dort gelten nicht für
-`DeepSeek-V4-Flash-DSpark` — die stehen im Checkpoint. Der *Algorithmus* ist
-derselbe.
+Ziel, nicht für DeepSeek-V4. Die Architekturparameter dort gelten nicht für unseren
+Drafter. Der *Algorithmus* ist derselbe.
+
+**Wo der Drafter herkommt.** Nicht aus einem eigenen Repo — er liegt im
+Hauptcheckpoint [DeepSeek-V4-Flash-0731](https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash-0731)
+unter dem Präfix `mtp.<stage>.` und wird aus `engine->target_index` gelesen
+([c/deepseek_v4.c:6325](../c/deepseek_v4.c)). DeepSpec ist die Referenz für den
+*Algorithmus*, nicht die Bezugsquelle für Gewichte.
 
 ## Was `draft_ops.py` über den Algorithmus verrät
 

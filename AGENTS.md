@@ -21,8 +21,18 @@ toter Code und werden am Ende entfernt. **Optimiere für diese Hardware**, nicht
 für Allgemeingültigkeit — aber ohne die Semantik des Modells zu ändern (siehe
 Regeln).
 
-Modelle: [DeepSeek-V4-Flash-0731](https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash-0731),
-[DeepSeek-V4-Flash-DSpark](https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash-DSpark).
+**Ein** Checkpoint:
+[deepseek-ai/DeepSeek-V4-Flash-0731](https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash-0731).
+
+```bash
+hf download deepseek-ai/DeepSeek-V4-Flash-0731 --local-dir /pfad/DeepSeek-V4-Flash
+```
+
+**DSpark steckt darin.** Die Drafter-Tensoren liegen im selben Checkpoint unter dem
+Präfix `mtp.<stage>.` — colibri sucht sie in `engine->target_index`, nicht in einem
+zweiten Modellverzeichnis
+([c/deepseek_v4.c:6325](c/deepseek_v4.c), [c/deepseek_v4_dspark.inc:243](c/deepseek_v4_dspark.inc)).
+Es gibt kein separates DSpark-Repo zu laden; ein solcher Link führt nur in die Irre.
 
 ## Die Pläne
 
@@ -199,3 +209,9 @@ Agent nichts wieder.
   komprimierten Cache und dominieren die Bandbreite bei langem Kontext.
 - **DFlash ≠ DeepSeek-V4-Flash.** In llama.cpp ist `dflash` eine Drafter-Arch;
   das 284B-Modell heißt dort `deepseek4`.
+- **Kein separater DSpark-Download.** Der Drafter liegt im Hauptcheckpoint unter
+  `mtp.<stage>.`. Wer nach einem eigenen DSpark-Repo sucht, sucht falsch.
+- **MTP-Tiefe 1, aber drei DSpark-Stufen.** Das Paper nennt
+  `num_nextn_predict_layers = 1`; der Drafter fährt trotzdem drei Stufen
+  (`V4_DSPARK_STAGES 3`, geprobt werden `mtp.0` bis `mtp.2`). Kein Widerspruch —
+  MTP-Tiefe und Drafter-Stufen sind verschiedene Dinge.

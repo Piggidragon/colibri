@@ -24,6 +24,17 @@ DSpark-Drafter auf genau dieser Maschine so gut wie möglich fahren**:
 Beide Laufwerke fassen je eine vollständige Modellkopie (167 GB < 512 GB) —
 Grundlage für Dual-Streaming, siehe [10-dual-streaming.md](10-dual-streaming.md).
 
+**Checkpoint:** [deepseek-ai/DeepSeek-V4-Flash-0731](https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash-0731)
+
+```bash
+hf download deepseek-ai/DeepSeek-V4-Flash-0731 --local-dir /pfad/DeepSeek-V4-Flash
+```
+
+Das ist der **einzige** Download. DSpark liegt im selben Checkpoint unter dem
+Präfix `mtp.<stage>.` — colibri sucht die Drafter-Tensoren in
+`engine->target_index` ([c/deepseek_v4.c:6325](../c/deepseek_v4.c)), nicht in einem
+zweiten Verzeichnis. Ein separates DSpark-Repo gibt es nicht zu laden.
+
 Andere Modelle sind in diesem Fork ausdrücklich kein Ziel; der Rückbau steht in
 [11-strip-to-v4.md](11-strip-to-v4.md) und kommt **zuletzt**, weil mehrere Pläne
 sich Referenzcode aus den zu löschenden Motoren holen.
