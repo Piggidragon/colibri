@@ -12,9 +12,10 @@ Die Stufen aus 05–07 sind bis hierher einzeln verdrahtet und entscheiden je f�
 sich. Dieser Plan macht daraus **eine** Planung mit fester Priorität und
 stufenweisem Rückfall, plus die dokumentierte Empfehlung für 32 GB + 12 GB.
 
-Ohne das ist die Konfiguration ein Ratespiel: 12 GB sind knapp genug, dass ein
-zweiter Monitor oder ein Browser mit GPU-Beschleunigung die Reserve auffrisst, und
-dann muss der Lauf **degradieren, nicht scheitern**.
+Ohne das ist die Konfiguration ein Ratespiel. Die Maschine läuft headless, das
+Budget ist also vorhersehbar (~11.7 GiB) — aber vorhersehbar heißt nicht
+unbegrenzt: bei 1M Kontext ist die Reserve knapp, und ein fehlgeschlagener Upload
+muss **degradieren, nicht scheitern**.
 
 ## Ausgangslage
 
@@ -77,7 +78,7 @@ Feste Reihenfolge, jede Stufe einzeln rückfallfähig:
 
 | # | Posten | Warum diese Position |
 |---|---|---|
-| 1 | **KV** | Ohne KV auf dem Gerät ist der Attention-Kernel aus Plan 05 sinnlos, und es ist der kleinste Posten (0.35 GiB bei turbo3). |
+| 1 | **KV** | Ohne KV auf dem Gerät ist der Attention-Kernel aus Plan 05 sinnlos. Der einzige Posten, der mit dem Kontext wächst — 0.43 GiB (`native`, 128k) bis 3.4 GiB (`native`, 1M). |
 | 2 | **Dense** | Größter RAM-Gewinn pro VRAM-Byte (6.27 GiB für 6.27 GiB) und macht Q device-resident. |
 | 3 | **Head** | 1.06 GiB, größter Rechenzeitgewinn, aber unabhängig vom Rest. |
 | 4 | **DSpark** | Nur wenn aktiv; muss mit dem Head zusammen wandern (siehe Plan 07). |
@@ -130,7 +131,7 @@ ergänzen — gleiche Form, gleicher Ort, damit beides zusammen im Log steht:
 
 ```
 ram_tiers  available=28.00GiB dense=vram target_slots=52 target_cache=29.1GiB head=vram projected=27.4GiB
-vram_tiers free=11.20GiB reserve=1.00GiB kv=vram(0.59GiB) dense=vram(6.27GiB) head=vram(1.06GiB) dspark=vram(1.25GiB) used=9.17GiB
+vram_tiers free=11.70GiB reserve=1.00GiB kv=vram(0.43GiB) dense=vram(6.27GiB) head=vram(1.06GiB) dspark=vram(1.25GiB) used=9.31GiB
 ```
 
 Ohne diesen Report ist nicht nachvollziehbar, warum eine Konfiguration schnell oder
@@ -145,8 +146,8 @@ Profil ausgebaut:
 RAM_GB=28 \
 CTX=131072 \
 V4_SCRATCH_MB=128 \
-V4_KV=turbo3 \
-V4_KV_INDEX=turbo3 \
+V4_KV=native \
+V4_KV_INDEX=native \
 V4_VRAM=1 \
 V4_MTP=1 V4_DRAFT=3 \
 SNAP=/pfad/DeepSeek-V4-Flash ./deepseek_v4
@@ -158,10 +159,12 @@ Zeit pro Token aufgeschlüsselt.
 
 Verlinkung aus `docs/deepseek-v4.md` unter „Memory policy".
 
-**`V4_KV_INDEX=turbo3` ist die einzige Empfehlung mit Semantik-Vorbehalt** — sie
-quantisiert den Indexer, der die Top-k-Auswahl trifft. Sie gehört nur ins Profil,
-wenn die Messung aus Plan 04 zeigt, dass die Tokenfolge stabil bleibt. Sonst
-`f32` empfehlen und den Unterschied ausweisen.
+Bei `CTX=131072` reicht `native` — verlustfrei, 0.43 GiB KV, 2.4 GiB Reserve.
+**Erst ab etwa 512k wird turbo3 nötig**, und dann gilt der Semantik-Vorbehalt für
+`V4_KV_INDEX`: turbo auf dem Indexer quantisiert die Top-k-Auswahl, also
+Router-Semantik. Ein zweites Profil für 1M gehört ins Doc, mit den Messungen aus
+Plan 04 als Beleg, dass die Tokenfolge stabil bleibt — sonst dort `V4_KV_INDEX=native`
+lassen und den Unterschied ausweisen.
 
 ## Der OOM-Pfad muss geprobt werden, nicht angenommen
 
@@ -221,7 +224,8 @@ Rückfall, der still falsch rechnet, ist schlimmer als ein Absturz.
 
 ## Abnahme
 
-- Auf dem 4070 zeigt `vram_tiers` alle vier Posten als `vram` bei `used < 10 GiB`.
+- Auf dem 4070 (headless) zeigt `vram_tiers` alle vier Posten als `vram` bei
+  `used ≈ 9.3 GiB` für `CTX=131072`/`native`.
 - `ram_tiers` zeigt `target_cache ≈ 29 GiB` gegen ~15 GiB auf `main`.
 - Künstlich verkleinertes VRAM-Budget (`V4_VRAM_LIMIT_MB`) degradiert stufenweise
   statt zu scheitern — durchgespielt für 8, 6, 4, 2 und 0 GiB.
