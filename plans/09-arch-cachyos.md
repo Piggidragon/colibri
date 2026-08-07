@@ -78,7 +78,7 @@ analog zu `c/Makefile:685` für olmoe.
 
 Der i5-13400F hat **6 P-Cores (Golden Cove, bis 4.6 GHz) + 4 E-Cores (Gracemont,
 bis 3.3 GHz)**, 16 logische Threads. Die Linux-Zählung in `coli_physical_cores`
-([c/omp_tune.h:68](../c/omp_tune.h)) zählt eindeutige `thread_siblings_list`-Einträge:
+([c/omp_tune.h:111](../c/omp_tune.h)) zählt eindeutige `thread_siblings_list`-Einträge:
 
 ```
 6 P-Cores × je 2 Siblings  → 6 eindeutige Listen
@@ -94,7 +94,7 @@ den heißen Schleifen `schedule(static)` — `head_argmax`
 **die E-Cores geben das Tempo vor.**
 
 Der Header kennt das Problem — und löst es nur für macOS
-([c/omp_tune.h:53](../c/omp_tune.h)):
+([c/omp_tune.h:98](../c/omp_tune.h)):
 
 > *`hw.perflevel0.logicalcpu` = die PERFORMANCE-Kerne. Auf Apple Silicon zählt
 > `hw.physicalcpu` alle, E-Cores eingeschlossen (10 auf einem M1 Max), und mit

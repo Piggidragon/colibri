@@ -130,8 +130,8 @@ Die `ram_tiers`-Zeile ([:1057](../c/deepseek_v4.c)) um eine `vram_tiers`-Zeile
 ergänzen — gleiche Form, gleicher Ort, damit beides zusammen im Log steht:
 
 ```
-ram_tiers  available=28.00GiB dense=vram target_slots=52 target_cache=29.1GiB head=vram projected=27.4GiB
-vram_tiers free=11.70GiB reserve=1.00GiB kv=vram(0.43GiB) dense=vram(6.27GiB) head=vram(1.06GiB) dspark=vram(1.25GiB) used=9.31GiB
+ram_tiers  available=28.00GiB dense=vram target_slots=49 target_cache=27.85GiB head=vram projected=27.5GiB
+vram_tiers free=11.70GiB reserve=1.00GiB kv=vram(0.43GiB) dense=vram(6.27GiB) head=vram(1.06GiB) dspark=vram(0.56GiB) used=8.62GiB
 ```
 
 Ohne diesen Report ist nicht nachvollziehbar, warum eine Konfiguration schnell oder
@@ -159,7 +159,7 @@ Zeit pro Token aufgeschlüsselt.
 
 Verlinkung aus `docs/deepseek-v4.md` unter „Memory policy".
 
-Bei `CTX=131072` reicht `native` — verlustfrei, 0.43 GiB KV, 2.4 GiB Reserve.
+Bei `CTX=131072` reicht `native` — verlustfrei, 0.43 GiB KV, ~3.1 GiB Reserve.
 **Erst ab etwa 512k wird turbo3 nötig**, und dann gilt der Semantik-Vorbehalt für
 `V4_KV_INDEX`: turbo auf dem Indexer quantisiert die Top-k-Auswahl, also
 Router-Semantik. Ein zweites Profil für 1M gehört ins Doc, mit den Messungen aus
@@ -225,8 +225,9 @@ Rückfall, der still falsch rechnet, ist schlimmer als ein Absturz.
 ## Abnahme
 
 - Auf dem 4070 (headless) zeigt `vram_tiers` alle vier Posten als `vram` bei
-  `used ≈ 9.3 GiB` für `CTX=131072`/`native`.
-- `ram_tiers` zeigt `target_cache ≈ 29 GiB` gegen ~15 GiB auf `main`.
+  `used ≈ 8.6 GiB` für `CTX=131072`/`native`.
+- `ram_tiers` zeigt `target_cache ≈ 27.9 GiB` gegen ~14.6 GiB auf `main` (siehe
+  RAM-Bilanz in [00-reference.md](00-reference.md)).
 - Künstlich verkleinertes VRAM-Budget (`V4_VRAM_LIMIT_MB`) degradiert stufenweise
   statt zu scheitern — durchgespielt für 8, 6, 4, 2 und 0 GiB.
 - **Laufzeit-OOM je Stufe injiziert** (`V4_VRAM_FAIL_AT=kv|dense|head|dspark`):

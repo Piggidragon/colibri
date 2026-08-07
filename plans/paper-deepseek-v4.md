@@ -63,8 +63,8 @@ Parameter werden dynamisch erzeugt: pro Layer aus dem RMS-normalisierten,
 geflatteten Eingangszustand, aufgeteilt in eine eingabeabhängige und eine
 statische Komponente.
 
-> Bezug zum Code: `coli_v4_hc_pre` und `normalized_hc_pre` in
-> [c/deepseek_v4.c:3057](../c/deepseek_v4.c) ff.
+> Bezug zum Code: `coli_v4_hc_pre` ([c/deepseek_v4.c:1159](../c/deepseek_v4.c)),
+> aufgerufen aus der Runtime ab [:3081](../c/deepseek_v4.c) ff.
 
 ---
 
@@ -93,7 +93,7 @@ die von `C^b` für Eintrag `i` benutzten Indizes überlappen mit denen von `C^a`
 Eintrag `i−1`. Netto komprimiert CSA die Sequenzlänge trotzdem auf `1/m`.
 
 > Bezug zum Code: `coff = ratio == 4 ? 2 : 1` im Layer-Plan
-> ([c/deepseek_v4.c:390](../c/deepseek_v4.c)) — die `2` ist genau diese
+> ([c/deepseek_v4.c:394](../c/deepseek_v4.c)) — die `2` ist genau diese
 > Doppelserie. `attn.compressor.ape` hat Shape `[ratio, coff·head_dim]`.
 
 **Lightning Indexer.** Dieselbe Kompressionsoperation erzeugt komprimierte
@@ -320,20 +320,29 @@ weil er in jedem Layer und jedem Token vollständig gelesen wird.
 Der Attention-Kernel liest pro Layer `topk` Zeilen:
 
 - **CSA-Layer:** `n_win + top-k` = 128 + 512 = **640 Zeilen**, konstant
+  (21 Layer × 640 × 2048 B = 27.5 MB, unabhängig vom Kontext)
 - **HCA-Layer:** `n_win +` *alle* komprimierten Einträge = 128 + ctx/128,
   weil HCA keine Sparse Attention hat — **wächst linear mit dem Kontext**
+  (bei 128k: 20 × 1152 × 2048 B = 47.2 MB; bei 1M: 20 × 7940 × 2048 B = 325.2 MB)
 
 | Kontext | f32 | Paper-Format | turbo3 |
 |---|---|---|---|
-| 128k | 40.6 MB/Token | 11.6 MB | 4.0 MB |
+| 128k | 74.7 MB/Token | 21.3 MB | 7.3 MB |
 | 1M | **353 MB/Token** | 100 MB | **34 MB** |
 
-Bei ~40 GB/s DDR5 sind 353 MB/Token rund **8.8 s pro Token** allein fürs
-KV-Lesen im 1M-Kontext. Mit turbo3 sind es 0.86 s, auf dem 4070 bei ~500 GB/s
-rund 69 ms.
+(Die 128k-Zeile war in einer früheren Fassung mit falschen Zeilenzahlen
+berechnet; hier mit der Formel oben korrigiert.)
 
-**Das ist das stärkste Argument des ganzen Vorhabens** — und es kommt nicht vom
-Speicherplatz, sondern von der Lesebandbreite der HCA-Layer.
+Bei ~45 GB/s DDR4-3200 sind 353 MB/Token rund **7.8 ms pro Token** allein fürs
+KV-Lesen im 1M-Kontext — spürbar, aber unter dem ~77-ms/Token-Bandbreitendeckel
+der gerouteten Experten (siehe [00-reference.md](00-reference.md)). Mit turbo3
+sind es 0.76 ms, auf dem 4070 bei ~500 GB/s rund 0.07 ms. (Eine frühere Fassung
+wies diese Zeiten in Sekunden statt Millisekunden aus — Faktor 1000 zu hoch.)
+
+Das reine KV-Lesen ist damit **kein** eigenständiges Argument für Phase 04/05;
+das eigentliche Gewicht liegt beim VRAM-Budget (siehe
+[00-reference.md](00-reference.md)) und bei der O(Kontext)-Staging-Kopie, die
+[02-flash-attention.md](02-flash-attention.md) beschreibt.
 
 ---
 

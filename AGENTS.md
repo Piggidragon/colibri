@@ -173,7 +173,7 @@ Ist der noch nicht da, prüfe von Hand mit `diff`.
 ### 4. Tests sind Teil des Commits
 
 Eine Make-Regel `tests/test_x$(EXE):` in `c/Makefile` genügt — `TEST_RULES`
-([c/Makefile:360](c/Makefile)) leitet die Gates daraus ab. Keine zentrale Liste.
+([c/Makefile:359](c/Makefile)) leitet die Gates daraus ab. Keine zentrale Liste.
 
 Vor jedem PR:
 
@@ -255,10 +255,10 @@ Agent nichts wieder.
 - **DFlash ≠ DeepSeek-V4-Flash.** In llama.cpp ist `dflash` eine Drafter-Arch;
   das 284B-Modell heißt dort `deepseek4`.
 - **`coli_physical_cores()` ist auf Linux hybrid-blind.** Es zählt eindeutige
-  `thread_siblings_list`-Einträge und liefert auf dem i5-13400F **10** — 6 P- plus
-  4 E-Cores, als wären sie gleich. Der macOS-Zweig löst genau das
-  ([c/omp_tune.h:53](c/omp_tune.h), gemessen −4.2 % Decode auf M1 Max), der
-  Linux-Zweig nicht. Siehe Plan 09.
+  `thread_siblings_list`-Einträge ([c/omp_tune.h:111](c/omp_tune.h)) und liefert
+  auf dem i5-13400F **10** — 6 P- plus 4 E-Cores, als wären sie gleich. Der
+  macOS-Zweig löst genau das ([c/omp_tune.h:98](c/omp_tune.h), gemessen
+  −4.2 % Decode auf M1 Max), der Linux-Zweig nicht. Siehe Plan 09.
 - **Kein separater DSpark-Download.** Der Drafter liegt im Hauptcheckpoint unter
   `mtp.<stage>.`. Wer nach einem eigenen DSpark-Repo sucht, sucht falsch.
 - **MTP-Tiefe 1, aber drei DSpark-Stufen.** Das Paper nennt

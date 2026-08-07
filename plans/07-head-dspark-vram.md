@@ -32,9 +32,9 @@ if (resident) {
 }
 ```
 
-`vocab = 129280`, `d = 4096`, BF16 → **1.059 GiB pro Token gelesen**. Auf DDR5 mit
-~40 GB/s sind das ~27 ms; auf dem 4070 mit ~500 GB/s ~2 ms. Faktor ~13, und
-gleichzeitig 1.06 GiB RAM frei.
+`vocab = 129280`, `d = 4096`, BF16 → **1.059 GiB pro Token gelesen**. Auf
+DDR4-3200 mit ~45 GB/s sind das ~24 ms (siehe [00-reference.md](00-reference.md));
+auf dem 4070 mit ~500 GB/s ~2 ms. Faktor ~12, und gleichzeitig 1.06 GiB RAM frei.
 
 Der Fallback darunter ([:6814](../c/deepseek_v4.c)) streamt in 64-Zeilen-Kacheln,
 wenn der Head nicht resident ist — der bleibt unverändert als letzte Stufe.

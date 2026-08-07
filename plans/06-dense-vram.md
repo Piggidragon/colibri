@@ -206,9 +206,10 @@ die Messaufgabe dieses Commits.
   Reihenfolge wie `matmul_fp8`. Logits weichen minimal ab; am Tiny-Fixture auf
   Token-Identität prüfen und, falls sie kippt, als Toleranz dokumentieren statt
   wegzudrücken. Das ist die einzige echte Semantikfrage dieser Phase.
-- **6.27 dense + 1.06 head + 1.25 DSpark = 8.58 GiB** lassen auf einer 12-GB-Karte
-  mit Display nur ~2.4 GiB für KV und Workspace. Ohne die Codecs aus Plan 03/04
-  schließt das Budget nicht. Reihenfolge nicht umdrehen.
+- **6.27 dense + 1.06 head + 0.56 DSpark = 7.89 GiB** lassen auf der headless
+  12-GB-Karte ~3.5 GiB für KV und Workspace (siehe VRAM-Budget in
+  [00-reference.md](00-reference.md)). Ohne den Codec aus Plan 03 schließt das
+  Budget bei langem Kontext trotzdem nicht. Reihenfolge nicht umdrehen.
 - **Der `gpu_resident`-Durchstich** berührt den Ladepfad, den auch der
   CPU-Betrieb nimmt. Ein Fehler dort trifft beide Modi. Deshalb Commit 1 klein und
   separat, mit eigenem Test.

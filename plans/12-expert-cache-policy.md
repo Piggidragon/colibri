@@ -14,8 +14,10 @@ mehr RAM für den Expert-Cache freimachen und die Lesevorgänge beschleunigen.
 Keiner kümmert sich darum, **was im Cache liegt**.
 
 Bei ~20 % Residenz ist das der falsche Schwerpunkt. Ein Treffer kostet null
-Bytes von der Platte; ein Fehltreffer kostet 12.6 MB, egal wie schnell das
-Laufwerk ist. **Die Trefferquote zu erhöhen schlägt jede Beschleunigung der
+Bytes von der Platte; ein Fehltreffer kostet ~13.4 MB (ein voller
+`expert_record_bytes`-Eintrag, w1/w2/w3 + Scales — siehe
+[00-reference.md](00-reference.md)), egal wie schnell das Laufwerk ist. **Die
+Trefferquote zu erhöhen schlägt jede Beschleunigung der
 Fehltreffer** — und Colibrì hat dafür bereits eine vollständige Maschinerie, die
 niemand für dieses Setup eingestellt hat.
 
@@ -133,7 +135,8 @@ Damit sie nicht vergessen, aber auch nicht ungeprüft eingebaut werden:
 
 - **Fusionierte mHC-Ops.** llama.cpp hat sie (`0dc74e332 DeepseekV4: Add fused
   hyper-connection ops`). colibri rechnet 20 Sinkhorn-Iterationen pro Layer und
-  Token ([c/deepseek_v4.c:3057](../c/deepseek_v4.c) ff.). 43 × 20 pro Token ist
+  Token in `coli_v4_hc_pre` ([c/deepseek_v4.c:1159](../c/deepseek_v4.c),
+  aufgerufen ab [:3081](../c/deepseek_v4.c) ff.). 43 × 20 pro Token ist
   nicht nichts. **Erst messen, ob es im Profil auftaucht.**
 - ~~**AVX-512**~~ — **erledigt, entfällt.** Der i5-13400F (Raptor Lake) hat kein
   AVX-512; Intel hat es auf den Consumer-Hybrid-Chips deaktiviert, und die

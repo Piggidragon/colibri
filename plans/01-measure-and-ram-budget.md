@@ -187,7 +187,7 @@ Planner-Budget erklärt wird.
 ## Tests
 
 - `c/tests/test_v4_scratch_env.c` — neue Regel in `c/Makefile`
-  (`TEST_RULES` nimmt sie automatisch auf, [c/Makefile:360](../c/Makefile)).
+  (`TEST_RULES` nimmt sie automatisch auf, [c/Makefile:359](../c/Makefile)).
   Prüft: Default 512 MiB, Clamp unten/oben, Müll-Eingabe (`V4_SCRATCH_MB=abc`)
   fällt auf Default. Muster: `test_env_defaults.py` gibt es schon für andere Knöpfe.
 - Bestehende Gates: `make -C c test`, `make -C c deepseek-v4-tiny-check`.

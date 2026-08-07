@@ -17,7 +17,7 @@ DSpark-Drafter auf genau dieser Maschine so gut wie möglich fahren**:
 |---|---|
 | CPU | Intel **i5-13400F** — 6 P-Cores + 4 E-Cores, 16 Threads, **kein AVX-512**, **keine iGPU** |
 | RAM | 32 GB **DDR4-3200**, Dual-Channel — ~45 GB/s, siehe Bandbreitenabschnitt |
-| GPU | RTX 4070, 12 GB — **treibt auch das Display** (F-CPU hat keine iGPU) |
+| GPU | RTX 4070, 12 GB — **headless im V4-Betrieb**, ~11.7 GiB nutzbar |
 | Laufwerk A | 1 TB NVMe **Gen4**, DRAM-los (HMB) |
 | Laufwerk B | 512 GB SSD **Gen3**, DRAM-los (HMB) |
 | OS | CachyOS (Arch-Familie), **Linux x86-64 only** |
@@ -56,22 +56,41 @@ heute RAM, obwohl sie zusammen in 12 GB VRAM passen. **Das ist der Haupthebel.**
 ## RAM-Bilanz
 
 Abgeleitet aus `build_runtime_plan` ([c/deepseek_v4.c:924](../c/deepseek_v4.c))
-und `coli_v4_resource_plan_compute` ([:693](../c/deepseek_v4.c)).
+und `coli_v4_resource_plan_compute` ([:693](../c/deepseek_v4.c)). Alle Zahlen bei
+`CTX=131072` (128k) — derselbe Kontext, den Plan 03/05/08 für ihre Deltas
+verwenden, damit Baseline und Phasen-Gewinne vergleichbar bleiben.
 
 ```
 MemAvailable                                ~29.0 GiB
- − system reserve   available/8, 512MiB..4GiB  −3.6    Phase 1 (RAM_GB)
- − runtime reserve  2×max_layer + other        −1.4    enthält KV + 512MiB scratch
+ − system reserve   available/8, 512MiB..4GiB  −3.6
+ − runtime reserve  KV f32 (128k) + hidden + 512MiB scratch  −2.2
  − dense resident                              −6.27   Phase 6
  − BF16 head                                   −1.06   Phase 7
  − DSpark reserve (wenn aktiv)                 −1.25   Phase 7
- = Expert-Cache                               ~15.4 GiB → ~27/256 Slots ≈ 11 %
+ = Expert-Cache                               ~14.6 GiB → ~26/256 Slots ≈ 10 %
 ```
 
-Nach allen Phasen: **~29 GiB Expert-Cache ≈ 20 % Residenz**, bei identischer
-Semantik.
+Das ist die **heutige** Bilanz, vor jedem Phasen-Code. Die Gewinne aus der
+Phasenübersicht unten summieren sich **nicht** einfach additiv über die volle
+Liste — Phase 03 und Phase 05 greifen auf **dieselbe** KV-Zeile: Phase 03 senkt
+sie von 1.68 auf 0.43 GiB (**+1.25 GiB**), Phase 05 verschiebt nur noch den Rest
+(0.43 GiB) nach VRAM (**+0.43 GiB**, nicht +0.9 — eine frühere Fassung zählte das
+f32-Delta ein zweites Mal). Mit `RAM_GB=28` (Systemreserve → 0) ist die harte
+Obergrenze **28.0 GiB Planner-Budget**, und die Summe muss darunter bleiben:
 
-`per_slot = num_hidden_layers × expert_record_bytes ≈ 43 × 13 MB ≈ 559 MB`, daher
+```
+Baseline (14.6) + 01 (3.0) + 03 (1.25) + 05 (0.43) + 06 (6.27) + 07 (2.3)
+  = ~27.9 GiB, innerhalb der 28.0-GiB-Obergrenze
+```
+
+Phase 04 (TurboQuant, +0.27 GiB) ist bei diesem Budget bereits an der Kante —
+konsistent damit, dass 04 laut VRAM-Budget unten bei 128k nicht Pflicht ist.
+
+**Nach allen Phasen (außer optional 04): ~27.9 GiB Expert-Cache ≈ 19 % Residenz**,
+bei identischer Semantik. Das ist eine Rechnung, keine Messung — Plan 01 liefert
+die tatsächliche Baseline, gegen die diese Zahl zu prüfen ist.
+
+`per_slot = num_hidden_layers × expert_record_bytes ≈ 43 × 13.4 MB ≈ 576 MB`, daher
 die Slot-Zahlen. `expert_record_bytes` misst w1/w2/w3 + Scales von
 `layers.0.ffn.experts.0` ([:892](../c/deepseek_v4.c)).
 
@@ -79,31 +98,37 @@ die Slot-Zahlen. `expert_record_bytes` misst w1/w2/w3 + Scales von
 
 Die Maschine läuft im V4-Betrieb ohne Display — kein Compositor, keine
 Browser-Beschleunigung. `nvidia-smi` meldet für einen 4070 rund 12282 MiB gesamt;
-nach Treiberreserve bleiben **~11.7 GiB** nutzbar statt der ~11.2 GiB, die mit
-Display zu erwarten wären.
+nach Treiberreserve bleiben **~11.7 GiB** nutzbar.
 
 ```
 dense fp8          6.27   Phase 6
 head bf16          1.06   Phase 7
-DSpark             1.25   Phase 7
+DSpark             0.56   Phase 7 — nur der residente Teil (markov_w1/w2,
+                           main_proj_w); die 768-MiB-Marge in der RAM-Reserve
+                           deckt Head-/Scratch-Bedarf ab, ist kein VRAM-Tensor
 workspace         ~0.30
                   ─────
-Fixkosten          8.88 GiB   → ~2.8 GiB bleiben für den KV
+Fixkosten          8.19 GiB   → ~3.5 GiB bleiben für den KV
 ```
 
 Der KV entscheidet damit die erreichbare Kontextlänge:
 
 | Kontext | KV f32 | KV `native` | KV turbo3 | passt mit |
 |---|---|---|---|---|
-| 128k | 1.68 | **0.43** | 0.16 | native (2.4 GiB Reserve) |
+| 128k | 1.68 | **0.43** | 0.16 | native (~3.1 GiB Reserve) |
 | 256k | 3.4 | **0.86** | 0.33 | native |
-| 512k | 6.7 | **1.7** | 0.65 | native (1.1 GiB Reserve) |
-| 1M | 13.4 | 3.4 ✗ | **1.3** | **nur turbo3** |
+| 512k | 6.7 | **1.7** | 0.65 | native (~1.8 GiB Reserve) |
+| 1M | 13.4 | 3.4 | **1.3** | **native, knapp** (~0.1 GiB Reserve) |
 
-**Das ändert den Status von Phase 4.** `native` (Phase 3) trägt bis etwa 512k —
-für das volle Millionen-Token-Fenster, also das Kopfmerkmal des Modells, ist
-TurboQuant nicht optional, sondern Voraussetzung. Wer bei ≤512k bleibt, kann
-Phase 4 auslassen.
+**Das ändert den Status von Phase 4 gegenüber einer früheren Fassung.** Die
+DSpark-Zeile oben war dort mit der vollen RAM-Reserve (1.25 GiB) statt dem
+tatsächlichen VRAM-Footprint (0.56 GiB) gebucht. Mit dem korrigierten Fixkosten-
+block passt `native` bei 1M mit ~0.1 GiB Reserve — **zu knapp, um sich blind
+darauf zu verlassen**, aber keine klare Notwendigkeit für TurboQuant mehr. Phase 4
+bleibt deshalb bei jeder Kontextlänge optional, ist aber der einzige Weg, im
+1M-Fall echten Spielraum statt einer Punktlandung zu haben. Vor dem 1M-Profil:
+mit `V4_VRAM_LIMIT_MB` (Plan 08) durchspielen, ob `native` dort wirklich hält,
+statt es anzunehmen.
 
 Codec und VRAM-Residenz sind keine getrennten Features, sondern Voraussetzung
 füreinander. Der Planner aus Phase 8 muss trotzdem pro Stufe einzeln auf RAM
@@ -155,23 +180,33 @@ Hardware oder weniger aktivierten Parametern.
 
 ### Der KV-Lesestrom bei langem Kontext
 
-Aus derselben Bandbreite und den Zahlen in [paper-deepseek-v4.md](paper-deepseek-v4.md):
+Aus derselben Bandbreite und den Zahlen in [paper-deepseek-v4.md](paper-deepseek-v4.md).
+Zeilenzahlen wie in der KV-Bilanz unten (640 CSA-Zeilen konstant; HCA
+`n_win + ctx/128`), ausgewertet bei `ctx=131072` bzw. `ctx=1000000`:
 
 | Kontext | Codec | MB/Token | CPU @45 GB/s | GPU @504 GB/s |
 |---|---|---|---|---|
-| 128k | f32 | 40.6 | 0.9 ms | — |
-| 128k | `native` | 11.6 | 0.26 ms | 0.02 ms |
-| 1M | f32 | 353 | **7.8 s** | — |
-| 1M | `native` | 100 | **2.2 s** | 0.20 s |
-| 1M | turbo3 | 34 | 0.76 s | **0.07 s** |
+| 128k | f32 | 74.7 | 1.7 ms | — |
+| 128k | `native` | 21.3 | 0.47 ms | 0.04 ms |
+| 1M | f32 | 353 | **7.8 ms** | — |
+| 1M | `native` | 100 | **2.2 ms** | 0.20 ms |
+| 1M | turbo3 | 34 | 0.76 ms | **0.07 ms** |
 
-Bei 128k ist der KV bandbreitenmäßig belanglos. **Bei 1M ist er auf der CPU
-untragbar** — 2.2 s/Token allein fürs KV-Lesen, selbst mit dem verlustfreien
-Codec. Erst turbo3 **und** der CUDA-Kernel machen das Millionen-Fenster benutzbar.
+(Eine frühere Fassung dieser Tabelle wies die 1M-Zeile in Sekunden statt
+Millisekunden aus — Faktor 1000 zu hoch — und berechnete die 128k-Zeile mit
+falschen Zeilenzahlen. Beide Fehler sind hier korrigiert.)
 
-Das ist die zweite unabhängige Begründung dafür, dass Phase 04 ab ~512k Pflicht ist
-(die erste war das VRAM-Budget oben) — und die eigentliche Rechtfertigung für
-Phase 05.
+Bei 128k ist der KV bandbreitenmäßig belanglos gegen den ~77-ms-Expertendeckel.
+**Bei 1M ist er selbst bei f32 nur ~7.8 ms/Token** — spürbar, aber weit unter dem
+Expertendeckel, also kein eigenständiges Argument für „untragbar". Das reine
+KV-Lesen begründet Phase 04/05 damit **nicht**; die tatsächlichen Treiber sind
+das VRAM-Budget oben (bei 1M ist `native` dort nur knapp im Rahmen) und die
+O(Kontext)-Staging-Kopie, die Plan 02 beschreibt — bei 128k allein schon
+**~1.4 GB/Token** über alle CSA-Layer (67 MB × 21), eine Größenordnung über dem
+reinen KV-Lesestrom hier. Das ist die eigentliche Rechtfertigung für Phase 05:
+nicht die Lesebandbreite der Zeilen selbst, sondern die Kopie, die der
+Flash-Umbau aus Plan 02 bereits auf der CPU beseitigt und die ein naiver
+CUDA-Kernel sonst wiederholen würde.
 
 ### Der Head
 
@@ -344,17 +379,22 @@ Pro Token, wachsender Anteil (21 CSA-Layer à `1/4` Zeile + `1/4` Indexerzeile,
 | 1M | **13.4 GiB** | 3.4 GiB | 1.3 GiB |
 
 **Gelesene Bytes pro Token** — CSA-Layer lesen konstant `n_win + top-k` = 640
-Zeilen, HCA-Layer lesen `n_win +` *alle* komprimierten Einträge, weil HCA keine
-Sparse Attention hat:
+Zeilen (21 Layer × 640 × 2048 B = 27.5 MB, unabhängig vom Kontext), HCA-Layer
+lesen `n_win +` *alle* komprimierten Einträge, weil HCA keine Sparse Attention hat
+(bei 128k: 20 × 1152 × 2048 B = 47.2 MB; bei 1M: 20 × 7940 × 2048 B = 325.2 MB):
 
 | Kontext | f32 | native | turbo3 |
 |---|---|---|---|
-| 128k | 40.6 MB/Token | 11.6 MB | 4.0 MB |
+| 128k | 74.7 MB/Token | 21.3 MB | 7.3 MB |
 | 1M | **353 MB/Token** | 100 MB | **34 MB** |
 
-Bei ~40 GB/s DDR5 sind 353 MB/Token rund **8.8 s pro Token** allein fürs KV-Lesen
-im 1M-Kontext. Die HCA-Layer, nicht die CSA-Layer, dominieren das — und dagegen
-helfen Codec (Plan 03/04) und Flash-Kernel (Plan 02/05) gemeinsam.
+Bei ~45 GB/s DDR4-3200 sind 353 MB/Token rund **7.8 ms pro Token** allein fürs
+KV-Lesen im 1M-Kontext — spürbar gegen den ~77-ms-Expertendeckel, aber keine
+eigene Untragbarkeitsschwelle (eine frühere Fassung dieser Zahl war um Faktor
+1000 zu hoch, siehe Bandbreitenabschnitt oben). Die HCA-Layer, nicht die
+CSA-Layer, dominieren das Lesevolumen — und dagegen helfen Codec (Plan 03/04)
+und Flash-Kernel (Plan 02/05) gemeinsam, auch wenn keiner davon allein an der
+77-ms-Kante hängt.
 
 Drei Dinge, die beim Port zählen:
 
@@ -418,18 +458,22 @@ Neue Knöpfe dieses Branches:
 | Variable | Default | Phase |
 |---|---|---|
 | `V4_SCRATCH_MB` | 512 | 01 |
-| `V4_KV` | `f32` | 03 |
-| `V4_KV_INDEX` | `f32` | 03 |
+| `V4_KV` | `native` | 03 |
+| `V4_KV_INDEX` | `native` | 03 |
 | `V4_KV_ROPE_BF16` | 0 | 04 |
 | `V4_KV_ROTATED` | 0 | 04 |
 | `V4_FLASH` | 1 | 02 |
 | `V4_VRAM` | 0 | 05–08 |
 
-**Default bleibt überall die heutige Semantik.** Die README garantiert, dass die
-Default-Policy Modellpräzision und Router-Semantik nicht still ändert.
+**Default bleibt überall die heutige Semantik — mit einer Ausnahme.** Die README
+garantiert, dass die Default-Policy Modellpräzision und Router-Semantik nicht
+still ändert. `V4_KV`/`V4_KV_INDEX` sind bewusst die Ausnahme: `native` ist
+bit-exakt zu `f32` (siehe [03-kv-codec.md](03-kv-codec.md)), also keine
+Präzisionsänderung, nur eine Buchhaltungskorrektur. Alle anderen Knöpfe in dieser
+Tabelle halten die Regel ohne Ausnahme.
 
 **Test-Gates.** Eine Make-Regel `tests/test_x$(EXE):` in `c/Makefile` genügt —
-`TEST_RULES` ([c/Makefile:360](../c/Makefile)) liest die Regeln per `sed` und macht
+`TEST_RULES` ([c/Makefile:359](../c/Makefile)) liest die Regeln per `sed` und macht
 daraus automatisch Gates. Keine zentrale Liste, kein Merge-Konflikt.
 
 **Semantik-Grenzen, die jeder Phasenplan respektiert:**
@@ -449,15 +493,21 @@ daraus automatisch Gates. Keine zentrale Liste, kein Merge-Konflikt.
 | 02 | [Flash Attention](02-flash-attention.md) | Online-Softmax, `all_kv` weg, Source-Sync-Test | — | — |
 | 03 | [KV-Codec](03-kv-codec.md) | **natives fp8+bf16/fp4, bit-exakt**, `context_bytes` folgt | **+1.25 GiB** | — |
 | 04 | [TurboQuant](04-turboquant.md) | turbo2/3/4 als verlustbehafteter Tier | +0.27 GiB | — |
-| 05 | [CUDA-Attention](05-cuda-attention.md) | `backend_cuda_v4`, Flash-Kernel, KV in VRAM | +0.9 GiB | −0.6 |
+| 05 | [CUDA-Attention](05-cuda-attention.md) | `backend_cuda_v4`, Flash-Kernel, KV in VRAM | +0.43 GiB¹ | −0.43 |
 | 06 | [Dense in VRAM](06-dense-vram.md) | fp8-Residenz + Matmuls auf GPU | +6.3 GiB | −6.3 |
-| 07 | [Head und DSpark in VRAM](07-head-dspark-vram.md) | Head-Matvec + Drafter auf GPU | +2.3 GiB | −2.3 |
+| 07 | [Head und DSpark in VRAM](07-head-dspark-vram.md) | Head-Matvec + Drafter auf GPU | +2.3 GiB | −1.6² |
 | 08 | [VRAM-Planner](08-vram-planner.md) | Stufenplanung, 4070-Profil | — | — |
 | 09 | [Arch / CachyOS](09-arch-cachyos.md) | `omp_tune.h`, THP, CUDA-Pfade | — | — |
 | 10 | [Dual-Streaming](10-dual-streaming.md) | Mirror-Maschinerie nach V4, gewichtete Stripes | — | — |
 | 11 | [Rückbau auf V4](11-strip-to-v4.md) | andere Motoren + Windows raus | — | — |
 | 12 | [Expert-Cache-Politik](12-expert-cache-policy.md) | Pin-Deckel, Indexer-Select, Prefill | — | — |
 | 13 | [Frontend V4-only](13-frontend-v4.md) | WebUI, CLI, Serve auf V4 | — | — |
+
+¹ 03 hat die KV-Zeile bereits von 1.68 auf 0.43 GiB (128k) gesenkt; 05 verschiebt
+nur noch den Rest nach VRAM, nicht das volle f32-Delta — siehe RAM-Bilanz oben.
+² Nur ~0.56 GiB DSpark-Tensoren gehen tatsächlich auf die GPU (siehe VRAM-Budget
+oben); die restlichen ~0.69 GiB der RAM-Reserve waren Marge für Head/Scratch, kein
+eigener VRAM-Posten.
 
 Referenzdokumente ohne Nummer: [paper-deepseek-v4.md](paper-deepseek-v4.md) (das
 Paper), [llamacpp-deepseek-v4.md](llamacpp-deepseek-v4.md) (die
@@ -468,9 +518,11 @@ Arbeitsregeln, Branch-/PR-Schema und die Pflege dieser Pläne stehen in
 [AGENTS.md](../AGENTS.md).
 
 **Reihenfolge.** 09 trägt die Nummer der Vollständigkeit halber, aber sein erster
-Commit gehört **direkt hinter 01**: `deepseek_v4.c` ist die einzige Engine ohne
-`omp_tune.h` und läuft damit auf allen logischen Kernen statt auf den physischen.
-Der Header misst dafür +2.3× (Zen3, #718). Drei Zeilen, unabhängig vom Rest.
+Commit gehört **direkt hinter 01**: `deepseek_v4.c` ruft `coli_omp_tune_threads`
+nicht auf (anders als `colibri.c`, `kimi_k3.c`, `olmoe.c`; `inkling.c` fehlt es
+ebenfalls, aber das ist nicht Teil dieses Branches) und läuft damit auf allen
+logischen Kernen statt auf den physischen. Der Header misst dafür +2.3× (Zen3,
+#718). Drei Zeilen, unabhängig vom Rest.
 
 **Wenn die Zeit knapp wird:** `01 → 09.1 → 03 → 06` ist die Reihenfolge mit dem
 meisten Ertrag pro Aufwand. 02 ist Voraussetzung für 05, und der Source-Sync-Test

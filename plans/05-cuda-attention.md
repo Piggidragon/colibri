@@ -1,6 +1,6 @@
 # 05 — CUDA: KV in VRAM + Flash-Kernel
 
-Voraussetzung: [00-reference.md](00-reference.md), [02](02-flash-attention.md), [04](04-turboquant.md)
+Voraussetzung: [00-reference.md](00-reference.md), [02](02-flash-attention.md), [03](03-kv-codec.md)
 
 *Commits:*
 1. `build: opt-in CUDA for the V4 engine`
@@ -12,11 +12,18 @@ Voraussetzung: [00-reference.md](00-reference.md), [02](02-flash-attention.md), 
 Der erste GPU-Brückenkopf für V4. Der KV-Cache zieht nach VRAM, die Attention läuft
 als Flash-Kernel mit **Dequantisierung im Register**.
 
-Hier zahlt TurboQuant doppelt: 10× weniger VRAM *und* 10× weniger gelesene Bytes
-im Kernel. Deshalb ist Attention der richtige erste GPU-Schritt und nicht die
-Dense-Matmuls — das KV ist der einzige Teil des Modells, der klein genug ist, um
-auch bei großem Kontext vollständig in 12 GB zu passen, und der Kernel ist
-in sich abgeschlossen (kein Expert-Streaming beteiligt).
+Die harte Voraussetzung ist [03](03-kv-codec.md), nicht [04](04-turboquant.md):
+`native` (3.5×/7.5×, bit-exakt) reicht, damit das KV bei den meisten
+Kontextlängen in VRAM passt (siehe VRAM-Budget in
+[00-reference.md](00-reference.md)), und gibt dem Kernel überhaupt etwas
+Kleineres als f32 zu dequantisieren. TurboQuant zahlt zusätzlich ein, sobald es
+existiert — nochmal ~3× weniger VRAM *und* ~3× weniger gelesene Bytes im Kernel,
+und wird bei 1M der Unterschied zwischen einer Punktlandung und echtem
+Spielraum — deshalb ist der Codec-Dispatch unten für alle fünf Formate ausgelegt,
+nicht nur `native`. Deshalb ist Attention der richtige erste GPU-Schritt und
+nicht die Dense-Matmuls — das KV ist der einzige Teil des Modells, der klein
+genug ist, um auch bei großem Kontext vollständig in 12 GB zu passen, und der
+Kernel ist in sich abgeschlossen (kein Expert-Streaming beteiligt).
 
 **Umfang, ehrlich abgegrenzt:** das ist *CUDA-Attention für V4*, nicht *CUDA-V4*.
 Geroutete Experten bleiben CPU-seitig. Genau die Abgrenzung, die
