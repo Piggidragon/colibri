@@ -1,16 +1,18 @@
 # DeepSeek-V4 — Paper-Auszug für die Implementierung
 
 Quelle: *DeepSeek-V4: Towards Highly Efficient Million-Token Context Intelligence*,
-DeepSeek-AI, arXiv:2606.19348v1 [cs.CL], 26. Apr 2026. Original als `paper.pdf`
-im Repo-Wurzelverzeichnis (nicht committen).
+DeepSeek-AI, arXiv:2606.19348v1 [cs.CL], Jun 2026 (die arXiv-ID kodiert
+Jahr/Monat der Einreichung — YYMM). Original als `paper.pdf` im
+Repo-Wurzelverzeichnis (nicht committen).
 
-Konvertiert mit `pdftotext` aus dem PDF. Formeln überleben die Extraktion nicht
-sauber und sind hier in Worten beschrieben — für die exakten Gleichungen ins PDF
-schauen. Die Abschnitte 5 (Post-Training, Benchmarks) und 6 sind für dieses
-Vorhaben irrelevant und nur zusammengefasst.
+Konvertiert mit `pdftotext -layout paper.pdf /tmp/paper_layout.txt` und
+`pdftotext paper.pdf /tmp/paper_flow.txt` (Standard-Lesereihenfolge). Formeln
+überleben die Extraktion nicht sauber und sind hier in Worten beschrieben — für
+die exakten Gleichungen ins PDF schauen. Die Abschnitte 5 (Post-Training,
+Benchmarks) und 6 sind für dieses Vorhaben irrelevant und nur zusammengefasst.
 
-Rohextraktionen liegen unter `/tmp/paper_flow.txt` (Lesereihenfolge) und
-`/tmp/paper_layout.txt` (Layout, besser für Tabellen).
+Die beiden `/tmp/paper_*.txt`-Rohextraktionen oben sind flüchtig (nicht Teil
+des Repos) — bei Bedarf mit denselben zwei Befehlen aus `paper.pdf` neu erzeugen.
 
 ---
 
@@ -323,7 +325,10 @@ Der Attention-Kernel liest pro Layer `topk` Zeilen:
   (21 Layer × 640 × 2048 B = 27.5 MB, unabhängig vom Kontext)
 - **HCA-Layer:** `n_win +` *alle* komprimierten Einträge = 128 + ctx/128,
   weil HCA keine Sparse Attention hat — **wächst linear mit dem Kontext**
-  (bei 128k: 20 × 1152 × 2048 B = 47.2 MB; bei 1M: 20 × 7940 × 2048 B = 325.2 MB)
+  (bei 128k: 20 × 1152 × 2048 B = 47.2 MB; bei 1M: 20 × 7940 × 2048 B = 325.2 MB —
+  diese Zeile rechnet mit `ctx = 1 000 000`, die Speicher-Tabelle oben mit
+  `ctx = 2^20 = 1 048 576`; der Unterschied ist <5 % und ändert keine
+  Schlussfolgerung)
 
 | Kontext | f32 | Paper-Format | turbo3 |
 |---|---|---|---|

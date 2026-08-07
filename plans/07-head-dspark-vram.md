@@ -191,7 +191,7 @@ Zusätzlich wird DSpark schneller: der Drafter läuft dreistufig pro Token
 - Head-Logits innerhalb dokumentierter Toleranz, Tie-Breaking nach Vokabularordnung.
 - DSpark-Akzeptanzrate unverändert (das ist der Beleg, dass der Drafter dieselben
   Entwürfe produziert).
-- Zeit pro Token gesunken — der Head war ~27 ms davon.
+- Zeit pro Token gesunken — der Head war ~24 ms davon.
 
 ## Risiken
 

@@ -210,7 +210,7 @@ Dazu ein CPU-seitiger Test, dass die Fallback-Kette greift, wenn
 - `make -C c deepseek-v4 CUDA=1` baut; ohne GPU zur Laufzeit sauberer CPU-Fallback.
 - Kernel innerhalb Toleranz gegen CPU-Referenz, alle Codecs.
 - `nvidia-smi` zeigt während des Laufs den erwarteten KV-Footprint
-  (bei turbo3 und 128k: ~0.35 GiB + Indexer).
+  (bei turbo3 und 128k: ~0.16 GiB, siehe KV-Bilanz in [00-reference.md](00-reference.md)).
 - Ein Layer end-to-end mit `V4_VRAM=1` liefert dieselben Tokens wie ohne.
 
 ## Risiken

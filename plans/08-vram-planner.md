@@ -204,6 +204,16 @@ injizieren und belegen, dass der Lauf durchläuft und dieselben Tokens liefert w
 ein reiner CPU-Lauf. Nicht nur „stürzt nicht ab" — dieselben Tokens. Ein
 Rückfall, der still falsch rechnet, ist schlimmer als ein Absturz.
 
+**Reibung mit 06/07:** Die Pläne 06 und 07 räumen bereits ein, dass eine
+GPU-Reduktion die Akkumulationsreihenfolge ändert und dadurch am Tiny-Fixture
+ein Token kippen kann (Toleranz statt Bit-Gleichheit). Ein RAM-Fallback, der
+*zur Laufzeit* von VRAM auf CPU zurückfällt, wechselt damit unter Umständen
+selbst die Akkumulationsreihenfolge — „dieselben Tokens" ist dann nur
+erreichbar, wenn der Fallback exakt den CPU-Pfad nimmt (nicht etwa einen
+zweiten, CPU-seitigen Reduktionspfad mit eigener Rundung). Das ist umsetzbar,
+aber es gehört vor der Implementierung entschieden, nicht erst beim
+Abgleich der beiden Abnahmekriterien.
+
 ## Tests
 
 - `c/tests/test_v4_vram_tier.c` — neue Make-Regel:

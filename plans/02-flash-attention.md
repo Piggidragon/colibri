@@ -193,7 +193,10 @@ Referenz im Baum stehen, nicht nur für `V4_FLASH=0`, sondern als Testorakel.
 
 ## Abnahme
 
-- Tiny-Fixture **token-identisch** mit `V4_FLASH=1` und mit `V4_FLASH=0`.
+- Tiny-Fixture **token-identisch** mit `V4_FLASH=1` und mit `V4_FLASH=0`. Kippt
+  ein Token trotzdem (siehe „Token-Identität kann kippen" unten), ist das ein
+  dokumentierter Befund, kein bestandenes Kriterium — nicht stillschweigend als
+  „token-identisch" abhaken.
 - Keine `malloc`-Aufrufe mehr im Attention-Kernel (`grep -c malloc` in der Region).
 - `all_kv` kommt in `c/deepseek_v4.c` nicht mehr vor.
 - Source-Sync-Test grün.

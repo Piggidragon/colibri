@@ -165,7 +165,7 @@ dem Bandbreitenabschnitt in [00-reference.md](00-reference.md):
 |---|---|
 | Bandbreiten-Deckel (100 % RAM-Treffer, DDR4-3200) | **~13 tok/s** |
 | ~20 % Residenz, Dual-Streaming ~10 GB/s | **~3.5 tok/s** |
-| ~11 % Residenz (Ausgangslage), ein Laufwerk ~7 GB/s | **~2 tok/s** |
+| ~10 % Residenz (Ausgangslage), ein Laufwerk ~7 GB/s | **~2 tok/s** |
 
 Der Weg von ~2 auf ~3.5 ist das, was die Pläne holen; die 13 sind die Asymptote.
 **Eine Messung deutlich über 13 tok/s ist ein Messfehler**, keine Sensation — dann

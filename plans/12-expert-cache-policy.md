@@ -45,8 +45,9 @@ gemessener Nutzungshäufigkeit, mit persistierter Historie in
 ```
 
 `Makefile.deepseek-v4:34` hebt ihn auf **16**. Nach den VRAM-Phasen fasst der
-Cache aber ~52 Slots pro Layer (29 GiB / 559 MB). **Damit sind höchstens 31 % des
-Caches historiengesteuert gepinnt**, der Rest läuft adaptiv über LRU.
+Cache aber ~50 Slots pro Layer (27.9 GiB / 576 MB, siehe RAM-Bilanz in
+[00-reference.md](00-reference.md)). **Damit sind höchstens 32 % des Caches
+historiengesteuert gepinnt**, der Rest läuft adaptiv über LRU.
 
 Ob 16 richtig ist, weiß niemand — der Wert stammt aus einer Zeit, in der der Cache
 kleiner war. Für ein Setup mit stabiler Nutzung (immer dieselbe Person, ähnliche

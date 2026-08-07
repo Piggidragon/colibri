@@ -105,7 +105,7 @@ Das ist zugleich die Reihenfolge, in der die Gewinne am wenigsten voneinander
 abhängen.
 
 **Warum 12 so weit vorne steht:** Ein Cache-Treffer kostet null Bytes von der
-Platte, ein Fehltreffer 12.6 MB — unabhängig davon, wie schnell das Laufwerk ist.
+Platte, ein Fehltreffer 13.4 MB — unabhängig davon, wie schnell das Laufwerk ist.
 Die Trefferquote zu heben schlägt jede Beschleunigung der Fehltreffer. Die
 Pläne 01–11 machten alle dasselbe (mehr RAM, schnellere Reads); keiner kümmerte
 sich darum, *was* im Cache liegt.

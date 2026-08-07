@@ -158,7 +158,7 @@ Kein geratener Wert, kein stiller Fallback auf 1 (der Fehler aus #325).
 `omp_set_num_threads` ist Laufzeit-API und wirkt sofort — anders als die
 Spin-Wait-Variablen braucht es kein Re-exec.
 
-## Commit 1b — Was man ausdrücklich **nicht** setzen soll
+## Dokumentationshinweis (gehört in Commit 4) — was man ausdrücklich **nicht** setzen soll
 
 CachyOS-Setups neigen zu aggressiven Performance-Env-Variablen. Für **diese**
 Arbeitslast ist das kontraproduktiv, und der Header sagt warum:
@@ -168,9 +168,9 @@ Arbeitslast ist das kontraproduktiv, und der Header sagt warum:
 > `Meccanismo: dove il token e' fatto di byte dal disco, una squadra che gira a
 > vuoto ruba i core al pool di I/O che sta facendo il lavoro vero.`
 
-**32 GB gegen 160 GB Experten ist exakt dieses Regime** — ~11 % Residenz nach der
-Bilanz in [00](00-reference.md), gegen ~10 % in der zitierten Messung. Ein
-wartendes OpenMP-Team klaut hier den I/O-Threads die Kerne.
+**32 GB gegen 160 GB Experten ist exakt dieses Regime** — ~10 % Residenz nach der
+Bilanz in [00](00-reference.md), also praktisch dasselbe Regime wie die zitierte
+Messung. Ein wartendes OpenMP-Team klaut hier den I/O-Threads die Kerne.
 
 Also ins Tuning-Doc, als explizite Warnung:
 
@@ -304,7 +304,7 @@ Ein Abschnitt „Arch / CachyOS" in `docs/deepseek-v4-tuning-32gb.md` (aus
 (`COLI_V4_DIRECT`, [:112](../c/deepseek_v4.c)) und `posix_fadvise(WILLNEED)` als
 Prefetch ([:194](../c/deepseek_v4.c)).
 
-Bei ~11 % Expert-Residenz ist Storage-I/O **die** dominante Kostenstelle, und ein
+Bei ~10 % Expert-Residenz ist Storage-I/O **die** dominante Kostenstelle, und ein
 aktueller Arch-Kernel bringt ausgereiftes io_uring mit. Batched Submission über
 `uring.h` wäre plausibel der nächstgrößte Gewinn nach den VRAM-Phasen.
 

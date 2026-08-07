@@ -20,9 +20,10 @@ ist für nur lesende Gewichte die bessere Wahl: jeder Expert ist auf beiden
 Laufwerken, also frei routbar und stripebar.
 
 **Warum das überhaupt zählt.** Bei ~20 % Expert-Residenz nach den VRAM-Phasen
-liest jeder Token 43 Layer × 6 Experten × ~12.6 MB ≈ **3.25 GB**, davon ~80 % von
-der Platte, also ~2.6 GB/Token. Auf Laufwerk A allein sind das bei ~7 GB/s
-**0.37 s/Token**. Storage ist damit nach den VRAM-Phasen der dominante Posten.
+liest jeder Token 43 Layer × 6 Experten × ~13.4 MB ≈ **3.4 GB** (siehe
+Bandbreitenabschnitt in [00-reference.md](00-reference.md)), davon ~80 % von der
+Platte, also ~2.7 GB/Token. Auf Laufwerk A allein sind das bei ~7 GB/s
+**~0.39 s/Token**. Storage ist damit nach den VRAM-Phasen der dominante Posten.
 
 ## Der Fund: das meiste existiert schon — im falschen Motor
 
@@ -90,10 +91,10 @@ Hier liegt der eigentliche Beitrag für **asymmetrische** Laufwerke.
 int64_t chunk = ((len + nsf-1)/nsf + 4095) & ~4095LL;
 ```
 
-Bei Gen4 (~7 GB/s) und Gen3 (~3.5 GB/s) bedeutet das: beide bekommen 6.3 MB des
-12.6-MB-Experten, der Gen4-Thread ist nach 0.9 ms fertig und **wartet 0.9 ms** auf
-den Gen3-Thread. Effektiver Durchsatz 7 GB/s statt der möglichen 10.5 GB/s — der
-komplette Gewinn des zweiten Laufwerks verpufft.
+Bei Gen4 (~7 GB/s) und Gen3 (~3.5 GB/s) bedeutet das: beide bekommen 6.7 MB des
+13.4-MB-Experten, der Gen4-Thread ist nach ~1.0 ms fertig und **wartet ~1.0 ms**
+auf den Gen3-Thread. Effektiver Durchsatz 7 GB/s statt der möglichen 10.5 GB/s —
+der komplette Gewinn des zweiten Laufwerks verpufft.
 
 Richtig ist eine Aufteilung **proportional zur gemessenen Bandbreite**. Die
 Gewichte gibt es schon: `mirror_probe_bw` liefert GB/s pro Replik, das
@@ -114,12 +115,12 @@ for (int i = 0; i < nsf; i++) {
 }
 ```
 
-Erwartung: von 7 auf ~10 GB/s aggregiert, also **~0.26 s statt 0.37 s pro Token**
-bei 2.6 GB Nachladung.
+Erwartung: von 7 auf ~10 GB/s aggregiert, also **~0.27 s statt ~0.39 s pro Token**
+(~30 % weniger Zeit) bei 2.7 GB Nachladung.
 
 Die Einschränkung `len >= 4 MB` bleibt richtig — bei kleineren Reads dominiert die
 Latenz und zwei Threads kosten mehr als sie bringen. Ein Expert-Record von
-~12.6 MB liegt komfortabel darüber.
+~13.4 MB liegt komfortabel darüber.
 
 ## Commit 3 — DRAM-lose SSDs
 
@@ -129,7 +130,7 @@ also geliehenen Host-RAM für die FTL-Mapping-Tabelle — typisch 64 MB.
 Zwei Konsequenzen:
 
 **Große sequentielle Reads sind der gute Fall.** Ein Expert-Record ist
-`w1+w2+w3` plus Scales, zusammengefasst gelesen: ~12.6 MB am Stück. Das ist genau
+`w1+w2+w3` plus Scales, zusammengefasst gelesen: ~13.4 MB am Stück. Das ist genau
 das Zugriffsmuster, bei dem DRAM-lose Laufwerke kaum schlechter sind als solche
 mit DRAM — die FTL muss wenige Mapping-Einträge nachladen. **Der bestehende
 Coalescing-Pfad ist damit wichtiger als auf DRAM-Laufwerken**, nicht weniger.
@@ -173,7 +174,7 @@ bewusste Entscheidung festhalten, nicht als Zufall.
 - `c/tests/test_v4_mirror.c` — neue Make-Regel:
   - `expert_route` ist deterministisch und verteilt über viele `(layer, eid)`
     proportional zu den Cuts (χ²-artige Grobprüfung, keine Exaktheit).
-  - Gewichtete Chunk-Grenzen: bei `wt = {7, 3.5}` und `len = 12.6 MB` sind die
+  - Gewichtete Chunk-Grenzen: bei `wt = {7, 3.5}` und `len = 13.4 MB` sind die
     Grenzen 4K-aligned, lückenlos, summieren auf `len`, Verhältnis ≈ 2:1.
   - Entartete Fälle: eine Replik, `wt` gleich, `len` knapp über/unter 4 MB,
     `len` kleiner als `nsf × 4096`.
@@ -187,8 +188,8 @@ bewusste Entscheidung festhalten, nicht als Zufall.
 
 - `MIRROR:`-Statistikzeile zeigt beide Laufwerke mit Bytes und Reads.
 - Der Probe meldet ~7 und ~3.5 GB/s; die Cuts stehen ≈ 2:1.
-- Gemessene Lesezeit pro Token sinkt gegenüber Einzellaufwerk um **≥40 %**
-  (Erwartung ~7 → ~10 GB/s aggregiert).
+- Gemessene Lesezeit pro Token sinkt gegenüber Einzellaufwerk um **≥25 %**
+  (Erwartung ~7 → ~10 GB/s aggregiert, ~30 % weniger Zeit).
 - Gewichtete Stripes schlagen gleichmäßige messbar — beide Varianten gegeneinander
   messen, nicht nur die neue.
 - Tokenfolge unverändert. Storage-Routing darf nie Semantik berühren.

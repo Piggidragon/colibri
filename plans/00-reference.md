@@ -337,7 +337,7 @@ sed -n '4570,4942p' c/deepseek_v4.c > /tmp/a3; diff /tmp/a1 /tmp/a2 && diff /tmp
 ```
 
 Dazu kommt der **Batch-Pfad** `coli_v4_attention_window_batch_ref` ([:2180](../c/deepseek_v4.c)),
-der dieselbe Logik pro Item nochmal enthält (`all_kv` bei 2352, Fenster-Write 2328).
+der dieselbe Logik pro Item nochmal enthält (`all_kv` bei 2335, Fenster-Write 2328).
 
 **Nichts erzwingt diese Gleichheit heute.** Der Source-Sync-Test aus Plan 02 ist
 deshalb Voraussetzung für alles Weitere, nicht Beiwerk.
@@ -381,7 +381,10 @@ Pro Token, wachsender Anteil (21 CSA-Layer à `1/4` Zeile + `1/4` Indexerzeile,
 **Gelesene Bytes pro Token** — CSA-Layer lesen konstant `n_win + top-k` = 640
 Zeilen (21 Layer × 640 × 2048 B = 27.5 MB, unabhängig vom Kontext), HCA-Layer
 lesen `n_win +` *alle* komprimierten Einträge, weil HCA keine Sparse Attention hat
-(bei 128k: 20 × 1152 × 2048 B = 47.2 MB; bei 1M: 20 × 7940 × 2048 B = 325.2 MB):
+(bei 128k: 20 × 1152 × 2048 B = 47.2 MB; bei 1M: 20 × 7940 × 2048 B = 325.2 MB —
+diese Zeile rechnet mit `ctx = 1 000 000` für runde Zwischenwerte, die
+KV-Bilanz-Tabelle oben mit `ctx = 2^20 = 1 048 576`; der Unterschied ist <5 % und
+ändert keine Schlussfolgerung):
 
 | Kontext | f32 | native | turbo3 |
 |---|---|---|---|

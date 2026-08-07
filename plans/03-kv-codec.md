@@ -1,7 +1,13 @@
 # 03 — KV-Codec-Interface und das native Format
 
-Voraussetzung: [00-reference.md](00-reference.md), [02-flash-attention.md](02-flash-attention.md),
-[paper-deepseek-v4.md](paper-deepseek-v4.md)
+Voraussetzung: [00-reference.md](00-reference.md), [paper-deepseek-v4.md](paper-deepseek-v4.md)
+
+Kein hartes Abhängigkeitspaar mit [02-flash-attention.md](02-flash-attention.md) —
+[AGENTS.md](../AGENTS.md) führt 03 vor 02 in der empfohlenen Reihenfolge, und die
+harte Abhängigkeitsliste dort kennt nur „02 vor 05", nicht „02 vor 03". Das
+Interface unten ist trotzdem **für** den Flash-Kernel aus 02 entworfen: landet 03
+zuerst, ruft der zweistufige Referenzkernel `coli_v4_kv_dot`/`_accumulate` genauso
+auf wie der spätere Flash-Kernel, nur zweimal statt einmal pro Zeile.
 
 *Commits:*
 1. `feat: pluggable KV row codec for V4`
@@ -67,9 +73,9 @@ if ((position + 1) % 4 == 0 && state->count >= state->capacity) {
 ```
 
 Er wächst also linear mit `ctx/4 × 128 dims × 4 B` — bei 128k Kontext ~16.8 MB pro
-ratio-4-Layer, bei 14 solchen Layern ~235 MB. `context_bytes` rechnet das korrekt
-mit; es ist echter Verbrauch und ein lohnendes Ziel, aber mit Semantik-Vorbehalt
-(unten).
+ratio-4-Layer, bei allen **21** solchen Layern ~353 MB. `context_bytes` rechnet
+das korrekt mit; es ist echter Verbrauch und ein lohnendes Ziel, aber mit
+Semantik-Vorbehalt (unten).
 
 ## Änderungen
 
@@ -106,9 +112,11 @@ ColiV4KVCodec coli_v4_kv_codec_from_env(const char *variable, int head_dim,
                                         ColiV4KVCodec fallback);
 ```
 
-`coli_v4_kv_dot` und `coli_v4_kv_accumulate` sind der Grund, warum Plan 02 zuerst
-kam: sie sind die einzigen zwei Stellen, an denen der Flash-Kernel eine Zeile
-anfasst. Für `COLI_V4_KV_F32` sind sie ein direkter Dot bzw. `axpy` ohne Umweg.
+`coli_v4_kv_dot` und `coli_v4_kv_accumulate` sind die einzigen zwei Stellen, an
+denen ein Attention-Kernel eine Zeile anfasst — ob zweistufige Referenz (heute)
+oder Flash (Plan 02). Für `COLI_V4_KV_F32` sind sie ein direkter Dot bzw. `axpy`
+ohne Umweg. Das ist der Grund, warum das Interface so geschnitten ist, unabhängig
+davon, welcher der beiden Pläne zuerst landet.
 
 `NATIVE` braucht zwei Varianten, weil Haupt- und Indexerzeilen unterschiedlich
 quantisiert sind. Die Unterscheidung läuft über `head_dim` — 512 heißt
@@ -138,12 +146,18 @@ for (int b = 0; b < 7; b++) {
 for (int i = 0; i < 64; i++) dst[448 + i] = coli_bf16_decode(row->rope[i]);
 ```
 
-Die Encode-Seite entfällt weitgehend: `coli_fp8_activation_qdq_ref` liefert `q`
-und `scales` **bereits** — heute wird nur das dequantisierte `qdq` übernommen und
-`scales` weggeworfen ([c/deepseek_v4.c:1658](../c/deepseek_v4.c),
-[:2657](../c/deepseek_v4.c)). Der Codec fängt beides ab, statt neu zu quantisieren.
-Das ist auch der Grund, warum die Bit-Gleichheit nicht bloß plausibel, sondern
-konstruktiv ist.
+Die Encode-Seite ist ein Umweg, keine Neuquantisierung: `coli_fp8_activation_qdq_ref`
+([c/deepseek_v4.c:10076](../c/deepseek_v4.c)) liefert schon **heute** das
+dequantisierte `output` und den `scales`-Byte zurück, wirft aber den fp8-Code `q`
+selbst weg — der lebt nur als lokale Variable im Loop-Body
+([:10096](../c/deepseek_v4.c)). Der Codec braucht ihn trotzdem nicht neu zu
+*schätzen*: weil `scale` eine Zweierpotenz ist (E8M0), ist
+`coli_e4m3fn_encode(output[i] / scale)` exakt der Code, der `output[i]` erzeugt
+hat — keine Rundung, keine zweite Wahl. `output` und `scales` kommen entweder
+als zusätzlicher `codes`-Out-Parameter aus der qdq-Funktion, oder werden dort neu
+kodiert, wo der Codec sie abgreift; beides ist bit-exakt, ersteres spart die
+Rückrechnung. Das ist auch der Grund, warum die Bit-Gleichheit nicht bloß
+plausibel, sondern konstruktiv ist.
 
 Für die Indexerzeile analog mit `coli_fp4_activation_qdq_ref`, Block 32, und der
 Hadamard-Rotation davor (`coli_hadamard_bf16_ref`) — die bleibt unverändert im
