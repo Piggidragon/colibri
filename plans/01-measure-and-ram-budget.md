@@ -152,7 +152,24 @@ Die Trefferquote ist die wichtigste Zahl darin. Sie kommt aus dem Expert-Store;
 falls sie noch nicht exportiert wird, ist das der erste Commit dieses Plans.
 
 **Baseline auf `main` aufnehmen, bevor irgendetwas geändert wird.** Das ist die
-Zahl, gegen die alle elf Pläne antreten.
+Zahl, gegen die alle Pläne antreten.
+
+### Was plausibel ist
+
+Damit eine Messung als richtig oder falsch erkennbar ist, hier die Erwartung aus
+dem Bandbreitenabschnitt in [00-reference.md](00-reference.md):
+
+| | Decode |
+|---|---|
+| Bandbreiten-Deckel (100 % RAM-Treffer, DDR4-3200) | **~13 tok/s** |
+| ~20 % Residenz, Dual-Streaming ~10 GB/s | **~3.5 tok/s** |
+| ~11 % Residenz (Ausgangslage), ein Laufwerk ~7 GB/s | **~2 tok/s** |
+
+Der Weg von ~2 auf ~3.5 ist das, was die Pläne holen; die 13 sind die Asymptote.
+**Eine Messung deutlich über 13 tok/s ist ein Messfehler**, keine Sensation — dann
+wurde ein warmer Lauf gemessen, ein zu kurzer Prompt, oder DSpark hat Tokens
+akzeptiert, die der Zähler einzeln gezählt hat. Genau dafür gibt der Harness
+Konfiguration und Cache-Zustand mit aus.
 
 ## Deliverable
 

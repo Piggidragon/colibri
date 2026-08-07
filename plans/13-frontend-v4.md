@@ -78,9 +78,11 @@ Commits, vor jeder UI-Arbeit.**
 Aus der WebUI die Auswahl mehrerer Modellfamilien entfernen; aus `site/` und
 `README`-Bildern das, was andere Modelle zeigt.
 
-**`desktop/` (Tauri):** eigene Entscheidung. Wenn du die Desktop-Hülle nicht
-benutzt, kann sie weg — dann aber vollständig, inklusive Build-Schritten. Halb
-entfernt ist schlimmer.
+**`desktop/` (Tauri) bleibt.** Es hängt an derselben WebUI, also erbt es die
+Änderungen aus Commit 2 automatisch. Zu prüfen ist nur, ob `desktop/src-tauri`
+Modellnamen oder Engine-Pfade fest verdrahtet hat — dann ziehen die mit. Der
+Tauri-Build gehört danach einmal ausgeführt, damit die Änderung nicht erst beim
+nächsten Release auffällt.
 
 ## Verhältnis zu Plan 11
 

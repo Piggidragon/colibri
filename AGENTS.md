@@ -11,7 +11,7 @@ Maschine so gut wie möglich fahren.
 | | |
 |---|---|
 | CPU | Intel **i5-13400F** — 6 P + 4 E Cores, 16 Threads, kein AVX-512 |
-| RAM | 32 GB, Dual-Channel |
+| RAM | 32 GB **DDR4-3200** Dual-Channel — ~45 GB/s |
 | GPU | RTX 4070, 12 GB — **headless im V4-Betrieb**, ~11.7 GiB nutzbar |
 | Laufwerk A | 1 TB NVMe Gen4, DRAM-los (HMB) |
 | Laufwerk B | 512 GB SSD Gen3, DRAM-los (HMB) |
@@ -247,6 +247,11 @@ Agent nichts wieder.
   bandbreitenmäßig aber in jedem Layer präsent.
 - **HCA-Layer haben keine Sparse Attention** — sie lesen den kompletten
   komprimierten Cache und dominieren die Bandbreite bei langem Kontext.
+- **~13 tok/s ist der Bandbreiten-Deckel.** Jeder Token schiebt ~3.4 GB
+  Expert-Gewichte (6 × 43 × 13.4 MB) durch den Speicherbus, auch bei 100 %
+  Cache-Treffer. Auf DDR4-3200 sind das ~77 ms. Kein Plan verschiebt das; sie
+  nähern sich ihm nur. Wer eine Messung sieht, die darüber liegt, hat sich
+  verrechnet oder etwas anderes gemessen.
 - **DFlash ≠ DeepSeek-V4-Flash.** In llama.cpp ist `dflash` eine Drafter-Arch;
   das 284B-Modell heißt dort `deepseek4`.
 - **`coli_physical_cores()` ist auf Linux hybrid-blind.** Es zählt eindeutige

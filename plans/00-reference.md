@@ -16,7 +16,7 @@ DSpark-Drafter auf genau dieser Maschine so gut wie möglich fahren**:
 | | |
 |---|---|
 | CPU | Intel **i5-13400F** — 6 P-Cores + 4 E-Cores, 16 Threads, **kein AVX-512**, **keine iGPU** |
-| RAM | 32 GB, Dual-Channel |
+| RAM | 32 GB **DDR4-3200**, Dual-Channel — ~45 GB/s, siehe Bandbreitenabschnitt |
 | GPU | RTX 4070, 12 GB — **treibt auch das Display** (F-CPU hat keine iGPU) |
 | Laufwerk A | 1 TB NVMe **Gen4**, DRAM-los (HMB) |
 | Laufwerk B | 512 GB SSD **Gen3**, DRAM-los (HMB) |
@@ -109,6 +109,75 @@ Codec und VRAM-Residenz sind keine getrennten Features, sondern Voraussetzung
 füreinander. Der Planner aus Phase 8 muss trotzdem pro Stufe einzeln auf RAM
 zurückfallen können — headless heißt „vorhersehbar", nicht „unbegrenzt", und ein
 Fehlschlag beim Upload muss degradieren statt abzustürzen.
+
+## Speicherbandbreite — die Obergrenze, die keiner der Pläne verschiebt
+
+**Dual-Channel DDR4-3200**: 3200 MT/s × 8 B × 2 Kanäle = **51.2 GB/s** theoretisch,
+realistisch **~45 GB/s** bei Streaming-Reads. Das ist die härteste Zahl im ganzen
+Vorhaben, weil sie unabhängig von Platte, VRAM und Cache-Trefferquote gilt.
+
+### Der Boden für die Dekodierrate
+
+Jeder Token aktiviert 6 geroutete Experten pro Layer, in **allen 43 Layern**.
+Ein Expert-Record ist w1/w2/w3 in fp4 plus E8M0-Scales:
+
+```
+3 × [2048 × 4096] × 0.5 B  = 12.6 MB   Gewichte
++ Scales (E8M0 je 32 Werte)  ≈  0.8 MB
+                              ─────────
+                              ~13.4 MB pro Expert
+
+6 Experten × 43 Layer × 13.4 MB       = ~3.4 GB pro Token
+```
+
+Diese 3.4 GB müssen **durch den Speicherbus**, auch bei 100 % Cache-Treffer. Bei
+~45 GB/s sind das **~77 ms/Token**, also ein Deckel von **~13 tok/s** — mit
+perfektem RAM-Cache, ohne jede Platte, ohne jeden Fehltreffer.
+
+**Kein Plan in diesem Baum verschiebt diesen Deckel.** Sie alle arbeiten daran,
+sich ihm zu nähern: bei ~20 % Residenz kommen ~2.7 GB der 3.4 GB von der Platte,
+das sind bei ~10 GB/s (nach Plan 10) ~270 ms und damit ~3.5 tok/s. Der Weg von
+3.5 auf 13 ist das, was hier zu holen ist. Darüber hinaus ginge nur mit anderer
+Hardware oder weniger aktivierten Parametern.
+
+**Was daraus folgt:**
+
+- **DSpark ist wertvoller als es aussieht.** Ein verifizierter Block von *n*
+  Draft-Tokens liest die *Vereinigung* ihrer Experten, nicht *n* volle Sätze —
+  bei Überlappung deutlich weniger als *n* × 3.4 GB. Spekulatives Dekodieren
+  amortisiert genau den Posten, der den Deckel bildet. `V4_MTP=1 V4_DRAFT=3`
+  gehört ins Profil, nicht als Kür.
+- **THP (Plan 09) wird wichtiger.** Bei knapper Bandbreite kosten TLB-Misses
+  anteilig mehr.
+- **Jede vermeidbare Kopie kostet messbar.** 3.4 GB/Token einmal zusätzlich
+  umzukopieren wären ~77 ms. Der O_DIRECT-Pfad (`COLI_V4_DIRECT`) und die
+  Koaleszenz der Expert-Reads sind deshalb keine Feinheiten.
+
+### Der KV-Lesestrom bei langem Kontext
+
+Aus derselben Bandbreite und den Zahlen in [paper-deepseek-v4.md](paper-deepseek-v4.md):
+
+| Kontext | Codec | MB/Token | CPU @45 GB/s | GPU @504 GB/s |
+|---|---|---|---|---|
+| 128k | f32 | 40.6 | 0.9 ms | — |
+| 128k | `native` | 11.6 | 0.26 ms | 0.02 ms |
+| 1M | f32 | 353 | **7.8 s** | — |
+| 1M | `native` | 100 | **2.2 s** | 0.20 s |
+| 1M | turbo3 | 34 | 0.76 s | **0.07 s** |
+
+Bei 128k ist der KV bandbreitenmäßig belanglos. **Bei 1M ist er auf der CPU
+untragbar** — 2.2 s/Token allein fürs KV-Lesen, selbst mit dem verlustfreien
+Codec. Erst turbo3 **und** der CUDA-Kernel machen das Millionen-Fenster benutzbar.
+
+Das ist die zweite unabhängige Begründung dafür, dass Phase 04 ab ~512k Pflicht ist
+(die erste war das VRAM-Budget oben) — und die eigentliche Rechtfertigung für
+Phase 05.
+
+### Der Head
+
+1.06 GiB BF16 pro Token: **~24 ms** auf DDR4-3200, **~2.1 ms** auf dem 4070.
+Phase 07 spart also ~22 ms/Token — bei 3.5 tok/s sind das ~8 %, bei 13 tok/s
+~29 %. Der Nutzen wächst, je weiter die anderen Phasen kommen.
 
 ## Modellgeometrie
 

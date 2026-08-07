@@ -141,10 +141,12 @@ Nicht löschen, auch wenn es nach Beiwerk aussieht:
 | `c/openai_server.py` | trägt `coli serve` |
 | `web/` | das Dashboard |
 | `colibri/cli.py` | pip-Einstiegspunkt |
+| `desktop/` | Tauri-Hülle über der WebUI |
 | `c/uring.h` | siehe unten |
 | `compat.h` (POSIX-Teil) | `compat_aligned_free` ist keine Attrappe |
 
-`site/` und `desktop/` sind Ermessenssache — siehe [13](13-frontend-v4.md).
+`desktop/` (Tauri) **bleibt** und erbt die WebUI-Änderungen aus [13](13-frontend-v4.md).
+`site/` ist Ermessenssache.
 
 ## Commit 4 — Dokumentation
 
