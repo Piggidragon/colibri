@@ -86,7 +86,7 @@ Die Nummern sind Kennungen, keine Reihenfolge. So wird gearbeitet:
 | 9 | **08** | VRAM-Planner, der 05–07 zu einer Entscheidung zusammenfasst. |
 | 10 | **10** | Dual-Streaming. Unabhängig, kann ab Schritt 2 jederzeit dazwischen. |
 | 11 | **09 Rest** | THP, CUDA-Pfade, Tuning-Doku. |
-| 12 | **04** | TurboQuant — **Pflicht ab ~512k Kontext**, darunter optional (siehe VRAM-Budget in 00). |
+| 12 | **04** | TurboQuant — **Pflicht für das 1M-Profil**, bis 512k optional (siehe VRAM-Budget in 00). |
 | 13 | **13** | Frontend. |
 | 14 | **11** | Rückbau. |
 
@@ -158,17 +158,28 @@ Router-Semantik **nicht still ändert**. Das gilt hier weiter.
 Default = heutiges Verhalten, Wertebereich geklemmt, Müll-Eingabe fällt auf
 Default zurück, und ein Eintrag in `docs/ENVIRONMENT.md`.
 
-### 3. Die drei Attention-Kopien
+### 3. Die duplizierten Units
 
-`c/deepseek_v4.c` ist ein Amalgam. Der Text von `deepseek_v4_attention.c` steht
-**byte-identisch dreimal** darin (Units `ATTENTION`, `ATTENTION_BATCH`,
-`ATTENTION_TRANSACTION`). Der Generator `_amalgamate_v4.py` ist **nicht** im Repo —
-die committete Datei ist Source of Truth.
+`c/deepseek_v4.c` ist ein Amalgam. Der Generator `_amalgamate_v4.py` ist **nicht**
+im Repo — die committete Datei ist Source of Truth. **Vier** Quelldateien stehen
+mehrfach darin, jeweils unter `#define`-Umbenennungen:
 
-Jede Änderung dort muss in alle drei Kopien, **plus** in den Batch-Pfad
-`coli_v4_attention_window_batch_ref`, der dieselbe Logik nochmal enthält.
-`plans/02-flash-attention.md` führt einen Test ein, der die Gleichheit erzwingt.
-Ist der noch nicht da, prüfe von Hand mit `diff`.
+| Quelle | Kopien | Beispiel-Definition |
+|---|---|---|
+| `deepseek_v4_attention.c` | **3** | Struct bei 1400 / 1798 / 4572 |
+| `deepseek_v4_compressor.c` | **2** | `coli_v4_compressor_step` 2538 / 4042 |
+| `deepseek_v4_indexer.c` | **2** | `coli_v4_indexer_step` 2827 / 4390 |
+| `deepseek_v4_layer.c` | **2** | `coli_v4_layer_plan` 355 / 9548 |
+
+Jede Änderung muss in **alle** Kopien der betroffenen Quelle, **plus** in den
+Batch-Pfad `coli_v4_attention_window_batch_ref`, der die Attention-Logik nochmal
+als eigenen Text enthält. Der Compressor/Indexer-Fall ist der, der übersehen wird:
+`plans/03-kv-codec.md` und `plans/12-expert-cache-policy.md` fassen beide genau
+diese zwei Funktionen an.
+
+`plans/02-flash-attention.md` führt einen Test ein, der die Gleichheit erzwingt —
+über alle vier Quellen, nicht nur die Attention. Ist der noch nicht da, prüfe von
+Hand mit `diff` (die Zeilenbereiche stehen in `plans/00-reference.md`).
 
 ### 4. Tests sind Teil des Commits
 
@@ -243,10 +254,21 @@ Agent nichts wieder.
   GPU-Tensoren einfach überspringen.
 - **Der Indexer-Cache ist nicht gedeckelt.** Der `capacity > 128`-Deckel gilt nur
   der Erstallokation; `coli_v4_indexer_step` verdoppelt danach unbegrenzt.
+- **Der Indexer-Scan ist der größte übersehene Posten.** `coli_v4_indexer_step`
+  bewertet pro Token und pro CSA-Layer **alle** `state->count ≈ ctx/4` Einträge
+  gegen 64 Heads × 128 Dims — 352 MB/Token bei 128k, 2.69 GB bei 1M, und die
+  Schleife steht als einzige der heißen V4-Schleifen **außerhalb jedes
+  `#pragma omp`**. Wer die KV-Bandbreite diskutiert, ohne diese Zahl, diskutiert
+  den kleineren Posten. Siehe `plans/00-reference.md`.
 - **`n_win = 128`**, nicht ~2048. Der Fensterring ist speichermäßig irrelevant,
   bandbreitenmäßig aber in jedem Layer präsent.
 - **HCA-Layer haben keine Sparse Attention** — sie lesen den kompletten
-  komprimierten Cache und dominieren die Bandbreite bei langem Kontext.
+  komprimierten Cache und dominieren unter den *gelesenen KV-Zeilen* die
+  Bandbreite bei langem Kontext (aber nicht gegen den Indexer-Scan oben).
+- **Der Head ist 0.99 GiB, nicht 1.06.** `docs/deepseek-v4.md` nennt „about
+  1.06 GiB"; 129280 × 4096 × 2 B = 1.059 **GB**. Für Zeitrechnungen (÷ GB/s) ist
+  die Doku richtig, in einer GiB-Bilanz nicht. Für die 6.27 GiB Dense gilt das
+  **nicht** — die sind echte GiB.
 - **~13 tok/s ist der Bandbreiten-Deckel.** Jeder Token schiebt ~3.4 GB
   Expert-Gewichte (6 × 43 × 13.4 MB) durch den Speicherbus, auch bei 100 %
   Cache-Treffer. Auf DDR4-3200 sind das ~77 ms. Kein Plan verschiebt das; sie

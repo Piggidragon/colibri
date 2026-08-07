@@ -78,14 +78,30 @@ Bei 128k Kontext und ratio 4: `compressed_count` = 32768, also 32768 × 512 × 4
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 ENGINE = (ROOT / "deepseek_v4.c").read_text(encoding="utf-8")
 
-MARK = "struct ColiDeepSeekV4WindowAttentionState {"
-END  = "/* ---- end include deepseek_v4_attention.c ---- */"
+# Quelle -> (Anzahl Kopien, Startmarke)
+SOURCES = {
+    "deepseek_v4_attention.c":  (3, "struct ColiDeepSeekV4WindowAttentionState {"),
+    "deepseek_v4_compressor.c": (2, "/* ---- begin include deepseek_v4_compressor.c ---- */"),
+    "deepseek_v4_indexer.c":    (2, "/* ---- begin include deepseek_v4_indexer.c ---- */"),
+}
+END = "/* ---- end include {source} ---- */"
 ```
 
-Robuster als feste Zeilennummern: die drei Regionen über den Struct-Anfang und den
-`end include`-Marker schneiden, dann paarweise auf Gleichheit prüfen. Zusätzlich
-`assertEqual(ENGINE.count(MARK), 3)`, damit ein vierter Aufruf nicht unbemerkt
-durchrutscht.
+Robuster als feste Zeilennummern: die Regionen über Start- und `end include`-Marker
+schneiden, dann je Quelle paarweise auf Gleichheit prüfen. Zusätzlich die
+Kopienzahl festnageln, damit eine fünfte Kopie nicht unbemerkt durchrutscht.
+
+**Nicht nur die Attention.** Eine frühere Fassung dieses Plans prüfte allein die
+drei Attention-Kopien. `deepseek_v4_compressor.c` und `deepseek_v4_indexer.c`
+stehen ebenfalls doppelt im Amalgam (Units `*_SNAPSHOT`, siehe die Tabelle in
+[00-reference.md](00-reference.md)) — und das sind genau die Funktionen, die
+[03-kv-codec.md](03-kv-codec.md) und [12-expert-cache-policy.md](12-expert-cache-policy.md)
+anfassen. Ein Test, der sie auslässt, deckt die riskanteren Änderungen nicht ab.
+
+`deepseek_v4_layer.c` bleibt außen vor: die `LAYER_RESIDENT`-Kopie ist ein
+Superset (sie trägt zusätzlich `v4_fp8_pack_rows8_inplace`), also ist
+Textgleichheit dort das falsche Kriterium. [06-dense-vram.md](06-dense-vram.md)
+prüft die beiden `coli_v4_layer_load`-Kopien stattdessen von Hand.
 
 **Dieser Test kommt als eigener Commit vor der Umstellung.** Er muss auf
 unverändertem `main` grün sein — sonst stimmt die Annahme nicht.
@@ -132,7 +148,7 @@ for (int c = 0; c < head_dimension; c++)
     head_output[c] = coli_bf16_round(acc[c] / running_sum);
 ```
 
-Drei Punkte, die stimmen müssen:
+Vier Punkte, die stimmen müssen:
 
 - **Sink als initialer Max-Kandidat.** Im heutigen Code steht
   `denominator = expf(sinks[head] - maximum)` außerhalb der Schleife. Startet man
@@ -141,6 +157,22 @@ Drei Punkte, die stimmen müssen:
 - **`-1`-Indizes** werden übersprungen, nicht als `-INFINITY`-Score geführt. Die
   heutige Version setzt `scores[rank] = -INFINITY` und überspringt sie im zweiten
   Durchlauf ohnehin.
+- **Die leere Auswahl braucht einen expliziten Guard.** Das ist die eine Stelle,
+  an der der Sink-Init eine Verhaltensänderung *verdeckt*: heute läuft
+  `coli_v4_sparse_attention_ref` bei ausschließlich `-1`-Indizes in
+  `if (!isfinite(maximum)) return -1` ([:2964](../c/deepseek_v4.c)) und meldet
+  einen Fehler. Der Online-Softmax hat kein `maximum == -INFINITY` mehr — er
+  startet beim Sink — und würde sauber Nullen zurückgeben statt zu scheitern.
+  Also mitzählen und selbst abbrechen:
+
+  ```c
+  int seen = 0;
+  /* ... in der Zeilenschleife: seen++; ... */
+  if (!seen) return -1;   /* wie die zweistufige Referenz */
+  ```
+
+  Ohne das widerspricht der Kernel dem eigenen Testfall unten („muss sauber
+  scheitern"). Eine frühere Fassung dieses Plans hatte genau diesen Widerspruch.
 - **Kein `malloc`** mehr im Kernel. Der `acc`-Puffer ist `head_dimension` groß und
   wird vom Aufrufer gestellt.
 
@@ -171,7 +203,7 @@ Summationsreihenfolge verschoben wird, und weil Plan 05 darauf aufbaut.
 ## Warum das nicht bit-identisch ist
 
 Der Online-Softmax skaliert Akkumulator und Summe nach, wenn das Maximum steigt.
-Das `coli_bf16_round(probability)` (der Kommentar in `:2977` nennt TileLangs
+Das `coli_bf16_round(probability)` (der Kommentar in `:2976` nennt TileLangs
 BF16-Cast vor dem Value-GEMM) landet dadurch an anderer Stelle im Rechenweg, und
 die Additionsreihenfolge in `acc` ändert sich.
 
@@ -187,7 +219,8 @@ Referenz im Baum stehen, nicht nur für `V4_FLASH=0`, sondern als Testorakel.
   - Sink-Verhalten: extreme Sinks (sehr groß, sehr klein) müssen den Nenner
     korrekt dominieren.
   - Numerische Randfälle: alle Scores gleich; ein Score dominiert um >80;
-    `topk=1`; alle Indizes `-1` (muss sauber scheitern, nicht NaN liefern).
+    `topk=1`; alle Indizes `-1` (muss `-1` liefern wie die zweistufige Referenz —
+    siehe den `seen`-Guard oben —, nicht Nullen und nicht NaN).
   - Toleranz: relative Abweichung pro Ausgabekomponente `< 1e-4`, Cosine `> 0.9999`.
 - Bestehende Gates, insbesondere `make -C c deepseek-v4-tiny-check`.
 
@@ -206,8 +239,8 @@ Referenz im Baum stehen, nicht nur für `V4_FLASH=0`, sondern als Testorakel.
 ## Risiken
 
 - **Vier Aufrufstellen statt einer.** Der Batch-Pfad wird gern vergessen; er hat
-  dieselbe Logik pro Item. Der Source-Test deckt nur die drei identischen Kopien
-  ab, **nicht** den Batch-Pfad — den manuell prüfen.
+  dieselbe Logik pro Item. Der Source-Test deckt nur die identischen Kopien ab,
+  **nicht** den Batch-Pfad — der ist eigener Text und muss manuell geprüft werden.
 - **Token-Identität kann kippen.** Wenn zwei Logits sehr nah beieinander liegen,
   kann die geänderte Summationsreihenfolge das Argmax drehen. Am Tiny-Fixture
   unwahrscheinlich, aber wenn es passiert: nicht wegdiskutieren, sondern die

@@ -1,10 +1,11 @@
-# 12 — Expert-Cache-Politik, Prefill und Indexer-Select
+# 12 — Expert-Cache-Politik, Prefill und der Lightning-Indexer
 
-Voraussetzung: [00-reference.md](00-reference.md), [01-measure-and-ram-budget.md](01-measure-and-ram-budget.md)
+Voraussetzung: [00-reference.md](00-reference.md), [01-measure-and-ram-budget.md](01-measure-and-ram-budget.md).
+Commit 2 trägt erst mit [03-kv-codec.md](03-kv-codec.md) — siehe dort.
 
 *Commits:*
 1. `perf: lift the compile-time pin ceiling and make it tunable`
-2. `perf: partial select for the lightning indexer top-k`
+2. `perf: parallel scoring and partial select for the lightning indexer`
 3. `perf: measure and tune the prefill expert batching`
 
 ## Warum dieser Plan überhaupt existiert
@@ -12,6 +13,11 @@ Voraussetzung: [00-reference.md](00-reference.md), [01-measure-and-ram-budget.md
 **Das war die größte Lücke im Planset.** Die Pläne 01–11 machen alle dasselbe:
 mehr RAM für den Expert-Cache freimachen und die Lesevorgänge beschleunigen.
 Keiner kümmert sich darum, **was im Cache liegt**.
+
+Der Plan trägt inzwischen zwei verschiedene Hebel: Commit 1 und 3 sind
+Cache-Politik, Commit 2 ist der Indexer und hat damit nichts zu tun — er steht
+hier, weil er derselben Sorte Fund entspringt (vorhandene Maschinerie, die nie
+gemessen wurde) und dieselbe Messgrundlage aus Plan 01 braucht.
 
 Bei ~20 % Residenz ist das der falsche Schwerpunkt. Ein Treffer kostet null
 Bytes von der Platte; ein Fehltreffer kostet ~13.4 MB (ein voller
@@ -44,9 +50,10 @@ gemessener Nutzungshäufigkeit, mit persistierter Historie in
         maximum_pins = COLI_V4_MAX_PIN_SLOTS_PER_LAYER;
 ```
 
-`Makefile.deepseek-v4:34` hebt ihn auf **16**. Nach den VRAM-Phasen fasst der
-Cache aber ~50 Slots pro Layer (27.9 GiB / 576 MB, siehe RAM-Bilanz in
-[00-reference.md](00-reference.md)). **Damit sind höchstens 32 % des Caches
+`Makefile.deepseek-v4:44` hebt ihn auf **16** (Linux-Zweig; der MSYS2-Zweig setzt
+denselben Wert bei `:34`). Nach den VRAM-Phasen fasst der Cache aber ~51 Slots pro
+Layer (27.6 GiB / 0.535 GiB, siehe RAM-Bilanz in
+[00-reference.md](00-reference.md)). **Damit sind höchstens 31 % des Caches
 historiengesteuert gepinnt**, der Rest läuft adaptiv über LRU.
 
 Ob 16 richtig ist, weiß niemand — der Wert stammt aus einer Zeit, in der der Cache
@@ -63,48 +70,84 @@ V4_PIN_FRACTION=<0..1>  alternativ: Anteil der verfügbaren Slots
 ```
 
 Clamp wie üblich (Muster `coli_v4_dspark_cache_gb`, [:6288](../c/deepseek_v4.c)).
-Dazu `COLI_V4_PIN_RAMP_REQUESTS` (heute 24, `Makefile.deepseek-v4:35`) ebenfalls
-zur Laufzeit setzbar.
+Dazu `COLI_V4_PIN_RAMP_REQUESTS` (heute 24, `Makefile.deepseek-v4:45`) ebenfalls
+zur Laufzeit setzbar, als `V4_PIN_RAMP_REQUESTS`.
+
+Alle drei Knöpfe gehören in die Tabelle in [00-reference.md](00-reference.md) und
+in `docs/ENVIRONMENT.md` — das ist Teil dieses Commits, nicht Nacharbeit.
 
 **Dann messen**, nicht raten: Trefferquote über einen festen Promptsatz bei
-`V4_PIN_SLOTS` ∈ {4, 16, 32, 52}. Der Gewinner wird Default für dieses Profil.
+`V4_PIN_SLOTS` ∈ {4, 16, 32, 51}. Der Gewinner wird Default für dieses Profil.
 
 Die `.coli_usage`-Historie braucht ≥5000 Requests, um zu greifen. Für ein
 persönliches Setup heißt das: **`COLI_V4_SAVE_USAGE=1` von Anfang an setzen** und
 die Historie über Wochen wachsen lassen. Gehört ins Tuning-Doc als
 Erstinbetriebnahme-Hinweis — sonst wundert man sich, warum Pinning „nichts tut".
 
-## Commit 2 — Der Indexer-Top-k
+## Commit 2 — Die Indexer-Bewertungsschleife
 
-`coli_v4_indexer_step` ([c/deepseek_v4.c:2827](../c/deepseek_v4.c)) sortiert **alle**
-Kandidaten, um die besten `index_topk = 512` zu finden:
+`coli_v4_indexer_step` steht **zweimal** im Amalgam
+([c/deepseek_v4.c:2827](../c/deepseek_v4.c) und [:4390](../c/deepseek_v4.c), Units
+`INDEXER` und `INDEXER_SNAPSHOT` — siehe [00-reference.md](00-reference.md)).
+Beide Kopien ändern, sonst driften sie.
+
+Die Funktion tut zwei Dinge, und **die Reihenfolge der Kosten ist umgekehrt zur
+Intuition**:
 
 ```c
-IndexScore *scores = malloc((size_t)state->count * sizeof(*scores));
-...
-qsort(scores, state->count, sizeof(*scores), descending_score);
+for (int candidate = 0; !result && candidate < state->count; candidate++) {   /* (1) */
+    const float *key = state->compressed + (size_t)candidate * dimension;
+    for (int head = 0; head < heads; head++)          /* 64  */
+        for (int i = 0; i < dimension; i++)           /* 128 */
+            dot += query[i] * key[i];
+}
+qsort(scores, state->count, sizeof(*scores), descending_score);              /* (2) */
 ```
 
-Bei 1M Kontext ist `state->count` = 250 000. Ein voller Sort ist O(n log n) ≈ 4.5M
-Vergleiche, wo ein partieller Select O(n) ≈ 250k reicht — pro Token und pro
-CSA-Layer, also **21×** pro Token.
+Bei 1M Kontext ist `state->count` = 250 000, pro Token und pro CSA-Layer, also
+**21×** pro Token:
 
-**Änderung:** Ein Min-Heap der Größe `topk`, oder ein Quickselect-Durchlauf.
-Wichtig ist die **Ordnung des Ergebnisses**: `descending_score` bricht
-Gleichstände über den Index (`return a->index - b->index`), und die Auswahl geht
-danach in `compressed_indices`. Der Ersatz muss dieselbe Menge und dieselbe
-Reihenfolge liefern — sonst ändert sich, welche Tokens die Attention sieht, und
-das ist Router-Semantik, nicht Präzision.
+| | Arbeit pro Token (1M, alle CSA-Layer) | gelesen |
+|---|---|---|
+| (1) Bewertung | **43 G MAC** | **2.69 GB** |
+| (2) `qsort` | ~4.5 M Vergleiche × 21 ≈ 95 M | — |
+
+**Die Bewertung ist rund 400× teurer als der Sort.** Eine frühere Fassung dieses
+Plans führte nur (2) auf und nannte es „den" Gewinn. Beides gehört in diesen
+Commit, aber in dieser Reihenfolge.
+
+### (1) zuerst
+
+- **`#pragma omp parallel for` über `candidate`.** Die Schleife ist die einzige
+  heiße V4-Schleife ohne OpenMP — die 18 vorhandenen Pragmas
+  ([09-arch-cachyos.md](09-arch-cachyos.md)) lassen sie aus. Sie ist rein lesend
+  bis auf `scores[candidate]`, also trivial parallelisierbar, und **das ändert
+  nichts an der Auswahl**: jeder Eintrag bekommt seinen eigenen Slot.
+- **Mit `V4_KV_INDEX=native` (Plan 03) fallen die gelesenen Bytes auf 1/7.5** —
+  357 MB statt 2.69 GB. Deshalb ist 03 Voraussetzung, wenn dieser Commit tragen
+  soll, und deshalb steht 03 in [AGENTS.md](../AGENTS.md) vor 12.
+- Der WMMA-CUDA-Kernel aus llama.cpp
+  (`ggml/src/ggml-cuda/lightning-indexer.cu`, siehe
+  [llamacpp-deepseek-v4.md](llamacpp-deepseek-v4.md)) adressiert genau diese
+  Schleife und ist die Vorlage, sobald [05-cuda-attention.md](05-cuda-attention.md)
+  den Build mitbringt. **Nicht** Teil dieses Commits.
+
+### (2) danach
+
+Ein Min-Heap der Größe `topk`, oder ein Quickselect-Durchlauf. Wichtig ist die
+**Ordnung des Ergebnisses**: `descending_score` bricht Gleichstände über den Index
+(`return a->index - b->index`), und die Auswahl geht danach in
+`compressed_indices`. Der Ersatz muss dieselbe Menge und dieselbe Reihenfolge
+liefern — sonst ändert sich, welche Tokens die Attention sieht, und das ist
+Router-Semantik, nicht Präzision.
 
 Deshalb: der Test vergleicht die **komplette Indexliste** gegen den bisherigen
 `qsort`-Pfad, auf Zufallsdaten inklusive vieler Gleichstände. Nicht nur die
 Mengengleichheit — die Reihenfolge.
 
-llama.cpp hat für denselben Zweck einen WMMA-CUDA-Kernel
-(`ggml/src/ggml-cuda/lightning-indexer.cu`, siehe
-[llamacpp-deepseek-v4.md](llamacpp-deepseek-v4.md)). Der Score-Teil gehört
-langfristig dorthin; dieser Commit macht nur den CPU-Select richtig, unabhängig
-von CUDA.
+**Auch die Parallelisierung von (1) braucht diesen Test.** Sie ändert die
+Auswahl nicht, aber sie ändert die Reihenfolge, in der `scores[]` gefüllt wird,
+und ein Fehler dabei sieht aus wie ein Select-Fehler.
 
 ## Commit 3 — Prefill
 
@@ -151,7 +194,9 @@ Damit sie nicht vergessen, aber auch nicht ungeprüft eingebaut werden:
 
 - `c/tests/test_v4_indexer_select.c` — partieller Select gegen `qsort`:
   identische Indexliste **in identischer Reihenfolge**, für `count` ∈ {1, 512,
-  513, 250000}, mit vielen Gleichständen und mit `topk > count`.
+  513, 250000}, mit vielen Gleichständen und mit `topk > count`. Derselbe
+  Vergleich einmal mit `OMP_NUM_THREADS=1` und einmal mehrfädig, damit die
+  Parallelisierung der Bewertungsschleife mit abgedeckt ist.
 - `c/tests/test_v4_pin_env.c` — `V4_PIN_SLOTS` / `V4_PIN_FRACTION` clampen,
   Müll fällt auf Default, beide gleichzeitig gesetzt → dokumentierter Vorrang.
 - Trefferquoten-Messung als Skript, nicht als Gate: `c/tools/bench_v4_hitrate.py`,
@@ -159,8 +204,11 @@ Damit sie nicht vergessen, aber auch nicht ungeprüft eingebaut werden:
 
 ## Abnahme
 
-- Indexer-Select liefert **bitgleiche** Indexlisten und ist bei `count = 250000`
-  messbar schneller.
+- Indexer-Select liefert **bitgleiche** Indexlisten, ein- und mehrfädig, und ist
+  bei `count = 250000` messbar schneller.
+- Die Bewertungsschleife skaliert mit der Teamgröße — gemessen, nicht angenommen.
+  Wenn sie es nicht tut, ist sie speicherbandbreitengebunden und der Gewinn hängt
+  an `V4_KV_INDEX=native` statt an OpenMP; auch das ist ein Ergebnis.
 - Die Trefferquoten-Messung liegt für ≥4 Pin-Konfigurationen vor; der Gewinner
   steht als Default im Tuning-Doc, mit den Zahlen.
 - Prefill-Messung liegt vor, mit Empfehlung für Batchgröße und Prefetch.

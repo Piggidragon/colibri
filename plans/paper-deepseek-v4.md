@@ -344,10 +344,29 @@ der gerouteten Experten (siehe [00-reference.md](00-reference.md)). Mit turbo3
 sind es 0.76 ms, auf dem 4070 bei ~500 GB/s rund 0.07 ms. (Eine frühere Fassung
 wies diese Zeiten in Sekunden statt Millisekunden aus — Faktor 1000 zu hoch.)
 
-Das reine KV-Lesen ist damit **kein** eigenständiges Argument für Phase 04/05;
-das eigentliche Gewicht liegt beim VRAM-Budget (siehe
-[00-reference.md](00-reference.md)) und bei der O(Kontext)-Staging-Kopie, die
-[02-flash-attention.md](02-flash-attention.md) beschreibt.
+### Was diese Tabelle **nicht** enthält: der Indexer-Scan
+
+Sie zählt nur die Zeilen, die der Attention-Kernel liest — also *nach* der
+Top-k-Auswahl. Die Auswahl selbst kostet mehr: `coli_v4_indexer_step`
+([c/deepseek_v4.c:2893](../c/deepseek_v4.c)) bewertet pro Token und pro CSA-Layer
+**alle** `ctx/4` komprimierten Indexer-Einträge gegen 64 Heads × 128 Dims.
+
+| Kontext | Einträge | gelesen f32 | gelesen fp4 (Paper-Format) | MAC/Token |
+|---|---|---|---|---|
+| 128k | 32 768 | **352 MB/Token** | 46.8 MB | 5.6 G |
+| 1M | 250 000 | **2.69 GB/Token** | 357 MB | 43 G |
+
+Das ist bei 1M rund **8× mehr** als die 353 MB/Token oben und liegt mit ~60 ms in
+der Größenordnung des Expertendeckels. Herleitung und Folgerungen im
+Indexer-Abschnitt von [00-reference.md](00-reference.md).
+
+**Konsequenz für die Bewertung der Pläne:** Die *gelesenen KV-Zeilen* sind kein
+eigenständiges Argument für Phase 04/05 — das Gewicht liegt beim VRAM-Budget
+(siehe [00-reference.md](00-reference.md)), bei der O(Kontext)-Staging-Kopie aus
+[02-flash-attention.md](02-flash-attention.md) und beim Indexer-Scan hier. Für
+den Indexer ist das FP4 des Papers deshalb kein Detail, sondern der Hebel:
+`V4_KV_INDEX=native` ([03-kv-codec.md](03-kv-codec.md)) senkt genau diesen Strom
+auf 1/7.5, verlustfrei.
 
 ---
 
@@ -379,9 +398,15 @@ Nicht implementierungsrelevant.
    Empfehlung „Indexer unangetastet lassen" war zu vorsichtig. → [03](03-kv-codec.md)
 3. **`n_win` = 128, nicht ~2048.** Der Fensterring ist speichermäßig
    bedeutungslos (10.8 MiB), bandbreitenmäßig aber in jedem Token präsent.
-4. **HCA-Layer lesen den kompletten komprimierten Cache.** Sie, nicht die
-   CSA-Layer, dominieren die Bandbreite bei langem Kontext. → [02](02-flash-attention.md), [05](05-cuda-attention.md)
+4. **HCA-Layer lesen den kompletten komprimierten Cache.** Unter den *gelesenen
+   KV-Zeilen* dominieren sie bei langem Kontext, nicht die CSA-Layer. Gegen den
+   Indexer-Scan (Punkt 7) sind aber auch sie klein.
+   → [02](02-flash-attention.md), [05](05-cuda-attention.md)
 5. **Top-k = 512, `n_win` = 128** → CSA-Kernel läuft über exakt 640 Zeilen.
    Konkrete Zahl fürs Kernel-Design. → [05](05-cuda-attention.md)
 6. **`lcm(m, m') = 128`** ist die natürliche Blockgröße, falls der Cache je
    blockweise verwaltet wird.
+7. **Der Lightning Indexer ist der größte Lesestrom überhaupt** — 352 MB/Token bei
+   128k, 2.69 GB bei 1M, und die Schleife läuft skalar und ohne OpenMP. Das FP4
+   des Papers ist dafür die Antwort.
+   → [03](03-kv-codec.md), [12](12-expert-cache-policy.md)

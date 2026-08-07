@@ -28,11 +28,23 @@ und in `coli_v4_resource_plan_compute` ([:693](../c/deepseek_v4.c)):
 
 ```c
 int explicit_process_limit = inputs->user_limit_bytes &&
-    inputs->user_limit_bytes < available;                        // :704
-uint64_t system = explicit_process_limit ? 0 : available / 8;    // :707
+    inputs->user_limit_bytes < available;                        // :705
+uint64_t system = explicit_process_limit ? 0 : available / 8;    // :713
 if (!explicit_process_limit && system < 512 * MIB) system = 512 * MIB;
 if (system > 4096 * MIB) system = 4096 * MIB;
+
+multiply_u64(inputs->maximum_layer_bytes, 2, &layers_twice);     // :719
+add_u64(layers_twice, inputs->runtime_other_bytes,
+        &plan->runtime_reserve_bytes);
 ```
+
+**Die letzten zwei Zeilen sind die, die man beim Nachrechnen vergisst.** Die
+Runtime-Reserve ist `2 × maximum_layer_bytes + runtime_other`, nicht bloß
+`runtime_other`. `maximum_layer_bytes` ist der größte Einzel-Layer aus der
+Dense-Inventur ([:947](../c/deepseek_v4.c)), hier ~0.162 GiB — also ~0.32 GiB, die
+in **keinem** der Hebel unten auftauchen und von keiner späteren Phase verschwinden.
+Sie stehen jetzt in der RAM-Bilanz in [00-reference.md](00-reference.md); die
+Messaufgabe unten soll sie am echten Planner bestätigen.
 
 Der bestehende Report ([:1057](../c/deepseek_v4.c)) druckt bereits alles Nötige:
 

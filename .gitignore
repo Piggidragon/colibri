@@ -102,5 +102,7 @@ c/tiny_inkling/
 
 # Papers consulted while planning. Third-party copyright: read locally, don't
 # redistribute through this repo. plans/paper-deepseek-v4.md carries the notes.
-/paper.pdf
-*.paper.pdf
+# Unanchored so a copy in docs/ or plans/ is covered too — an earlier version
+# only had /paper.pdf plus a *.paper.pdf that matched nothing we ever create.
+paper.pdf
+**/paper*.pdf

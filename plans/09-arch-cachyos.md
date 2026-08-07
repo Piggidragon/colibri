@@ -48,6 +48,14 @@ Dabei hat V4 **18** `#pragma omp parallel for`-Stellen, darunter die heißen:
 [:10356](../c/deepseek_v4.c), [:10451](../c/deepseek_v4.c)) und das
 Expert-Warmup ([:5945](../c/deepseek_v4.c)).
 
+**Eine heiße Schleife fehlt in dieser Liste**, und zwar nicht zufällig: die
+Bewertungsschleife in `coli_v4_indexer_step` ([:2893](../c/deepseek_v4.c)) hat
+**kein** Pragma, kostet aber bei 128k rund 5.6 G MAC pro Token (Herleitung im
+Indexer-Abschnitt von [00-reference.md](00-reference.md)). Sie zu parallelisieren
+gehört zu [12-expert-cache-policy.md](12-expert-cache-policy.md) Commit 2, nicht
+hierher — aber sie ist der Grund, warum das Team-Sizing aus Commit 1 dort mehr
+bringt als anderswo.
+
 Ohne Sizing nimmt libgomp den Default: **alle logischen Kerne inklusive SMT.** Auf
 einem Ryzen mit SMT ist das genau die Konfiguration, gegen die #718 gemessen wurde.
 
@@ -168,7 +176,7 @@ Arbeitslast ist das kontraproduktiv, und der Header sagt warum:
 > `Meccanismo: dove il token e' fatto di byte dal disco, una squadra che gira a
 > vuoto ruba i core al pool di I/O che sta facendo il lavoro vero.`
 
-**32 GB gegen 160 GB Experten ist exakt dieses Regime** — ~10 % Residenz nach der
+**32 GB gegen ~147 GB Experten ist exakt dieses Regime** — ~10 % Residenz nach der
 Bilanz in [00](00-reference.md), also praktisch dasselbe Regime wie die zitierte
 Messung. Ein wartendes OpenMP-Team klaut hier den I/O-Threads die Kerne.
 
@@ -288,7 +296,8 @@ Ein Abschnitt „Arch / CachyOS" in `docs/deepseek-v4-tuning-32gb.md` (aus
   taugt, die ihn tatsächlich anfassen will — komprimierbarer Swap hilft einem
   Expert-Cache nicht, er kostet CPU. Das macht das explizite `RAM_GB` aus Plan 01
   **wichtiger**, nicht optional. Prüfen mit `zramctl` und `swapon --show`.
-- **`ARCH ?= native`** ist in `c/Makefile.deepseek-v4:41` bereits der Default —
+- **`ARCH ?= native`** ist in `c/Makefile.deepseek-v4:40` (Linux-Zweig) bereits
+  der Default —
   für einen Build auf der Zielmaschine ist da nichts zu holen. Nur `make check`
   baut mit `PORTABLE_ARCH`; wer Benchmarkzahlen vergleicht, muss wissen, welcher
   von beiden lief.
@@ -327,8 +336,10 @@ als benannter Kandidat, nicht als Zusage.
 
 ## Abnahme
 
-- `coli_omp_tune_threads` läuft im V4-Start und loggt die Teamgröße; auf einer
-  SMT-Maschine ist sie **halb** so groß wie vorher.
+- `coli_omp_tune_threads` läuft im V4-Start und loggt die Teamgröße. Auf einer
+  durchgängig SMT-fähigen CPU ist sie halb so groß wie vorher; **auf dem
+  i5-13400F 10 statt 16**, weil nur die 6 P-Cores SMT haben und die 4 E-Cores
+  nicht. Wer „halb" als Kriterium nimmt, hält den richtigen Wert für einen Fehler.
 - Durchsatzmessung vorher/nachher auf der Zielmaschine — die Erwartung aus #718
   ist der Maßstab, nicht die Garantie.
 - `AnonHugePages` in `smaps_rollup` ist nach Commit 2 nennenswert von 0 verschieden

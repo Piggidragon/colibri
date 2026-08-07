@@ -40,7 +40,7 @@ unter dem Präfix `mtp.<stage>.` und wird aus `engine->target_index` gelesen
 
 `forward_dspark_draft_block` bestätigt drei Dinge, die colibris Config-Felder
 schon andeuten (`dspark_block_size`, `dspark_noise_token_id`, `dspark_markov_rank`
-in [c/deepseek_v4.h:31](../c/deepseek_v4.h)):
+in [c/deepseek_v4.h:34](../c/deepseek_v4.h) ff.):
 
 **Der Draft-Block ist nicht kausal.**
 

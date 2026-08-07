@@ -77,6 +77,14 @@ ratio-4-Layer, bei allen **21** solchen Layern ~353 MB. `context_bytes` rechnet
 das korrekt mit; es ist echter Verbrauch und ein lohnendes Ziel, aber mit
 Semantik-Vorbehalt (unten).
 
+**Und dieser Puffer wird pro Token vollständig gelesen.** `coli_v4_indexer_step`
+bewertet jeden Eintrag gegen 64 Heads × 128 Dims, in jedem CSA-Layer, in jedem
+Token — 352 MB/Token bei 128k, 2.69 GB bei 1M (Herleitung im Indexer-Abschnitt von
+[00-reference.md](00-reference.md)). Die 7.5× aus `V4_KV_INDEX=native` wirken damit
+nicht nur auf den Speicherverbrauch, sondern auf den größten Lesestrom, den die
+Engine hat. **Das ist der stärkste Einzelgrund für diesen Plan** — stärker als die
+3.5× auf den Haupt-KV, die die Tabelle oben prominenter ausweist.
+
 ## Änderungen
 
 ### Neuer Header `c/v4_kv_codec.h`
@@ -205,6 +213,32 @@ Neu: in einen `float scratch[head_dim]` schreiben lassen, dann
 `coli_v4_kv_encode_row` in den Slot. Der Scratch gehört zum State, nicht zum
 Aufruf — eine Allokation pro Layer, nicht pro Token.
 
+### Compressor und Indexer stehen **doppelt** im Amalgam
+
+**Die Tabelle oben ist nicht vollständig, und die fehlende Hälfte ist die
+gefährliche.** Neben den drei Attention-Kopien sind auch Compressor und Indexer
+dupliziert (Units `COMPRESSOR`/`COMPRESSOR_SNAPSHOT` und
+`INDEXER`/`INDEXER_SNAPSHOT`, byte-identisch unter `#define`-Umbenennung — siehe
+die Tabelle in [00-reference.md](00-reference.md)):
+
+| Funktion | Kopie 1 | Kopie 2 | Warum dieser Plan sie anfasst |
+|---|---|---|---|
+| `coli_v4_compressor_step` | [:2538](../c/deepseek_v4.c) | [:4042](../c/deepseek_v4.c) | Zwischenpuffer statt Direkt-Write |
+| Der QDQ-Block darin | [:2643](../c/deepseek_v4.c) | [:4147](../c/deepseek_v4.c) | liefert `(q, scales)` an den Codec |
+| `coli_v4_indexer_step` | [:2827](../c/deepseek_v4.c) | [:4390](../c/deepseek_v4.c) | `state->compressed` wird `void *` |
+| Wachstums-`realloc` darin | [:2837](../c/deepseek_v4.c) | [:4400](../c/deepseek_v4.c) | `× dimension` wird `× row_bytes` |
+
+Eine frühere Fassung dieses Plans nannte nur die jeweils erste Spalte. Der
+Source-Sync-Test aus [02-flash-attention.md](02-flash-attention.md) deckt diese
+Quellen nach der dortigen Korrektur mit ab — er fängt aber nur *Drift zwischen*
+den Kopien, nicht ein einheitlich falsches Muster in beiden. Die Tabelle
+abarbeiten und abhaken.
+
+Der QDQ-Block ist dabei **eine** Stelle für beide Ströme, nicht zwei:
+`coli_v4_compressor_step` verzweigt intern über `state->rotate_fp4` zwischen
+fp8/Block 64 (Haupt-KV) und Hadamard+fp4/Block 32 (Indexer). Wer dort einen
+`codes`-Out-Parameter einzieht, muss beide Zweige bedienen.
+
 ### Snapshot
 
 `coli_v4_attention_snapshot_create` / `_restore` ([:4963](../c/deepseek_v4.c)) kopieren
@@ -311,9 +345,10 @@ Kopfkommentar.
   liest daneben. Deshalb: `row_bytes` im State speichern statt an jeder Stelle neu
   auszurechnen, und in `create` einmal
   `assert(row_bytes == coli_v4_kv_row_bytes(codec, head_dim))`.
-- **Die sieben Umbaustellen × drei Kopien** sind 21 Änderungen plus Batch-Pfad. Der
-  Source-Sync-Test fängt Drift zwischen den Kopien, aber nicht ein einheitlich
-  falsches Muster. Die Tabelle oben abarbeiten und abhaken.
+- **Die sieben Umbaustellen × drei Attention-Kopien** sind 21 Änderungen, plus
+  Batch-Pfad, **plus** die vier Stellen × zwei Kopien in Compressor und Indexer.
+  Insgesamt ~30 Stellen. Der Source-Sync-Test fängt Drift zwischen den Kopien, aber
+  nicht ein einheitlich falsches Muster. Beide Tabellen oben abarbeiten und abhaken.
 - **Codec-Wahl vor dem Planner** verschiebt Initialisierungsreihenfolge. Wenn
   `coli_v4_engine_open` die Config erst später lädt, muss die Auflösung dorthin
   wandern, wo `config` gültig ist — nicht raten, den Pfad lesen.

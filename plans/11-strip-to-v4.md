@@ -14,7 +14,7 @@ Nur noch **DeepSeek-V4-Flash-0731** plus den **DSpark**-Drafter. Alles andere is
 in diesem Fork toter Code.
 
 Der Nutzen ist nicht Speicherplatz, sondern Aufmerksamkeit: `c/colibri.c` allein
-sind ~8000 Zeilen, die bei jeder Suche, jedem `grep` und jedem Refactor mitlaufen.
+sind ~9500 Zeilen, die bei jeder Suche, jedem `grep` und jedem Refactor mitlaufen.
 Nach dem Rückbau ist der Baum das, was er sein soll — eine V4-Engine.
 
 ## Reihenfolge — bitte ernst nehmen
@@ -67,7 +67,7 @@ die Löschliste, und der Nachweis bleibt im Baum.
 
 | Datei | Zeilen | Anmerkung |
 |---|---|---|
-| `c/colibri.c` | ~8000 | GLM-5.2. **Erst nach Plan 10.** |
+| `c/colibri.c` | ~9500 | GLM-5.2. **Erst nach Plan 10.** |
 | `c/inkling.c` | | |
 | `c/kimi_k3.c` | | |
 | `c/olmoe.c` | | |
@@ -78,7 +78,7 @@ Tests unter `c/tests/`, ihre Tools unter `c/tools/` (`convert_glm*`,
 `k3_*.py`, `make_glm_bench_model.py`, `expert_atlas/`) und ihre Fixtures.
 
 **`c/Makefile` wird dabei zum Hauptrisiko.** Er trägt die Toolchain-Erkennung, die
-`TEST_RULES`-Ableitung ([:360](../c/Makefile)) und die CUDA/HIP/Metal/Vulkan-Logik.
+`TEST_RULES`-Ableitung ([:359](../c/Makefile)) und die CUDA/HIP/Metal/Vulkan-Logik.
 `Makefile.deepseek-v4` ist eigenständig, braucht aber Teile davon (siehe Plan 05,
 `NVCC`/`CUDA_HOME`). Der Rückbau sollte `c/Makefile` **auf den V4-Pfad eindampfen**,
 nicht ersetzen — sonst verliert man die Gate-Ableitung und die
@@ -95,6 +95,12 @@ Zielplattform ist **Linux, x86-64**. Alles Windows-Spezifische ist toter Code:
 | `c/backend_loader.c` | die DLL-Ladepfad-Konstruktion (`LoadLibrary`/`GetProcAddress`) |
 | `_WIN32`-Zweige | `compat.h`, `st.h`, `omp_tune.h`, `telemetry.h`, `iobench.c`, `deepseek_v4.c`, `backend_cuda.h` |
 | `Makefile`-Zweige | `IS_WIN`, `EXE`, MSYS2-Pfade in `Makefile.deepseek-v4` |
+
+**`backend_loader.c` fällt hier, nicht in Commit 3.** Es ist ausschließlich der
+Windows-DLL-Ladepfad; sobald Windows kein Ziel mehr ist, hat es keinen Nutzer.
+Eine frühere Fassung dieses Plans führte es zusätzlich in der Kandidatentabelle
+von Commit 3 mit „behalten" — das war ein Widerspruch. Wer 2b **nicht** ausführt
+(Windows bleibt Ziel), lässt es stehen; dann entfällt aber der ganze Commit.
 
 `compat.h` ist dabei die heikelste Datei: sie bildet `posix_memalign`,
 `compat_aligned_free`, `compat_open_direct` und einiges mehr auf Windows ab.
@@ -118,7 +124,7 @@ Kandidaten, jeweils **erst gegen die Hülle aus Commit 1 prüfen**:
 | `backend_metal.{h,mm}`, `backend_vulkan.{c,h}`, `shaders/` | löschen | V4 ist Linux/CUDA-only |
 | `backend_cuda_ink.{cu,h}` | löschen | Inkling-spezifisch; **erst nach Plan 05**, dient als Muster |
 | `backend_cuda.{cu,h}` | **behalten, ausdünnen** | Plan 06 braucht `fmt=8` und die `pipe_*`-Primitive; MLA-Kernel für GLM können weg |
-| `backend_loader.c` | behalten | Windows-DLL-Pfad; nur relevant, wenn Windows Ziel bleibt |
+| `backend_loader.c` | — | **schon in Commit 2b weg**, siehe dort. Hier nicht nochmal bewerten |
 | `kv_persist.h` | löschen | Nutzt `Model`/`KVState`/`Cfg` aus colibri.c |
 | `uring.h` | **behalten** | Nur von colibri.c genutzt, aber der beste Kandidat für V4-Storage (siehe Plan 09) |
 | `rans.h`, `fse_coli.h`, `cfse_pack.c`, `iq3_*` | prüfen | Entropie-Tier; V4 nutzt fp4/fp8 nativ |

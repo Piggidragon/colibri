@@ -63,6 +63,15 @@ im Stil von `kv_prefix.h`/`omp_tune.h` — und von beiden Motoren benutzen. Dami
 ist es kein Copy-Paste und Plan 11 (Rückbau) kann colibri.c löschen, ohne die
 Logik mitzunehmen.
 
+**Das ist die einzige Stelle des Branches, die `colibri.c` anfasst.**
+[00-reference.md](00-reference.md) sagt unter „Was dieser Branch nicht macht", dass
+die anderen Motoren unangetastet bleiben; dieser Commit ist dort als benannte
+Ausnahme eingetragen. Sie gilt nur für den Refactor ohne Verhaltensänderung, und
+sie kostet einen zusätzlichen Abnahmeschritt: `make -C c colibri` plus die
+GLM-Gates müssen grün bleiben, nicht nur die V4-Gates. Wird das zu teuer, greift
+der Rückfall aus den Risiken unten (V4-lokale Kopie mit Verweis) — dann entfällt
+die Ausnahme und der Eintrag in 00 auch.
+
 Inhalt: `expert_route`, die Cut-Berechnung, `mirror_probe_bw`, `mir_pread_striped`
 und die Statistikzähler. Alles hängt nur an `shards *` aus `st.h`, nicht an
 `Model`/`Cfg` — der Schnitt ist sauber.
@@ -223,6 +232,6 @@ bewusste Entscheidung festhalten, nicht als Zufall.
   Routing bricht. `DIRECT=1` umgeht das; die V4-Entsprechung ist
   `COLI_V4_DIRECT` ([:112](../c/deepseek_v4.c)). Im Profil setzen.
 - **Der gemeinsame Header ist ein Refactor an laufendem Code.** colibri.c ist
-  ~8000 Zeilen und der GLM-Pfad ist nicht Ziel dieses Branches — wenn der Schnitt
+  ~9500 Zeilen und der GLM-Pfad ist nicht Ziel dieses Branches — wenn der Schnitt
   zu teuer wird, ist eine V4-lokale Kopie mit Verweis auf das Original die
   ehrlichere Zwischenlösung, solange Plan 11 sie erbt.

@@ -8,9 +8,9 @@ Voraussetzung: [00-reference.md](00-reference.md), [06-dense-vram.md](06-dense-v
 
 ## Ziel
 
-Weitere **2.3 GiB RAM frei** (1.06 Head + ~1.25 DSpark) und nebenbei der beste
+Weitere **2.24 GiB RAM frei** (0.99 Head + ~1.25 DSpark) und nebenbei der beste
 Rechenzeit-pro-Aufwand-Posten des ganzen Branches: der Head ist ein
-bandbreitengebundener Matvec über 1.06 GiB pro Token.
+bandbreitengebundener Matvec über 1.059 GB pro Token.
 
 Danach ist DSpark auf 32 GB überhaupt erst bezahlbar — es kostet keinen
 Expert-Cache mehr.
@@ -32,9 +32,15 @@ if (resident) {
 }
 ```
 
-`vocab = 129280`, `d = 4096`, BF16 → **1.059 GiB pro Token gelesen**. Auf
-DDR4-3200 mit ~45 GB/s sind das ~24 ms (siehe [00-reference.md](00-reference.md));
-auf dem 4070 mit ~500 GB/s ~2 ms. Faktor ~12, und gleichzeitig 1.06 GiB RAM frei.
+`vocab = 129280`, `d = 4096`, BF16 → 129280 × 4096 × 2 B = **1.059 GB pro Token
+gelesen**. Auf DDR4-3200 mit ~45 GB/s sind das ~24 ms (siehe
+[00-reference.md](00-reference.md)); auf dem 4070 mit ~500 GB/s ~2 ms. Faktor ~12,
+und gleichzeitig **0.99 GiB** RAM frei.
+
+**GB, nicht GiB.** `docs/deepseek-v4.md` nennt „about 1.06 GiB" — das ist der
+dezimale Wert mit dem falschen Suffix. Für die Zeitrechnung oben ist er richtig
+(÷ GB/s), für die RAM- und VRAM-Bilanzen nicht: dort sind es 0.986 GiB. Wer beide
+Zahlen mischt, verrechnet sich um 7 %.
 
 Der Fallback darunter ([:6814](../c/deepseek_v4.c)) streamt in 64-Zeilen-Kacheln,
 wenn der Head nicht resident ist — der bleibt unverändert als letzte Stufe.
@@ -203,6 +209,6 @@ Zusätzlich wird DSpark schneller: der Drafter läuft dreistufig pro Token
 - **`V4_MTP_GB`-Slabs bleiben im RAM.** Wer erwartet, dass DSpark komplett
   verschwindet, wird enttäuscht; der Expert-Cache des Drafters ist ein eigenes
   Thema.
-- **1.06 GiB Upload beim Start** dauert über PCIe ~0.05 s — unkritisch, aber der
+- **0.99 GiB Upload beim Start** dauert über PCIe ~0.05 s — unkritisch, aber der
   Ladepfad darf dafür keinen 1 GiB-Host-Puffer anlegen. In Kacheln lesen und
   hochladen, wie es der Streaming-Fallback in `head_argmax` schon vormacht.

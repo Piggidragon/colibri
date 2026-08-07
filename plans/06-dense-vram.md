@@ -17,7 +17,7 @@ weil Q das Gerät nicht mehr verlässt.
 
 ### Was „dense" hier heißt
 
-`v5_dense_inventory` ([c/deepseek_v4.c:980](../c/deepseek_v4.c)) summiert
+`v5_dense_inventory` ([c/deepseek_v4.c:981](../c/deepseek_v4.c)) summiert
 `stats.total_bytes` über alle Layer — die **komplette Layer-Inventur ohne geroutete
 Experten**: Attention-Projektionen, Compressor, Indexer, Router-Gate, Shared Expert,
 Norms, HC-Parameter. Laut `docs/deepseek-v4.md` ~6.27 GiB.
@@ -110,6 +110,43 @@ ist das Verhalten byte-identisch zu heute.
 Ein Test muss festhalten, dass `packed_rows8 == 0` in diesem Fall auch wirklich
 gesetzt bleibt — sonst würde `fp8_view` später `block_rows = 8` melden und der
 CPU-Fallback läse falsch.
+
+### `coli_v4_layer_load` gibt es **dreimal**, und das ändert den Zuschnitt
+
+Der Skizze oben fehlt, wo `gpu_resident` überhaupt herkommen kann. Im Amalgam:
+
+| Zeile | Symbol | Repack? | Rolle |
+|---|---|---|---|
+| [:512](../c/deepseek_v4.c) | `coli_v4_layer_resident_reference_load` (per `#define` umbenannt) | **ja**, bei [:543](../c/deepseek_v4.c) | liest die Tensoren wirklich |
+| [:583](../c/deepseek_v4.c) | `coli_v4_layer_load` (Unit `LAYER_RESIDENT`) | nein | exportierter Wrapper, cached pro Layer |
+| [:9678](../c/deepseek_v4.c) | `coli_v4_layer_load` (Unit `LAYER`) | **nein** | zweite Übersetzungseinheit, ohne Repack |
+
+Zwei Dinge folgen daraus, die die Skizze oben so nicht hergibt:
+
+1. **Der Repack sitzt nicht in der Funktion, die den Tier-Plan kennt.** Der Wrapper
+   bei :583 hat `engine`, ruft den Reference-Loader aber ausdrücklich mit `NULL`
+   auf:
+
+   ```c
+   if (!resident_enabled_v2(engine))
+       return coli_v4_layer_resident_reference_load(
+           NULL, weights, effective_config, index, layer, error, error_size);
+   ```
+
+   `weights->gpu_resident` abzufragen genügt deshalb nur, wenn das Flag **im
+   `weights`-Struct** steht (das durchgereicht wird) — nicht im `engine`. Die
+   Skizze oben liest `weights->gpu_resident` und ist damit richtig; wer stattdessen
+   `engine->...` nimmt, greift auf `NULL` zu. Das Flag muss also der Aufrufer
+   **vor** dem Load in `weights` setzen, an beiden `reference_load`-Aufrufstellen
+   ([:594](../c/deepseek_v4.c) und die oben).
+2. **Die `LAYER`-Kopie bei :9678 hat gar keinen Repack** — sie ist kein Duplikat,
+   sondern eine eigene Variante. Der Source-Sync-Test aus
+   [02-flash-attention.md](02-flash-attention.md) lässt `deepseek_v4_layer.c`
+   deshalb bewusst aus; Textgleichheit ist hier das falsche Kriterium. Prüfen, ob
+   diese Kopie im V4-Zielbuild überhaupt aktiv ist (`V4_TARGET_UNITS` in
+   `c/Makefile.deepseek-v4.units`), bevor man sie mitändert.
+
+Siehe die Duplikat-Tabelle in [00-reference.md](00-reference.md).
 
 ## Commit 2 — Upload und Dispatch
 
@@ -206,8 +243,9 @@ die Messaufgabe dieses Commits.
   Reihenfolge wie `matmul_fp8`. Logits weichen minimal ab; am Tiny-Fixture auf
   Token-Identität prüfen und, falls sie kippt, als Toleranz dokumentieren statt
   wegzudrücken. Das ist die einzige echte Semantikfrage dieser Phase.
-- **6.27 dense + 1.06 head + 0.56 DSpark + 0.30 Workspace = 8.19 GiB Fixkosten**
-  lassen auf der headless 12-GB-Karte ~3.5 GiB für den KV (siehe VRAM-Budget in
+- **6.27 dense + 0.99 head + 0.56 DSpark + 0.30 Workspace = 8.12 GiB Fixkosten**
+  lassen auf der headless 12-GB-Karte ~2.6 GiB für den KV — 11.7 nutzbar minus
+  1.0 GiB Planner-Reserve aus Plan 08 minus 8.12 (siehe VRAM-Budget in
   [00-reference.md](00-reference.md)). Ohne den Codec aus Plan 03 schließt das
   Budget bei langem Kontext trotzdem nicht. Reihenfolge nicht umdrehen.
 - **Der `gpu_resident`-Durchstich** berührt den Ladepfad, den auch der

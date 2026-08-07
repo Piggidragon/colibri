@@ -52,10 +52,15 @@ endif
 Objektregel nach dem Muster von `backend_cuda_ink.o` ([c/Makefile:611](../c/Makefile)):
 
 ```make
-backend_cuda_v4.o: backend_cuda_v4.cu backend_cuda_v4.h
+backend_cuda_v4.o: backend_cuda_v4.cu backend_cuda_v4.h .build-config
 	@command -v "$(NVCC)" >/dev/null 2>&1 || { echo "nvcc not found: set CUDA_HOME or NVCC" >&2; exit 1; }
 	"$(NVCC)" $(NVCCFLAGS) -c backend_cuda_v4.cu -o $@
 ```
+
+Die `.build-config`-Abhängigkeit ist kein Zierrat: sie steht auch in der
+`backend_cuda_ink.o`-Regel und sorgt dafür, dass ein Wechsel der Build-Flags das
+`.o` neu baut. Wer sie weglässt, bekommt beim Umschalten zwischen `CUDA=1` und
+ohne ein stale Objekt.
 
 Achtung: `Makefile.deepseek-v4` linkt auf Windows `-static`. Der CUDA-Zweig ist
 Linux-only, also kollidiert das nicht — aber die `-flto`-Voreinstellung (`LTO ?= 1`)

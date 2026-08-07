@@ -26,7 +26,7 @@ Der RAM-Planner ist zweistufig und sauber getrennt:
 - `coli_v4_resident_tier_plan` ([:763](../c/deepseek_v4.c)) — entscheidet
   Dense-Residenz gegen das verbleibende Budget, über den Helfer
   `resident_tiers_fit` ([:756](../c/deepseek_v4.c)).
-- `coli_v4_expert_store_open_planned` ([:1000](../c/deepseek_v4.c)) — setzt beides
+- `coli_v4_expert_store_open_planned` ([:1001](../c/deepseek_v4.c)) — setzt beides
   zusammen, entscheidet zusätzlich die Head-Residenz und druckt `ram_tiers`.
 
 Die Head-Entscheidung dort ist bemerkenswert direkt ([:1033](../c/deepseek_v4.c)):
@@ -80,7 +80,7 @@ Feste Reihenfolge, jede Stufe einzeln rückfallfähig:
 |---|---|---|
 | 1 | **KV** | Ohne KV auf dem Gerät ist der Attention-Kernel aus Plan 05 sinnlos. Der einzige Posten, der mit dem Kontext wächst — 0.43 GiB (`native`, 128k) bis 3.4 GiB (`native`, 1M). |
 | 2 | **Dense** | Größter RAM-Gewinn pro VRAM-Byte (6.27 GiB für 6.27 GiB) und macht Q device-resident. |
-| 3 | **Head** | 1.06 GiB, größter Rechenzeitgewinn, aber unabhängig vom Rest. |
+| 3 | **Head** | 0.99 GiB, größter Rechenzeitgewinn, aber unabhängig vom Rest. |
 | 4 | **DSpark** | Nur wenn aktiv; muss mit dem Head zusammen wandern (siehe Plan 07). |
 
 **Kopplung erzwingen:** landet der Head im RAM, muss DSpark auch im RAM bleiben —
@@ -95,7 +95,7 @@ if (plan->head != COLI_V4_TIER_VRAM) plan->dspark = plan->head;
 
 `coli_cuda_mem_info` liefert freien Speicher zum Zeitpunkt des Aufrufs — auf einer
 Karte mit Display schwankt der. Analog zur RAM-Systemreserve
-([:707](../c/deepseek_v4.c)) eine Reserve abziehen:
+([:713](../c/deepseek_v4.c)) eine Reserve abziehen:
 
 ```c
 uint64_t reserve = free_bytes / 8;
@@ -106,10 +106,18 @@ if (reserve > 1024 * MIB) reserve = 1024 * MIB;
 Über `V4_VRAM_RESERVE_MB` überschreibbar, mit Clamp — Muster
 `coli_v4_dspark_cache_gb` ([:6288](../c/deepseek_v4.c)).
 
+**Diese Reserve ist Teil des Budgets in [00-reference.md](00-reference.md), nicht
+eine Zutat obendrauf.** Auf dem 4070 greift der obere Clamp: `11.7/8 = 1.46` → volle
+1.0 GiB, also **10.7 GiB für die vier Stufen**, nicht 11.7. Eine frühere Fassung
+des VRAM-Budgets in 00 rechnete ohne sie und kam deshalb auf ~3.5 GiB KV-Spielraum
+statt der tatsächlichen ~2.6 — mit der Folge, dass `native` bei 1M dort noch zu
+passen schien. Wer diese Reserve ändert, korrigiert das Budget in 00 mit; sonst
+planen die beiden Dokumente gegeneinander.
+
 ### Rückkopplung in den RAM-Plan
 
 Was auf der GPU liegt, darf im RAM-Plan nicht mehr auftauchen. In
-`coli_v4_expert_store_open_planned` ([:1000](../c/deepseek_v4.c)):
+`coli_v4_expert_store_open_planned` ([:1001](../c/deepseek_v4.c)):
 
 ```c
 uint64_t safe_payload = plan.planner_available_bytes - fixed
@@ -130,8 +138,8 @@ Die `ram_tiers`-Zeile ([:1057](../c/deepseek_v4.c)) um eine `vram_tiers`-Zeile
 ergänzen — gleiche Form, gleicher Ort, damit beides zusammen im Log steht:
 
 ```
-ram_tiers  available=28.00GiB dense=vram target_slots=49 target_cache=27.85GiB head=vram projected=27.5GiB
-vram_tiers free=11.70GiB reserve=1.00GiB kv=vram(0.43GiB) dense=vram(6.27GiB) head=vram(1.06GiB) dspark=vram(0.56GiB) used=8.62GiB
+ram_tiers  available=28.00GiB dense=vram target_slots=51 target_cache=27.30GiB head=vram projected=27.55GiB
+vram_tiers free=11.70GiB reserve=1.00GiB kv=vram(0.43GiB) dense=vram(6.27GiB) head=vram(0.99GiB) dspark=vram(0.56GiB) used=8.55GiB
 ```
 
 Ohne diesen Report ist nicht nachvollziehbar, warum eine Konfiguration schnell oder
@@ -159,12 +167,14 @@ Zeit pro Token aufgeschlüsselt.
 
 Verlinkung aus `docs/deepseek-v4.md` unter „Memory policy".
 
-Bei `CTX=131072` reicht `native` — verlustfrei, 0.43 GiB KV, ~3.1 GiB Reserve.
-**Erst ab etwa 512k wird turbo3 nötig**, und dann gilt der Semantik-Vorbehalt für
-`V4_KV_INDEX`: turbo auf dem Indexer quantisiert die Top-k-Auswahl, also
-Router-Semantik. Ein zweites Profil für 1M gehört ins Doc, mit den Messungen aus
-Plan 04 als Beleg, dass die Tokenfolge stabil bleibt — sonst dort `V4_KV_INDEX=native`
-lassen und den Unterschied ausweisen.
+Bei `CTX=131072` reicht `native` — verlustfrei, 0.43 GiB KV, ~2.15 GiB übrig.
+Bis einschließlich 512k bleibt das so (1.7 GiB KV, ~0.88 GiB übrig). **Erst beim
+1M-Profil wird turbo3 Pflicht**: `native` bräuchte dort 3.4 GiB und bekommt ~2.6.
+Dann gilt der Semantik-Vorbehalt für `V4_KV_INDEX`: turbo auf dem Indexer
+quantisiert die Top-k-Auswahl, also Router-Semantik. Ein zweites Profil für 1M
+gehört ins Doc, mit den Messungen aus Plan 04 als Beleg, dass die Tokenfolge
+stabil bleibt — sonst dort `V4_KV_INDEX=native` lassen (68 B statt 50 B pro Zeile,
+das Budget trägt es) und den Unterschied ausweisen.
 
 ## Der OOM-Pfad muss geprobt werden, nicht angenommen
 
@@ -235,8 +245,8 @@ Abgleich der beiden Abnahmekriterien.
 ## Abnahme
 
 - Auf dem 4070 (headless) zeigt `vram_tiers` alle vier Posten als `vram` bei
-  `used ≈ 8.6 GiB` für `CTX=131072`/`native`.
-- `ram_tiers` zeigt `target_cache ≈ 27.9 GiB` gegen ~14.6 GiB auf `main` (siehe
+  `used ≈ 8.55 GiB` für `CTX=131072`/`native`, `reserve = 1.00 GiB`.
+- `ram_tiers` zeigt `target_cache ≈ 27.6 GiB` gegen ~14.4 GiB auf `main` (siehe
   RAM-Bilanz in [00-reference.md](00-reference.md)).
 - Künstlich verkleinertes VRAM-Budget (`V4_VRAM_LIMIT_MB`) degradiert stufenweise
   statt zu scheitern — durchgespielt für 8, 6, 4, 2 und 0 GiB.
