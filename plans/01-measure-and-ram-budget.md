@@ -115,9 +115,11 @@ print('sliding_window', c['sliding_window'], 'head_dim', c['head_dim'])
 " /pfad/DeepSeek-V4-Flash
 ```
 
-Daraus die KV-Bytes pro Token:
-`Σ_ratio4 (head_dim + index_head_dim)·4/4 + Σ_ratio128 head_dim·4/128`.
-Bei geschätzt 14 ratio-4- und 14 ratio-128-Layern sind das ~9.2 KB/Token f32.
+**Erwartet wird** (Paper 4.2.1, siehe [00-reference.md](00-reference.md)):
+2 Layer mit Ratio 0, **21 mit Ratio 4**, **20 mit Ratio 128** — daraus
+**13.4 KB/Token** bei f32. Weicht der Checkpoint davon ab, sind die
+KV-Rechnungen in 00, 03 und 04 anzupassen; dann gilt die Pflegeregel aus
+[AGENTS.md](../AGENTS.md) (Korrektur in 00, nicht nur hier).
 
 Ohne Checkpoint ersatzweise die Ist-Zeile des Planners aufnehmen — sie genügt für
 den Vorher/Nachher-Vergleich der Hebel 1 und 2.
