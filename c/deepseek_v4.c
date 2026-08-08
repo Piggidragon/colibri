@@ -2981,11 +2981,19 @@ int coli_v4_indexer_step(ColiDeepSeekV4Indexer *state, int *indices,
     for (int candidate = 0; !result && candidate < state->count; candidate++) {
         const void *key = (const unsigned char *)state->compressed +
                           (size_t)candidate * state->row_bytes;
+        const float *values = key;
+        if (state->codec != COLI_V4_KV_F32) {
+            result = coli_v4_kv_decode_row(
+                state->codec, COLI_V4_KV_INDEX,
+                state->compressor_scratch, key, dimension, 0);
+            values = state->compressor_scratch;
+        }
         float score = 0.0f;
-        for (int head = 0; head < heads; head++) {
+        for (int head = 0; !result && head < heads; head++) {
             const float *query = queries + (size_t)head * dimension;
-            float dot = coli_v4_kv_dot(
-                state->codec, COLI_V4_KV_INDEX, query, key, dimension, 0);
+            float dot = 0.0f;
+            for (int column = 0; column < dimension; column++)
+                dot += query[column] * values[column];
             score += fmaxf(dot, 0.0f) * head_weights[head];
         }
         scores[candidate] = (IndexScore){score, candidate};
@@ -3103,6 +3111,15 @@ static const void *attention_row(
     return (const unsigned char *)compressed_kv + (size_t)index * row_bytes;
 }
 
+static const float *attention_row_values(
+    ColiV4KVCodec codec, const void *row, float *decoded,
+    int head_dimension, int rope_dimension) {
+    if (codec == COLI_V4_KV_F32) return row;
+    return coli_v4_kv_decode_row(
+        codec, COLI_V4_KV_MAIN, decoded, row,
+        head_dimension, rope_dimension) ? NULL : decoded;
+}
+
 int coli_v4_flash_attention_codec_ref(
     float *output, const float *queries,
     const void *window_kv, int window_size,
@@ -3119,50 +3136,69 @@ int coli_v4_flash_attention_codec_ref(
         head_dimension < 1 || !row_bytes || !(softmax_scale > 0.0f))
         return -1;
     int topk = window_size + compressed_selected;
+    float *running_max = malloc((size_t)heads * sizeof(*running_max));
+    float *running_sum = malloc((size_t)heads * sizeof(*running_sum));
+    float *decoded = codec == COLI_V4_KV_F32 ? NULL
+        : malloc((size_t)head_dimension * sizeof(*decoded));
+    if (!running_max || !running_sum ||
+        (codec != COLI_V4_KV_F32 && !decoded)) {
+        free(decoded); free(running_sum); free(running_max); return -1;
+    }
     for (int head = 0; head < heads; head++) {
-        const float *query = queries + (size_t)head * head_dimension;
-        float *accumulator = output + (size_t)head * head_dimension;
         /* Keeping the sink in the running maximum also prevents a dominating
          * sink from producing a positive, overflowing expf argument. */
-        float running_max = sinks[head];
-        float running_sum = 1.0f;
-        int seen = 0;
-        memset(accumulator, 0,
-               (size_t)head_dimension * sizeof(*accumulator));
-        for (int rank = 0; rank < topk; rank++) {
-            int invalid = 0;
-            const void *key = attention_row(
-                window_kv, window_size, compressed_kv, compressed_count,
-                window_indices,
-                compressed_indices, compressed_selected, rank, row_bytes,
-                &invalid);
-            if (invalid) return -1;
-            if (!key) continue;
-            seen++;
-            float score = coli_v4_kv_dot(
-                codec, COLI_V4_KV_MAIN, query, key,
-                head_dimension, rope_dimension) * softmax_scale;
-            if (score > running_max) {
-                float correction = expf(running_max - score);
-                running_sum *= correction;
+        running_max[head] = sinks[head];
+        running_sum[head] = 1.0f;
+        memset(output + (size_t)head * head_dimension, 0,
+               (size_t)head_dimension * sizeof(*output));
+    }
+    int seen = 0;
+    int result = 0;
+    /* One KV row is shared by every head.  Decode it once here instead of in
+     * every head's dot and accumulation pass. */
+    for (int rank = 0; rank < topk && !result; rank++) {
+        int invalid = 0;
+        const void *row = attention_row(
+            window_kv, window_size, compressed_kv, compressed_count,
+            window_indices, compressed_indices, compressed_selected,
+            rank, row_bytes, &invalid);
+        if (invalid) { result = -1; break; }
+        if (!row) continue;
+        const float *values = attention_row_values(
+            codec, row, decoded, head_dimension, rope_dimension);
+        if (!values) { result = -1; break; }
+        seen++;
+        for (int head = 0; head < heads; head++) {
+            const float *query = queries + (size_t)head * head_dimension;
+            float *accumulator = output + (size_t)head * head_dimension;
+            float score = 0.0f;
+            for (int column = 0; column < head_dimension; column++)
+                score += query[column] * values[column];
+            score *= softmax_scale;
+            if (score > running_max[head]) {
+                float correction = expf(running_max[head] - score);
+                running_sum[head] *= correction;
                 for (int column = 0; column < head_dimension; column++)
                     accumulator[column] *= correction;
-                running_max = score;
+                running_max[head] = score;
             }
-            float probability = expf(score - running_max);
-            running_sum += probability;
+            float probability = expf(score - running_max[head]);
+            running_sum[head] += probability;
             /* TileLang casts the exp fragment to BF16 before value GEMM. */
             probability = coli_bf16_round(probability);
-            coli_v4_kv_accumulate(
-                codec, COLI_V4_KV_MAIN, accumulator, probability, key,
-                head_dimension, rope_dimension);
+            for (int column = 0; column < head_dimension; column++)
+                accumulator[column] += probability * values[column];
         }
-        if (!seen) return -1;
+    }
+    if (!seen) result = -1;
+    for (int head = 0; !result && head < heads; head++) {
+        float *accumulator = output + (size_t)head * head_dimension;
         for (int column = 0; column < head_dimension; column++)
             accumulator[column] = coli_bf16_round(
-                accumulator[column] / running_sum);
+                accumulator[column] / running_sum[head]);
     }
-    return 0;
+    free(decoded); free(running_sum); free(running_max);
+    return result;
 }
 
 int coli_v4_flash_attention_ref(
@@ -3195,65 +3231,79 @@ static int coli_v4_two_pass_attention_codec_ref(
         head_dimension < 1 || !row_bytes || !(softmax_scale > 0.0f))
         return -1;
     int topk = window_size + compressed_selected;
-    float *scores = malloc((size_t)topk * sizeof(*scores));
-    if (!scores) return -1;
-    for (int head = 0; head < heads; head++) {
-        const float *query = queries + (size_t)head * head_dimension;
-        float maximum = -INFINITY;
-        for (int rank = 0; rank < topk; rank++) {
-            int invalid = 0;
-            const void *key = attention_row(
-                window_kv, window_size, compressed_kv, compressed_count,
-                window_indices,
-                compressed_indices, compressed_selected, rank, row_bytes,
-                &invalid);
-            if (invalid) {
-                free(scores);
-                return -1;
-            }
-            if (!key) {
-                scores[rank] = -INFINITY;
-                continue;
-            }
-            float score = coli_v4_kv_dot(
-                codec, COLI_V4_KV_MAIN, query, key,
-                head_dimension, rope_dimension) * softmax_scale;
-            scores[rank] = score;
-            if (score > maximum) maximum = score;
+    float *scores = malloc((size_t)heads * topk * sizeof(*scores));
+    float *maximum = malloc((size_t)heads * sizeof(*maximum));
+    float *denominator = malloc((size_t)heads * sizeof(*denominator));
+    float *decoded = codec == COLI_V4_KV_F32 ? NULL
+        : malloc((size_t)head_dimension * sizeof(*decoded));
+    if (!scores || !maximum || !denominator ||
+        (codec != COLI_V4_KV_F32 && !decoded)) {
+        free(decoded); free(denominator); free(maximum); free(scores); return -1;
+    }
+    for (int head = 0; head < heads; head++) maximum[head] = -INFINITY;
+    int result = 0;
+    for (int rank = 0; rank < topk && !result; rank++) {
+        int invalid = 0;
+        const void *row = attention_row(
+            window_kv, window_size, compressed_kv, compressed_count,
+            window_indices, compressed_indices, compressed_selected,
+            rank, row_bytes, &invalid);
+        if (invalid) { result = -1; break; }
+        if (!row) {
+            for (int head = 0; head < heads; head++)
+                scores[(size_t)head * topk + rank] = -INFINITY;
+            continue;
         }
-        if (!isfinite(maximum)) {
-            free(scores);
-            return -1;
+        const float *values = attention_row_values(
+            codec, row, decoded, head_dimension, rope_dimension);
+        if (!values) { result = -1; break; }
+        for (int head = 0; head < heads; head++) {
+            const float *query = queries + (size_t)head * head_dimension;
+            float score = 0.0f;
+            for (int column = 0; column < head_dimension; column++)
+                score += query[column] * values[column];
+            score *= softmax_scale;
+            scores[(size_t)head * topk + rank] = score;
+            if (score > maximum[head]) maximum[head] = score;
         }
-        float denominator = expf(sinks[head] - maximum);
-        float *head_output = output + (size_t)head * head_dimension;
-        memset(head_output, 0,
-               (size_t)head_dimension * sizeof(*head_output));
-        for (int rank = 0; rank < topk; rank++) {
-            int invalid = 0;
-            const void *value = attention_row(
-                window_kv, window_size, compressed_kv, compressed_count,
-                window_indices,
-                compressed_indices, compressed_selected, rank, row_bytes,
-                &invalid);
-            if (invalid) {
-                free(scores);
-                return -1;
-            }
-            if (!value) continue;
-            float probability = expf(scores[rank] - maximum);
-            denominator += probability;
+    }
+    for (int head = 0; !result && head < heads; head++) {
+        if (!isfinite(maximum[head])) { result = -1; break; }
+        denominator[head] = expf(sinks[head] - maximum[head]);
+        memset(output + (size_t)head * head_dimension, 0,
+               (size_t)head_dimension * sizeof(*output));
+    }
+    /* The reference path has two passes, but each pass still decodes a shared
+     * row once rather than once per head. */
+    for (int rank = 0; rank < topk && !result; rank++) {
+        int invalid = 0;
+        const void *row = attention_row(
+            window_kv, window_size, compressed_kv, compressed_count,
+            window_indices, compressed_indices, compressed_selected,
+            rank, row_bytes, &invalid);
+        if (invalid) { result = -1; break; }
+        if (!row) continue;
+        const float *values = attention_row_values(
+            codec, row, decoded, head_dimension, rope_dimension);
+        if (!values) { result = -1; break; }
+        for (int head = 0; head < heads; head++) {
+            float probability = expf(
+                scores[(size_t)head * topk + rank] - maximum[head]);
+            denominator[head] += probability;
             probability = coli_bf16_round(probability);
-            coli_v4_kv_accumulate(
-                codec, COLI_V4_KV_MAIN, head_output, probability, value,
-                head_dimension, rope_dimension);
+            float *head_output = output + (size_t)head * head_dimension;
+            for (int column = 0; column < head_dimension; column++)
+                head_output[column] += probability * values[column];
         }
+    }
+    for (int head = 0; !result && head < heads; head++) {
+        float *head_output = output + (size_t)head * head_dimension;
         for (int column = 0; column < head_dimension; column++)
             head_output[column] = coli_bf16_round(
-                head_output[column] / denominator);
+                head_output[column] / denominator[head]);
     }
-    free(scores);
-    return 0;
+    free(decoded); free(denominator); free(maximum); free(scores);
+    return result;
 }
 
 static int v4_flash_enabled(void) {
@@ -4789,11 +4839,19 @@ int coli_v4_indexer_step(ColiDeepSeekV4Indexer *state, int *indices,
     for (int candidate = 0; !result && candidate < state->count; candidate++) {
         const void *key = (const unsigned char *)state->compressed +
                           (size_t)candidate * state->row_bytes;
+        const float *values = key;
+        if (state->codec != COLI_V4_KV_F32) {
+            result = coli_v4_kv_decode_row(
+                state->codec, COLI_V4_KV_INDEX,
+                state->compressor_scratch, key, dimension, 0);
+            values = state->compressor_scratch;
+        }
         float score = 0.0f;
-        for (int head = 0; head < heads; head++) {
+        for (int head = 0; !result && head < heads; head++) {
             const float *query = queries + (size_t)head * dimension;
-            float dot = coli_v4_kv_dot(
-                state->codec, COLI_V4_KV_INDEX, query, key, dimension, 0);
+            float dot = 0.0f;
+            for (int column = 0; column < dimension; column++)
+                dot += query[column] * values[column];
             score += fmaxf(dot, 0.0f) * head_weights[head];
         }
         scores[candidate] = (IndexScore){score, candidate};
@@ -7439,6 +7497,14 @@ int main(int argc, char **argv) {
     ColiV4KVCodec index_codec = coli_v4_kv_codec_from_env(
         "V4_KV_INDEX", COLI_V4_KV_INDEX, config.index_head_dim,
         0, COLI_V4_KV_NATIVE);
+    fprintf(stderr, "v4_kv main=%s row=%zuB index=%s row=%zuB\n",
+            coli_v4_kv_codec_name(kv_codec),
+            coli_v4_kv_row_bytes(
+                kv_codec, COLI_V4_KV_MAIN,
+                config.head_dim, config.qk_rope_head_dim),
+            coli_v4_kv_codec_name(index_codec),
+            coli_v4_kv_row_bytes(
+                index_codec, COLI_V4_KV_INDEX, config.index_head_dim, 0));
     for (int layer = 0; layer < config.num_hidden_layers; layer++)
         if (coli_v4_window_attention_create(
                 &attention[layer], &config, kv_codec, index_codec)) return 1;
@@ -10420,28 +10486,37 @@ int coli_v4_config_load(ColiDeepSeekV4Config *config, const char *model_dir,
 
 float coli_e8m0_decode(uint8_t value) {
     if (value == 0xff) return NAN;
-    return ldexpf(1.0f, (int)value - 127);
+    uint32_t bits = value ? (uint32_t)value << 23 : UINT32_C(0x00400000);
+    float output;
+    memcpy(&output, &bits, sizeof(output));
+    return output;
 }
 
 float coli_e2m1_decode(uint8_t nibble) {
     static const float values[16] = {
         0.0f, 0.5f, 1.0f, 1.5f, 2.0f, 3.0f, 4.0f, 6.0f,
-        0.0f, -0.5f, -1.0f, -1.5f, -2.0f, -3.0f, -4.0f, -6.0f,
+        -0.0f, -0.5f, -1.0f, -1.5f, -2.0f, -3.0f, -4.0f, -6.0f,
     };
     return values[nibble & 15];
 }
 
 float coli_e4m3fn_decode(uint8_t value) {
-    int sign = value >> 7;
+    uint32_t sign = (uint32_t)(value & 0x80) << 24;
     int exponent = (value >> 3) & 15;
     int mantissa = value & 7;
     if (exponent == 15 && mantissa == 7) return NAN;
-    float number;
-    if (!exponent)
-        number = ldexpf((float)mantissa, -9);
-    else
-        number = ldexpf(1.0f + (float)mantissa / 8.0f, exponent - 7);
-    return sign ? -number : number;
+    uint32_t bits = sign;
+    if (exponent) {
+        bits |= (uint32_t)(exponent + 120) << 23;
+        bits |= (uint32_t)mantissa << 20;
+    } else if (mantissa) {
+        int leading = mantissa >= 4 ? 2 : mantissa >= 2 ? 1 : 0;
+        bits |= (uint32_t)(leading + 118) << 23;
+        bits |= (uint32_t)(mantissa - (1 << leading)) << (23 - leading);
+    }
+    float output;
+    memcpy(&output, &bits, sizeof(output));
+    return output;
 }
 
 uint8_t coli_e4m3fn_encode(float value) {
@@ -10718,7 +10793,8 @@ int coli_fp8_matvec_ref(float *output, const ColiTensorView *weight,
 
 size_t coli_v4_kv_row_bytes(ColiV4KVCodec codec, ColiV4KVStream stream,
                             int head_dim, int rope_dim) {
-    if (head_dim < 1 || (stream == COLI_V4_KV_MAIN &&
+    if ((stream != COLI_V4_KV_MAIN && stream != COLI_V4_KV_INDEX) ||
+        head_dim < 1 || (stream == COLI_V4_KV_MAIN &&
                         (rope_dim < 0 || rope_dim > head_dim)) ||
         (stream == COLI_V4_KV_INDEX && rope_dim != 0))
         return 0;
@@ -10831,6 +10907,8 @@ static int encode_native_main(unsigned char *dst, const float *src,
 }
 
 static int fp4_code(float value) {
+    /* E2M1 carries signed zero even though both table entries compare equal. */
+    if (value == 0.0f) return signbit(value) ? 8 : 0;
     int best = 0;
     float distance = fabsf(value - coli_e2m1_decode(0));
     for (int code = 1; code < 16; code++) {
@@ -11011,7 +11089,11 @@ ColiV4KVCodec coli_v4_kv_codec_from_env(const char *variable,
                                         int head_dim, int rope_dim,
                                         ColiV4KVCodec fallback) {
     const char *setting = variable ? getenv(variable) : NULL;
-    ColiV4KVCodec selected = fallback;
+    ColiV4KVCodec safe_fallback = fallback;
+    if (!coli_v4_kv_row_bytes(
+            safe_fallback, stream, head_dim, rope_dim))
+        safe_fallback = COLI_V4_KV_F32;
+    ColiV4KVCodec selected = safe_fallback;
     int known = !setting || !*setting;
     if (setting && !strcmp(setting, "f32")) {
         selected = COLI_V4_KV_F32;
@@ -11033,8 +11115,8 @@ ColiV4KVCodec coli_v4_kv_codec_from_env(const char *variable,
         fprintf(stderr, "%s warning=unsupported-value value=%s fallback=%s\n",
                 variable ? variable : "V4_KV",
                 setting && *setting ? setting : coli_v4_kv_codec_name(selected),
-                coli_v4_kv_codec_name(fallback));
-        selected = fallback;
+                coli_v4_kv_codec_name(safe_fallback));
+        selected = safe_fallback;
     }
     return selected;
 }

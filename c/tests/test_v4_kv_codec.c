@@ -124,6 +124,34 @@ static int test_native_index(void) {
     return check_native_row(COLI_V4_KV_INDEX, legacy, DIMENSION, 0);
 }
 
+static int test_native_rejection_and_signed_zero(void) {
+    enum { DIMENSION = 128, ROPE = 64 };
+    float invalid[DIMENSION] = {0};
+    unsigned char main_row[193], index_row[68], decoded_bytes[68];
+    float decoded[DIMENSION];
+    invalid[0] = nextafterf(1.0f, 2.0f);
+    if (!coli_v4_kv_encode_row(
+            COLI_V4_KV_NATIVE, COLI_V4_KV_MAIN,
+            main_row, invalid, DIMENSION, ROPE) ||
+        !coli_v4_kv_encode_row(
+            COLI_V4_KV_NATIVE, COLI_V4_KV_INDEX,
+            index_row, invalid, DIMENSION, 0))
+        return 1;
+
+    memset(invalid, 0, sizeof(invalid));
+    invalid[0] = -0.0f;
+    if (coli_v4_kv_encode_row(
+            COLI_V4_KV_NATIVE, COLI_V4_KV_INDEX,
+            decoded_bytes, invalid, DIMENSION, 0) ||
+        (decoded_bytes[0] & 0x0f) != 8 ||
+        coli_v4_kv_decode_row(
+            COLI_V4_KV_NATIVE, COLI_V4_KV_INDEX,
+            decoded, decoded_bytes, DIMENSION, 0) ||
+        !signbit(decoded[0]))
+        return 1;
+    return 0;
+}
+
 static int test_f32_operations(void) {
     enum { DIMENSION = 128 };
     float input[DIMENSION], encoded[DIMENSION], decoded[DIMENSION];
@@ -171,6 +199,10 @@ static int test_names_and_env(void) {
             "COLI_TEST_V4_KV", COLI_V4_KV_MAIN, 512, 64,
             COLI_V4_KV_F32) != COLI_V4_KV_F32)
         return 1;
+    if (coli_v4_kv_codec_from_env(
+            "COLI_TEST_V4_KV", COLI_V4_KV_MAIN, 512, 64,
+            COLI_V4_KV_TURBO3) != COLI_V4_KV_F32)
+        return 1;
     unsetenv("COLI_TEST_V4_KV");
     return 0;
 }
@@ -180,6 +212,9 @@ int main(void) {
     if (test_f32_operations()) { fprintf(stderr, "f32 failed\n"); return 1; }
     if (test_native_main()) { fprintf(stderr, "native main failed\n"); return 1; }
     if (test_native_index()) { fprintf(stderr, "native index failed\n"); return 1; }
+    if (test_native_rejection_and_signed_zero()) {
+        fprintf(stderr, "native rejection/signed zero failed\n"); return 1;
+    }
     if (test_names_and_env()) { fprintf(stderr, "environment failed\n"); return 1; }
     puts("V4 KV codec tests passed");
     return 0;

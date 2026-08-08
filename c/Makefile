@@ -873,6 +873,11 @@ tests/test_v4_context_bytes$(EXE): tests/test_v4_context_bytes.c deepseek_v4.c v
 V4_KV_SNAPSHOT_DIR = build/kv_snapshot
 V4_KV_SNAPSHOT_CFLAGS = $(CFLAGS) -ffunction-sections -fdata-sections \
 	-DCOLI_V4_TEST_HOOKS
+ifneq (,$(DARWIN))
+V4_KV_SNAPSHOT_GC_LDFLAG = -Wl,-dead_strip
+else
+V4_KV_SNAPSHOT_GC_LDFLAG = -Wl,--gc-sections
+endif
 
 $(V4_KV_SNAPSHOT_DIR):
 	@mkdir -p $@
@@ -893,7 +898,7 @@ tests/test_v4_kv_snapshot$(EXE): tests/test_v4_kv_snapshot.c \
 	$(V4_KV_SNAPSHOT_DIR)/attention.o $(V4_KV_SNAPSHOT_DIR)/codec.o \
 	$(V4_KV_SNAPSHOT_DIR)/quant.o
 	$(CC) $(V4_KV_SNAPSHOT_CFLAGS) $^ -o $@ $(LDFLAGS) \
-		-Wl,--gc-sections
+		$(V4_KV_SNAPSHOT_GC_LDFLAG)
 
 ifeq ($(COLI_V4_SUPPORTED),1)
 include Makefile.deepseek-v4.units

@@ -34,6 +34,10 @@ typedef enum {
  * requested layout cannot represent this geometry. */
 size_t coli_v4_kv_row_bytes(ColiV4KVCodec codec, ColiV4KVStream stream,
                             int head_dim, int rope_dim);
+/* Native encoding is a lossless repack, not a quantizer: src must already be
+ * the QDQ + BF16-rounded state produced by the V4 attention/compressor path.
+ * Values that the selected layout cannot reconstruct bit-for-bit are rejected
+ * with -1 so a changed producer cannot silently alter model semantics. */
 int coli_v4_kv_encode_row(ColiV4KVCodec codec, ColiV4KVStream stream,
                           void *dst, const float *src,
                           int head_dim, int rope_dim);
@@ -46,6 +50,8 @@ float coli_v4_kv_dot(ColiV4KVCodec codec, ColiV4KVStream stream,
 void coli_v4_kv_accumulate(ColiV4KVCodec codec, ColiV4KVStream stream,
                            float *acc, float probability, const void *row,
                            int head_dim, int rope_dim);
+/* dot returns 0 and accumulate is a no-op for invalid arguments.  Hot-path
+ * callers must validate the layout once with row_bytes before using either. */
 
 const char *coli_v4_kv_codec_name(ColiV4KVCodec codec);
 ColiV4KVCodec coli_v4_kv_codec_from_env(const char *variable,
