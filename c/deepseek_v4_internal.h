@@ -588,6 +588,10 @@ typedef struct {
 } ColiDeepSeekV4ResidentTierPlan;
 
 uint64_t coli_v4_os_available_memory(void);
+uint64_t coli_v4_scratch_bytes(void);
+int coli_v4_context_tokens(void);
+int coli_v4_session_state_bytes(int context_tokens, int hc_mult,
+                                int hidden_size, uint64_t *bytes);
 int coli_v4_resource_plan_compute(
     ColiDeepSeekV4ResourcePlan *plan,
     const ColiDeepSeekV4ResourceInputs *inputs,

@@ -12,7 +12,8 @@ what follows, but the sister engines read their own:
 
 | Engine | Source | Its own variables |
 |---|---|---|
-| `colibri` | `c/colibri.c` | everything below except the three sections named for another engine |
+| `colibri` | `c/colibri.c` | everything below except the sections named for another engine |
+| `deepseek_v4` | `c/deepseek_v4.c` | the `V4_*` / `COLI_V4_*` family — see [DeepSeek V4 engine](#deepseek-v4-engine-deepseek_v4) |
 | `kimi_k3` | `c/kimi_k3.c` | the `K3_*` family — see [Kimi K3 engine](#kimi-k3-engine-kimi_k3) |
 | `inkling` | `c/inkling.c` | `INK_*`, plus `CTX_MAX`, `PIN_N`, `REP_PEN`, `GPU_DEV`, `NOGPU` — see [Inkling engine](#inkling-engine-inkling) |
 | `olmoe` | `c/olmoe.c` | `HOT`, `WIDE`, `SMOOTH`, `CONF_LIMIT`, `MAX_NEW`, `CHAT`, `EXPERT_DROP`, `WARMUP` — see [OLMoE engine](#olmoe-engine-olmoe) |
@@ -37,8 +38,8 @@ Format: `VAR` — default — effect.
 
 | Variable | Default | Effect |
 |---|---|---|
-| `RAM_GB` | `0` (auto ≈ 88% of free RAM) | RAM budget in GB for the resident/streamed expert working set. Higher → more experts stay hot → higher cache hit rate. |
-| `CTX` | `4096` | Maximum context length (tokens) the KV cache is sized for. |
+| `RAM_GB` | `0` (auto ≈ 88% of free RAM) | RAM budget in GB for the resident/streamed expert working set. For V4 this is a `SERVE=1` launcher variable; the one-shot `deepseek_v4` CLI uses `--memory-gb`. |
+| `CTX` | `4096` | Maximum context length (tokens) the KV cache is sized for. V4 also sizes two full-prefill state buffers from it. |
 | `COLI_PREFILL_CHUNK` | `0` (off) | Run a long prompt through the layers in N-token slices instead of one pass. Every S-scaled activation buffer shrinks from prompt-sized to chunk-sized, which is the remedy when a long prompt exhausts CUDA scratch. Byte-identical output (verified at N=256). Skipped under an active MTP draft. **Cost:** a slice of 512 tokens already routes to essentially every expert of every layer (`P(miss) = (1-topk/n_experts)^N`), so each slice re-reads the whole non-resident expert set -- prefer the largest N that still fits your scratch. |
 | `NGEN` | `256` (engine) | Max tokens to generate before stopping (stop tokens can end sooner). `coli --ngen` defaults to `1024`. |
 | `COLI_TEMP` | `-1` (auto: `1.0` for chat/text, greedy elsewhere) | Sampling temperature. **`COLI_TEMP=0` = greedy/argmax = deterministic.** `TEMP` still works as a deprecated alias, but only if fully numeric: `$TEMP` is the temp-*directory* path on Windows and for the ROCm runtime (#509), so prefer `COLI_TEMP`. |
@@ -302,6 +303,20 @@ These are for testing, benchmarking, or internal use — not part of the everyda
 | `OMP_NUM_THREADS` | unset | Standard OpenMP variable. Setting it disables the engine's own OpenMP hot-thread tuning entirely — the user is assumed to be in charge. |
 
 ---
+
+## DeepSeek V4 engine (`deepseek_v4`)
+
+Read only by `c/deepseek_v4.c`. `CTX` and `OMP_NUM_THREADS` are listed in the
+common sections because the launchers share those names. `RAM_GB` applies to
+the V4 `SERVE=1` launcher only; pass `--memory-gb` to the one-shot CLI.
+
+| Variable | Default | Effect |
+|---|---|---|
+| `V4_SCRATCH_MB` | `512` | Planner reserve for V4 runtime scratch, clamped to 64–4096 MiB. Invalid text falls back to 512. This is accounting headroom, not an allocator limit; lowering it makes the RAM plan more optimistic. The 32 GiB target profile uses `128`. |
+
+The benchmark harness also sets `COLI_V4_SAVE_USAGE=0` so its unmeasured warm-up
+cannot rewrite expert-placement history. That variable is an internal experiment
+control rather than a tuning recommendation.
 
 ## Kimi K3 engine (`kimi_k3`)
 

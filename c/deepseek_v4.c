@@ -634,8 +634,11 @@ void coli_v4_layer_free(ColiV4Engine *engine,
 /* ######## deepseek_v4_resource_plan.c ######## */
 #include "deepseek_v4_internal.h"
 
+#include <errno.h>
+#include <limits.h>
 #include <stdarg.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #ifdef _WIN32
@@ -665,6 +668,46 @@ static int add_u64(uint64_t a, uint64_t b, uint64_t *output) {
 static int multiply_u64(uint64_t a, uint64_t b, uint64_t *output) {
     if (a && b > UINT64_MAX / a) return -1;
     *output = a * b;
+    return 0;
+}
+
+uint64_t coli_v4_scratch_bytes(void) {
+    const char *setting = getenv("V4_SCRATCH_MB");
+    long mb = 512;
+    if (setting && setting[0]) {
+        char *end = NULL;
+        errno = 0;
+        long parsed = strtol(setting, &end, 10);
+        if (!errno && end != setting && !*end) mb = parsed;
+    }
+    if (mb < 64) mb = 64;
+    if (mb > 4096) mb = 4096;
+    return (uint64_t)mb * MIB;
+}
+
+int coli_v4_context_tokens(void) {
+    const char *setting = getenv("CTX");
+    long tokens = 4096;
+    if (setting && setting[0]) {
+        char *end = NULL;
+        errno = 0;
+        long parsed = strtol(setting, &end, 10);
+        if (!errno && end != setting && !*end && parsed > 1 &&
+            parsed <= INT_MAX)
+            tokens = parsed;
+    }
+    return (int)tokens;
+}
+
+int coli_v4_session_state_bytes(int context_tokens, int hc_mult,
+                                int hidden_size, uint64_t *bytes) {
+    uint64_t slots, values, one_buffer;
+    if (!bytes || context_tokens < 1 || hc_mult < 1 || hidden_size < 1 ||
+        multiply_u64((uint64_t)context_tokens, (uint64_t)hc_mult, &slots) ||
+        multiply_u64(slots, (uint64_t)hidden_size, &values) ||
+        multiply_u64(values, sizeof(float), &one_buffer) ||
+        multiply_u64(one_buffer, 2, bytes))
+        return -1;
     return 0;
 }
 
@@ -956,12 +999,23 @@ static int build_runtime_plan(ColiV4Engine *engine,
     int context = runtime->context_tokens;
     if (context > config.max_position_embeddings)
         context = config.max_position_embeddings;
-    uint64_t hidden = (uint64_t)64 * config.hc_mult * config.hidden_size *
-                      sizeof(float) * 2;
-    uint64_t scratch = 512 * MIB;
-    uint64_t runtime_other = context_bytes(&config, context) + hidden + scratch;
+    uint64_t session_state;
+    uint64_t scratch = coli_v4_scratch_bytes();
+    uint64_t runtime_other = context_bytes(&config, context);
+    if (coli_v4_session_state_bytes(context, config.hc_mult,
+                                   config.hidden_size, &session_state) ||
+        UINT64_MAX - runtime_other < session_state) {
+        snprintf(error, error_size, "V4 runtime reserve overflow");
+        return -1;
+    }
+    runtime_other += session_state;
+    if (UINT64_MAX - runtime_other < scratch) {
+        snprintf(error, error_size, "V4 runtime reserve overflow");
+        return -1;
+    }
+    runtime_other += scratch;
     if (UINT64_MAX - runtime_other < runtime->dspark_reserve_bytes) {
-        snprintf(error, error_size, "V4 DSpark reserve overflow");
+        snprintf(error, error_size, "V4 runtime reserve overflow");
         return -1;
     }
     runtime_other += runtime->dspark_reserve_bytes;
@@ -6511,6 +6565,8 @@ int coli_v4_engine_open(ColiV4Engine **output,
     if (coli_v4_config_load(&engine->config, engine->runtime.target_model_dir,
                             error, error_size))
         goto fail;
+    if (engine->runtime.context_tokens > engine->config.max_position_embeddings)
+        engine->runtime.context_tokens = engine->config.max_position_embeddings;
     if (coli_st_index_open(&engine->target_index,
                            engine->runtime.target_model_dir, error,
                            error_size))
@@ -8453,9 +8509,8 @@ static int v4_serve_main(void) {
         fprintf(stderr, "set SNAP=<DeepSeek V4 model directory>\n");
         return 1;
     }
-    int context = getenv("CTX") ? atoi(getenv("CTX")) : 4096;
+    int context = coli_v4_context_tokens();
     int max_tokens = getenv("NGEN") ? atoi(getenv("NGEN")) : 1024;
-    if (context < 2) context = 4096;
     if (max_tokens < 1) max_tokens = 1024;
     char error[512] = {0};
     ColiV4Engine *engine = NULL;
@@ -8551,6 +8606,7 @@ int main(int argc, char **argv) {
     {
         ColiV4EngineOpenOptions open_opts = {
             .target_model_dir = cli.model_dir,
+            .context_tokens = coli_v4_context_tokens(),
             .no_dspark = cli.no_dspark,
             .pin_slots_per_layer = -1,
         };

@@ -48,6 +48,10 @@ including with the legacy `--no-dspark` option.
 `--ram GiB` is a planner budget, not an OS-enforced limit. Without it, the
 budget is derived from currently available OS memory.
 
+For the 32 GiB target machine, scratch-reserve guidance, the reproducible
+benchmark protocol, and the current before/after measurements are maintained in
+[DeepSeek V4 tuning for 32 GiB](deepseek-v4-tuning-32gb.md).
+
 ## Download
 
 ```bash

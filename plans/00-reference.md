@@ -41,8 +41,9 @@ Andere Modelle sind in diesem Fork ausdrücklich kein Ziel; der Rückbau steht i
 sich Referenzcode aus den zu löschenden Motoren holen.
 
 Die bindende Größe ist die Expert-Cache-Residenz: **~147 GB** geroutete Experten
-(256 Experten × 43 Layer × 13.37 MB) gegen einen RAM-Cache, der heute bei ~14.4 GiB
-landet. Alles, was nicht gecacht ist,
+(256 Experten × 43 Layer × 13.37 MB) gegen einen RAM-Cache, dessen tatsächliche
+Größe stark von `CTX` und den daraus skalierten Prefill-Buffern abhängt. Alles,
+was nicht gecacht ist,
 wird pro Token von der Platte gestreamt. Jedes freigemachte GiB RAM ist direkt
 mehr resident gehaltene Experten.
 
@@ -61,16 +62,31 @@ und `coli_v4_resource_plan_compute` ([:693](../c/deepseek_v4.c)). Alle Zahlen be
 `CTX=131072` (128k) — derselbe Kontext, den Plan 03/05/08 für ihre Deltas
 verwenden, damit Baseline und Phasen-Gewinne vergleichbar bleiben.
 
+Zur KV-Reserve kommen zwei volle Prefill-Zustandsbuffer, die
+`coli_v4_session_create` tatsächlich allokiert:
+
 ```
-MemAvailable                                ~29.0 GiB
- − system reserve   available/8, 512MiB..4GiB  −3.60
- − runtime reserve  2 × maximum_layer_bytes    −0.32   siehe unten
-                    KV f32 (128k) + hidden + 512MiB scratch  −2.19
- − dense resident                              −6.27   Phase 6
- − BF16 head                                   −0.99   Phase 7
- − DSpark reserve (wenn aktiv)                 −1.25   Phase 7
- = Expert-Cache                               ~14.4 GiB → ~26/256 Slots ≈ 10 %
+session_state = CTX × hc_mult × hidden_size × sizeof(float) × 2
 ```
+
+Bei der bindenden Paper-Geometrie (`hc_mult=4`, `hidden_size=4096`) sind das
+**16.0 GiB bei 128k** beziehungsweise 4.0 GiB bei 32k. Selbst bei einer
+Geometrie mit `hc_mult=2`, `hidden_size=2048` wären es bei 128k noch 4.0 GiB.
+Eine frühere Fassung des Planners setzte hier konstant 64 Token an und reservierte
+nur 8 MiB; die daraus abgeleiteten ~14.4 GiB Expert-Cache waren deshalb falsch.
+
+Für `CTX=131072` besteht `runtime_other` auf der Paper-Geometrie vor DSpark aus:
+
+```
+KV f32                         1.68 GiB
+zwei Prefill-Zustandsbuffer   16.00 GiB
+Scratch (Default / Phase 01)   0.50 / 0.125 GiB
+```
+
+Hinzu kommen die 0.32 GiB Layerreserve unten. Ob Dense und Head resident bleiben,
+ist bei 32 GiB damit eine **Tier-Entscheidung**; eine additive Baseline, die alle
+drei Posten plus einen großen Expert-Cache gleichzeitig als resident annimmt, ist
+nicht zulässig. Plan 01 muss die tatsächliche `ram_tiers`-Entscheidung messen.
 
 **Die `2 × maximum_layer_bytes`-Zeile wird leicht übersehen.**
 `coli_v4_resource_plan_compute` addiert sie in die Runtime-Reserve
@@ -87,27 +103,23 @@ Hash-Router, also `ffn.gate.tid2eid` statt `.bias`) mit ~0.162 GiB. Zwei davon
 sind ~0.32 GiB, die keiner Phase gehören und in keiner Phase verschwinden. Eine
 frühere Fassung dieser Bilanz ließ sie ganz weg.
 
-Das ist die **heutige** Bilanz, vor jedem Phasen-Code. Die Gewinne aus der
-Phasenübersicht unten summieren sich **nicht** einfach additiv über die volle
-Liste — Phase 03 und Phase 05 greifen auf **dieselbe** KV-Zeile: Phase 03 senkt
-sie von 1.68 auf 0.43 GiB (**+1.25 GiB**), Phase 05 verschiebt nur noch den Rest
-(0.43 GiB) nach VRAM (**+0.43 GiB**, nicht +0.9 — eine frühere Fassung zählte das
-f32-Delta ein zweites Mal). Mit `RAM_GB=28` (Systemreserve → 0) ist die harte
-Obergrenze **28.0 GiB Planner-Budget**, und die Summe muss darunter bleiben:
+Die Gewinne aus der Phasenübersicht unten summieren sich **nicht** einfach über
+Tierwechsel hinweg. Phase 03 und Phase 05 greifen außerdem auf **dieselbe**
+KV-Zeile: Phase 03 senkt sie von 1.68 auf 0.43 GiB (**+1.25 GiB**), Phase 05
+verschiebt nur noch den Rest (**+0.43 GiB**).
+
+Eine Gegenprobe für den theoretischen Endzustand, nachdem KV, Dense, Head und
+DSpark aus dem RAM verschoben sind, zeigt den verbleibenden Kontextpreis:
 
 ```
-Baseline (14.4) + 01 (3.0) + 03 (1.25) + 05 (0.43) + 06 (6.27) + 07 (2.24)
-  = ~27.6 GiB, mit ~0.4 GiB Luft unter der 28.0-GiB-Obergrenze
+CTX=32k:  28.0 − 0.32 Layer − 4.00 State − 0.125 Scratch = 23.55 GiB
+CTX=128k: 28.0 − 0.32 Layer − 16.0 State − 0.125 Scratch = 11.55 GiB
 ```
 
-Gegenprobe direkt aus dem Planner, weil die additive Rechnung leicht driftet:
-28.0 − Runtime-Reserve (0.32 + 0.13, weil nach 01/03/05 nur noch Hidden und
-128 MiB Scratch im RAM stehen) = **27.55 GiB**. Beide Wege treffen sich; wenn sie
-das nach einer Änderung nicht mehr tun, ist die Bilanz falsch, nicht der Planner.
-
-**Nach allen Phasen: ~27.6 GiB Expert-Cache ≈ 51/256 Slots ≈ 20 % Residenz**, bei
-identischer Semantik. Das ist eine Rechnung, keine Messung — Plan 01 liefert die
-tatsächliche Baseline, gegen die diese Zahl zu prüfen ist.
+Das sind Obergrenzen vor Slot-Rundung, keine Messwerte. 128k kostet im aktuellen
+Full-Prefill-Pfad also rund 12 GiB Expert-Cache gegenüber 32k, auch wenn der KV
+später vollständig im VRAM liegt. Eine spätere Chunk-/Streaming-Prefill-
+Optimierung könnte diesen Posten ändern; keiner der bestehenden Pläne tut das.
 
 Phase 04 (TurboQuant) taucht in dieser Summe **nicht** auf, und das ist kein
 Versehen: die +0.27 GiB aus der Phasenübersicht entstehen nur, solange der KV im
@@ -204,10 +216,11 @@ Diese 3.4 GB müssen **durch den Speicherbus**, auch bei 100 % Cache-Treffer. Be
 perfektem RAM-Cache, ohne jede Platte, ohne jeden Fehltreffer.
 
 **Kein Plan in diesem Baum verschiebt diesen Deckel.** Sie alle arbeiten daran,
-sich ihm zu nähern: bei ~20 % Residenz kommen ~2.7 GB der 3.4 GB von der Platte,
-das sind bei ~10 GB/s (nach Plan 10) ~270 ms und damit ~3.5 tok/s. Der Weg von
-3.5 auf 13 ist das, was hier zu holen ist. Darüber hinaus ginge nur mit anderer
-Hardware oder weniger aktivierten Parametern.
+sich ihm zu nähern: im theoretischen 32k-Endprofil passen vor Slot-Rundung rund
+16–17 % der Experten in den Cache, bei 128k nur rund 8 %. Bei 17 % Residenz kommen
+~2.8 GB der 3.4 GB von der Platte; das sind bei ~10 GB/s (nach Plan 10) ~280 ms
+und damit gut 3 tok/s. Der Weg von dort auf 13 ist das, was hier zu holen ist.
+Darüber hinaus ginge nur mit anderer Hardware oder weniger aktivierten Parametern.
 
 **Was daraus folgt:**
 
@@ -306,7 +319,7 @@ Tabelle. Bis dahin steht die Zahl hier, damit sie niemand ein zweites Mal
 ### Der Head
 
 1.059 GB BF16 pro Token (0.99 GiB): **~24 ms** auf DDR4-3200, **~2.1 ms** auf dem
-4070. Phase 07 spart also ~22 ms/Token — bei 3.5 tok/s sind das ~8 %, bei
+4070. Phase 07 spart also ~22 ms/Token — bei 3.3 tok/s sind das ~7 %, bei
 13 tok/s ~29 %. Der Nutzen wächst, je weiter die anderen Phasen kommen.
 
 ## Modellgeometrie
@@ -631,7 +644,7 @@ daraus automatisch Gates. Keine zentrale Liste, kein Merge-Konflikt.
 
 | # | Plan | Liefert | RAM | VRAM |
 |---|---|---|---|---|
-| 01 | [Messen und RAM-Budget](01-measure-and-ram-budget.md) | Ist-Zahlen, `RAM_GB`, `V4_SCRATCH_MB` | +3.0 GiB | — |
+| 01 | [Messen und RAM-Budget](01-measure-and-ram-budget.md) | Ist-Zahlen, `--memory-gb`/`RAM_GB`, `V4_SCRATCH_MB` | +2.6 GiB Systemreserve +0.375 GiB Scratch, vor Tierwechsel | — |
 | 02 | [Flash Attention](02-flash-attention.md) | Online-Softmax, `all_kv` weg, Source-Sync-Test | — | — |
 | 03 | [KV-Codec](03-kv-codec.md) | **natives fp8+bf16/fp4, bit-exakt**, `context_bytes` folgt | **+1.25 GiB** | — |
 | 04 | [TurboQuant](04-turboquant.md) | turbo2/3/4 als verlustbehafteter Tier | +0.27 GiB³ | −2.1 bei 1M |
@@ -683,8 +696,9 @@ bzw. 2.69 GB pro Token. 04 ist danach optional — außer beim 1M-Profil, wo das
 VRAM-Budget ohne turbo3 nicht schließt.
 
 **10 ist unabhängig von allem anderen** und adressiert die Kostenstelle, die nach
-den VRAM-Phasen übrigbleibt: bei ~20 % Expert-Residenz liest jeder Token ~2.6 GB
-von der Platte. Es lässt sich jederzeit einschieben.
+den VRAM-Phasen übrigbleibt: selbst beim 32k-Endprofil mit ~17 %
+Expert-Residenz liest jeder Token noch ~2.8 GB von der Platte. Es lässt sich
+jederzeit einschieben.
 
 **11 zuletzt.** Er entfernt nur und braucht als Vorlage, was er löscht.
 

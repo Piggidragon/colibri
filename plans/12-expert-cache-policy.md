@@ -19,7 +19,8 @@ Cache-Politik, Commit 2 ist der Indexer und hat damit nichts zu tun — er steht
 hier, weil er derselben Sorte Fund entspringt (vorhandene Maschinerie, die nie
 gemessen wurde) und dieselbe Messgrundlage aus Plan 01 braucht.
 
-Bei ~20 % Residenz ist das der falsche Schwerpunkt. Ein Treffer kostet null
+Bei rund 17 % Residenz im 32k-Endprofil und nur rund 8 % bei 128k ist das der
+falsche Schwerpunkt. Ein Treffer kostet null
 Bytes von der Platte; ein Fehltreffer kostet ~13.4 MB (ein voller
 `expert_record_bytes`-Eintrag, w1/w2/w3 + Scales — siehe
 [00-reference.md](00-reference.md)), egal wie schnell das Laufwerk ist. **Die
@@ -51,10 +52,12 @@ gemessener Nutzungshäufigkeit, mit persistierter Historie in
 ```
 
 `Makefile.deepseek-v4:44` hebt ihn auf **16** (Linux-Zweig; der MSYS2-Zweig setzt
-denselben Wert bei `:34`). Nach den VRAM-Phasen fasst der Cache aber ~51 Slots pro
-Layer (27.6 GiB / 0.535 GiB, siehe RAM-Bilanz in
-[00-reference.md](00-reference.md)). **Damit sind höchstens 31 % des Caches
-historiengesteuert gepinnt**, der Rest läuft adaptiv über LRU.
+denselben Wert bei `:34`). Nach den VRAM-Phasen fasst der Cache auf der
+korrigierten Bilanz vor Slot-Rundung rund **44 Slots bei 32k**
+(23.55 GiB / 0.535 GiB) beziehungsweise nur **22 Slots bei 128k**
+(11.55 GiB / 0.535 GiB; siehe [00-reference.md](00-reference.md)). Der
+16er-Default pinnt damit rund 36 % beziehungsweise 73 % des Caches. Bei 128k
+dominiert LRU also nicht mehr; der sinnvolle Pin-Anteil ist kontextabhängig.
 
 Ob 16 richtig ist, weiß niemand — der Wert stammt aus einer Zeit, in der der Cache
 kleiner war. Für ein Setup mit stabiler Nutzung (immer dieselbe Person, ähnliche
@@ -77,7 +80,9 @@ Alle drei Knöpfe gehören in die Tabelle in [00-reference.md](00-reference.md) 
 in `docs/ENVIRONMENT.md` — das ist Teil dieses Commits, nicht Nacharbeit.
 
 **Dann messen**, nicht raten: Trefferquote über einen festen Promptsatz bei
-`V4_PIN_SLOTS` ∈ {4, 16, 32, 51}. Der Gewinner wird Default für dieses Profil.
+`V4_PIN_SLOTS` ∈ {4, 16, 32, 44} bei 32k und {4, 8, 16, 22} bei 128k. Der
+Gewinner wird zusammen mit dem gemessenen Kontext als Default für das jeweilige
+Profil dokumentiert.
 
 Die `.coli_usage`-Historie braucht ≥5000 Requests, um zu greifen. Für ein
 persönliches Setup heißt das: **`COLI_V4_SAVE_USAGE=1` von Anfang an setzen** und

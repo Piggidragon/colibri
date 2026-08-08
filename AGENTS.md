@@ -78,7 +78,7 @@ Die Nummern sind Kennungen, keine Reihenfolge. So wird gearbeitet:
 | 1 | **01** | Der Benchmark-Harness ist der Maßstab für alles Weitere. Baseline auf `main` aufnehmen, **bevor** irgendetwas geändert wird. Die RAM-Knöpfe fallen nebenbei ab. |
 | 2 | **09 Commit 1+1b** | `omp_tune.h` verdrahten (drei Zeilen), **plus** Hybrid-Bewusstsein: die Linux-Zählung sieht 6 P- und 4 E-Cores als „10 gleiche" und lässt die E-Cores in `schedule(static)` das Tempo vorgeben. |
 | 3 | **03** | Nativer KV-Codec: 3.5× / 7.5×, bit-exakt. Macht das VRAM-Budget der späteren Phasen erst schließbar. |
-| 4 | **12** | Trefferquote schlägt Durchsatz. Bei ~20 % Residenz ist das der größte verbleibende Hebel — und er braucht 01 als Messgrundlage. |
+| 4 | **12** | Trefferquote schlägt Durchsatz. Bei selbst im 32k-Endprofil nur ~17 % Residenz (128k ~8 %) ist das der größte verbleibende Hebel — und er braucht 01 als Messgrundlage. |
 | 5 | **02** | Flash-Attention. Eigener Gewinn, und Voraussetzung für 05. |
 | 6 | **05** | CUDA-Attention. Commit 1 zieht die CUDA-Bauinfrastruktur ein, die 06 und 07 brauchen. |
 | 7 | **06** | Dense in VRAM — der größte RAM-Einzelposten. |
@@ -262,6 +262,11 @@ Agent nichts wieder.
   den kleineren Posten. Siehe `plans/00-reference.md`.
 - **`n_win = 128`**, nicht ~2048. Der Fensterring ist speichermäßig irrelevant,
   bandbreitenmäßig aber in jedem Layer präsent.
+- **`CTX` skaliert zwei volle Prefill-Buffer.** `session->state` und
+  `session->next` belegen zusammen
+  `CTX × hc_mult × hidden_size × 4 × 2` Bytes: auf der Paper-Geometrie
+  4 GiB bei 32k und 16 GiB bei 128k. Diese Reserve gehört vor den Expert-Cache;
+  ein fester 64-Token-`hidden`-Posten ist eine massive Fehlbuchung.
 - **HCA-Layer haben keine Sparse Attention** — sie lesen den kompletten
   komprimierten Cache und dominieren unter den *gelesenen KV-Zeilen* die
   Bandbreite bei langem Kontext (aber nicht gegen den Indexer-Scan oben).

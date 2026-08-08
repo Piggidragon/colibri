@@ -7,8 +7,9 @@ Voraussetzung: [00-reference.md](00-reference.md)
 ## Ziel
 
 Erst die Ist-Zahlen festnageln, dann die zwei RAM-Hebel ziehen, die **ohne
-Attention-Umbau** wirken. Erwartung: **+3.0 GiB Expert-Cache**, also ~5 zusätzliche
-Expert-Slots pro Layer, bevor eine einzige Zeile Attention-Code angefasst wird.
+Attention-Umbau** wirken. Vor Resident-Tier-Entscheidungen geben sie rund
+**3.0 GiB Planner-Budget** frei; wieviel davon als Expert-Cache ankommt, muss der
+Harness messen, weil Dense-/Head-Tierwechsel nicht additiv sind.
 
 Dieser Plan ist bewusst der erste: er erzeugt die Messgrundlage, gegen die alle
 folgenden Phasen ihren Nutzen belegen.
@@ -18,11 +19,18 @@ folgenden Phasen ihren Nutzen belegen.
 Der Planner rechnet in `build_runtime_plan` ([c/deepseek_v4.c:924](../c/deepseek_v4.c)):
 
 ```c
-uint64_t hidden  = 64 * config.hc_mult * config.hidden_size * sizeof(float) * 2;
-uint64_t scratch = 512 * MIB;                                    // :961  hartkodiert
+uint64_t hidden  = context * config.hc_mult * config.hidden_size
+                   * sizeof(float) * 2;
+uint64_t scratch = coli_v4_scratch_bytes();
 uint64_t runtime_other = context_bytes(&config, context) + hidden + scratch;
 runtime_other += runtime->dspark_reserve_bytes;                  // :967
 ```
+
+Die Kontext-Skalierung ist Teil dieses Commits: `coli_v4_session_create`
+allokiert `state` und `next` jeweils für `max_prompt_tokens`, und CLI/Serve setzen
+das auf den geplanten Kontext. Die frühere 64-Token-Konstante unterschlug bei
+128k je nach Geometrie 4 bis 16 GiB und durfte nicht dem Expert-Cache zugeteilt
+werden.
 
 und in `coli_v4_resource_plan_compute` ([:693](../c/deepseek_v4.c)):
 
@@ -53,17 +61,19 @@ ram_tiers available=%.2fGiB dense=%s(%.2fGiB) target_slots=%d
           target_cache=%.2fGiB head=%s projected=%.2fGiB
 ```
 
-## Hebel 1 — `RAM_GB` explizit setzen (kein Code)
+## Hebel 1 — Prozessbudget explizit setzen (kein Code)
 
 Ein expliziter Prozess-Limit setzt `system_reserve` auf **0**. Automatisch wären es
 `available/8`, gedeckelt bei 4 GiB — auf 32 GB also ~3.6 GiB.
 
-`RAM_GB` ist bereits verdrahtet ([:8469](../c/deepseek_v4.c)) →
-`open_options.memory_limit_bytes` → `runtime->memory_limit_bytes` ([:6504](../c/deepseek_v4.c))
-→ `inputs->user_limit_bytes`.
+Im `SERVE=1`-Launcher ist `RAM_GB` verdrahtet; der one-shot CLI setzt denselben
+`open_options.memory_limit_bytes`-Wert ausschließlich über `--memory-gb`.
+Beide Pfade führen über `runtime->memory_limit_bytes` zu
+`inputs->user_limit_bytes`.
 
 **Bedingung:** `user_limit_bytes < available`, sonst greift der Zweig nicht. Bei
-MemAvailable ~29 GiB ist `RAM_GB=28` richtig, `RAM_GB=32` wäre wirkungslos.
+MemAvailable ~29 GiB sind `--memory-gb 28` beziehungsweise `RAM_GB=28` im
+Serve-Pfad richtig; 32 wäre wirkungslos.
 
 Netto: 28.0 GiB Planner-Budget ohne Systemreserve gegen effektiv ~25.4 GiB
 automatisch. **+2.6 GiB.**
@@ -76,7 +86,13 @@ Die 512 MiB in `:961` sind eine feste Annahme. Bei Decode mit Batch 1 und
 ```c
 static uint64_t v4_scratch_bytes(void) {
     const char *setting = getenv("V4_SCRATCH_MB");
-    long mb = setting ? atol(setting) : 512;
+    long mb = 512;
+    if (setting && setting[0]) {
+        char *end = NULL;
+        errno = 0;
+        long parsed = strtol(setting, &end, 10);
+        if (!errno && end != setting && !*end) mb = parsed;
+    }
     if (mb < 64)  mb = 64;      /* unter 64 MiB wird es unehrlich */
     if (mb > 4096) mb = 4096;
     return (uint64_t)mb * MIB;
@@ -84,7 +100,9 @@ static uint64_t v4_scratch_bytes(void) {
 ```
 
 Aufrufstelle `:961`. Der Clamp folgt dem Muster von `coli_v4_dspark_cache_gb`
-([:6288](../c/deepseek_v4.c)), das genauso einen Env-Wert gegen Tippfehler absichert.
+([:6288](../c/deepseek_v4.c)). Anders als `atol` lässt die vollständige
+`strtol`-Prüfung Müll, Suffixe und Überläufe auf den Default zurückfallen; erst
+gültige Zahlen werden geklemmt.
 
 `V4_SCRATCH_MB=128` gibt **+0.375 GiB**. Konservativ, weil der Wert eine Reserve
 ist und keine Allokation — zu klein gewählt heißt nicht OOM, sondern nur ein
@@ -105,9 +123,10 @@ for (layer...) {
 }
 ```
 
-`CTX` default 4096 ([:8456](../c/deepseek_v4.c)), gedeckelt auf
-`max_position_embeddings` ([:957](../c/deepseek_v4.c)). Wer 32k braucht, sollte nicht
-den Modellmaximalwert stehen lassen.
+`CTX` default 4096 und wird auf `max_position_embeddings` gedeckelt. Es skaliert
+nicht nur diese KV-Reserve, sondern auch die beiden oben beschriebenen
+Full-Prefill-Zustandsbuffer. Wer 32k braucht, sollte nicht 128k oder den
+Modellmaximalwert stehen lassen.
 
 Das ist zugleich die Formel, an der die Phasen 03/04 ansetzen: sie ist der Ort, an
 dem KV-Kompression in Expert-Slots umschlägt.
@@ -176,10 +195,10 @@ dem Bandbreitenabschnitt in [00-reference.md](00-reference.md):
 | | Decode |
 |---|---|
 | Bandbreiten-Deckel (100 % RAM-Treffer, DDR4-3200) | **~13 tok/s** |
-| ~20 % Residenz, Dual-Streaming ~10 GB/s | **~3.5 tok/s** |
+| ~17 % Residenz (32k-Endprofil), Dual-Streaming ~10 GB/s | **~3.3 tok/s** |
 | ~10 % Residenz (Ausgangslage), ein Laufwerk ~7 GB/s | **~2 tok/s** |
 
-Der Weg von ~2 auf ~3.5 ist das, was die Pläne holen; die 13 sind die Asymptote.
+Der Weg von ~2 auf gut 3 ist das, was die Pläne holen; die 13 sind die Asymptote.
 **Eine Messung deutlich über 13 tok/s ist ein Messfehler**, keine Sensation — dann
 wurde ein warmer Lauf gemessen, ein zu kurzer Prompt, oder DSpark hat Tokens
 akzeptiert, die der Zähler einzeln gezählt hat. Genau dafür gibt der Harness
@@ -201,21 +220,23 @@ Planner-Budget erklärt wird.
 - `c/tests/test_v4_scratch_env.c` — neue Regel in `c/Makefile`
   (`TEST_RULES` nimmt sie automatisch auf, [c/Makefile:359](../c/Makefile)).
   Prüft: Default 512 MiB, Clamp unten/oben, Müll-Eingabe (`V4_SCRATCH_MB=abc`)
-  fällt auf Default. Muster: `test_env_defaults.py` gibt es schon für andere Knöpfe.
+  fällt auf Default; außerdem robustes `CTX`-Parsing und die Formel der beiden
+  Session-State-Buffer. Muster: `test_env_defaults.py` gibt es schon für andere Knöpfe.
 - Bestehende Gates: `make -C c test`, `make -C c deepseek-v4-tiny-check`.
 
 ## Abnahme
 
-- `ram_tiers`-Zeile zeigt mit `RAM_GB=28 V4_SCRATCH_MB=128` ein um **≥3 GiB**
-  höheres `target_cache` als ohne, bei identischem `projected`-Verhalten.
-- `target_slots` ist entsprechend gestiegen.
+- Die Runtime-Reserve enthält exakt die zwei kontextgroßen Session-State-Buffer.
+- Bei identischem `CTX` sind die erwarteten Budgetdeltas des expliziten Limits
+  und von `V4_SCRATCH_MB=128` sichtbar; Tierwechsel und Slot-Rundung werden als
+  Messergebnis dokumentiert, nicht als garantierte **≥3 GiB** Cache-Zunahme.
 - Tiny-Fixture token-identisch.
 
 ## Risiken
 
-- **`RAM_GB` zu hoch gesetzt** deaktiviert die Systemreserve, ohne sie zu ersetzen.
-  Bei 32 GB ist 28 der sinnvolle Wert; darüber riskiert man OOM-Killer statt
-  Streaming. Im Tuning-Doc explizit machen.
+- **Prozessbudget zu hoch gesetzt** deaktiviert die Systemreserve, ohne sie zu
+  ersetzen. Bei 32 GB ist 28 der sinnvolle Wert; darüber riskiert man OOM-Killer
+  statt Streaming. Im one-shot CLI gilt `--memory-gb`, in Serve `RAM_GB`.
 - **`V4_SCRATCH_MB` ist eine Reserve, keine Grenze** — `--ram GiB` ist laut
   `docs/deepseek-v4.md` ausdrücklich „a planner budget, not an OS-enforced limit".
   Zu klein gewählt macht den Plan optimistisch, nicht kaputt; das gehört in die
