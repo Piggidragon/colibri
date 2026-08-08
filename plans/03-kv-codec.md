@@ -13,6 +13,42 @@ auf wie der spätere Flash-Kernel, nur zweimal statt einmal pro Zeile.
 1. `feat: pluggable KV row codec for V4`
 2. `feat: store V4 KV entries in their native fp8+bf16 / fp4 form`
 
+## Ergebnis
+
+Implementiert wurde ein explizit nach Haupt-KV und Indexer getrennter
+Zeilen-Codec. Alle drei Attention-Kopien, der eigene Batch-Pfad sowie beide
+Compressor-/Indexer-Kopien arbeiten nun über `row_bytes`,
+`coli_v4_kv_dot` und `coli_v4_kv_accumulate`; der Source-Sync-Test deckt die
+Duplikate weiter ab. Snapshots speichern Codec und Zeilengröße, kopieren Rohbytes
+und lehnen eine Wiederherstellung in einen anders konfigurierten State ab. Das
+explizite `ColiV4KVStream`-Flag ist die einzige strukturelle Abweichung vom
+skizzierten Interface: Das Tiny-Fixture verwendet für beide Ströme kleine
+Dimensionen, daher wäre eine Erkennung allein über `head_dim` mehrdeutig.
+
+`native` ist für beide Nutzerknöpfe der Default. Hauptzeilen speichern FP8-Codes
+plus E8M0-Scales und den BF16-RoPE-Tail in **583 B** statt 2048 B;
+Indexerzeilen speichern gepackte FP4-Codes plus E8M0-Scales in **68 B** statt
+512 B. Die Hot-Loops dekodieren blockweise ohne materialisierten f32-Puffer.
+Der Encoder akzeptiert nur Darstellungen, deren Dekodierung exakt den bereits
+vorhandenen BF16-gerundeten f32-Zustand rekonstruiert. Zufalls-, Null-, Ausreißer-
+und Sättigungsfälle sind per `memcmp` abgesichert; Attention-Ausgaben sind für
+Referenz- und Flash-Pfad zwischen `f32` und `native` bitgleich.
+
+Die Planner-Messung mit der Paper-Geometrie bei 128k ergibt
+**1,690 GiB f32 → 0,431 GiB native**, also **1,259 GiB** zusätzliche
+Planner-Reserve. Der Test berechnet dieselben Bytes unabhängig aus Zeilenzahlen
+und -größen und verhindert damit, dass `context_bytes` wieder auf f32 zurückfällt.
+Der vollständige 167-GB-Checkpoint war in der Entwicklungsumgebung nicht
+vorhanden; deshalb konnte die nachfolgende Rundung auf echte `target_cache`-Slots
+im `ram_tiers`-Log nicht gemessen werden. Das Tiny-Orakel und Prefix-Reuse liefen
+mit `V4_KV{,_INDEX}=native` und `f32` jeweils token-identisch. Der Fixture-
+Generator selbst konnte ohne PyTorch/Transformers nicht neu laufen; verwendet
+wurde das bereits versionierte Tiny-Fixture.
+
+Verifikation: Codec-, Planner-, Snapshot-, Flash- und Source-Sync-Tests grün;
+`make -C c test`, `make -C c check` sowie das bestehende Tiny-Fixture in beiden
+Codec-Modi grün.
+
 ## Ziel
 
 Eine Zeilen-Codec-Abstraktion einziehen und mit dem **nativen Format des Modells**

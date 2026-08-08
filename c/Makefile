@@ -863,7 +863,37 @@ tests/test_v4_flash_attention$(EXE): tests/test_v4_flash_attention.c deepseek_v4
 		deepseek_v4.c $< -o $@ $(LDFLAGS)
 
 tests/test_v4_kv_codec$(EXE): tests/test_v4_kv_codec.c deepseek_v4.c v4_kv_codec.h
-	$(CC) $(CFLAGS) -DCOLI_V4_UNIT_KV_CODEC deepseek_v4.c $< -o $@ $(LDFLAGS)
+	$(CC) $(CFLAGS) -DCOLI_V4_UNIT_KV_CODEC -DCOLI_V4_UNIT_NATIVE_QUANT \
+		deepseek_v4.c $< -o $@ $(LDFLAGS)
+
+tests/test_v4_context_bytes$(EXE): tests/test_v4_context_bytes.c deepseek_v4.c v4_kv_codec.h
+	$(CC) $(CFLAGS) -DCOLI_V4_UNIT_KV_CODEC -DCOLI_V4_UNIT_NATIVE_QUANT \
+		deepseek_v4.c $< -o $@ $(LDFLAGS)
+
+V4_KV_SNAPSHOT_DIR = build/kv_snapshot
+V4_KV_SNAPSHOT_CFLAGS = $(CFLAGS) -ffunction-sections -fdata-sections \
+	-DCOLI_V4_TEST_HOOKS
+
+$(V4_KV_SNAPSHOT_DIR):
+	@mkdir -p $@
+
+$(V4_KV_SNAPSHOT_DIR)/attention.o: deepseek_v4.c deepseek_v4_internal.h v4_kv_codec.h | $(V4_KV_SNAPSHOT_DIR)
+	$(CC) $(V4_KV_SNAPSHOT_CFLAGS) -DCOLI_V4_UNIT_ATTENTION_TRANSACTION \
+		-c deepseek_v4.c -o $@
+
+$(V4_KV_SNAPSHOT_DIR)/codec.o: deepseek_v4.c v4_kv_codec.h native_quant.h | $(V4_KV_SNAPSHOT_DIR)
+	$(CC) $(V4_KV_SNAPSHOT_CFLAGS) -DCOLI_V4_UNIT_KV_CODEC \
+		-c deepseek_v4.c -o $@
+
+$(V4_KV_SNAPSHOT_DIR)/quant.o: deepseek_v4.c native_quant.h | $(V4_KV_SNAPSHOT_DIR)
+	$(CC) $(V4_KV_SNAPSHOT_CFLAGS) -DCOLI_V4_UNIT_NATIVE_QUANT \
+		-c deepseek_v4.c -o $@
+
+tests/test_v4_kv_snapshot$(EXE): tests/test_v4_kv_snapshot.c \
+	$(V4_KV_SNAPSHOT_DIR)/attention.o $(V4_KV_SNAPSHOT_DIR)/codec.o \
+	$(V4_KV_SNAPSHOT_DIR)/quant.o
+	$(CC) $(V4_KV_SNAPSHOT_CFLAGS) $^ -o $@ $(LDFLAGS) \
+		-Wl,--gc-sections
 
 ifeq ($(COLI_V4_SUPPORTED),1)
 include Makefile.deepseek-v4.units
@@ -892,6 +922,7 @@ V4_OWNERSHIP_OBJS = \
 	$(V4_OWN_DIR)/COLI_V4_UNIT_RUNTIME.o \
 	$(V4_OWN_DIR)/COLI_V4_UNIT_CONFIG.o \
 	$(V4_OWN_DIR)/COLI_V4_UNIT_ST.o \
+	$(V4_OWN_DIR)/COLI_V4_UNIT_KV_CODEC.o \
 	$(V4_OWN_DIR)/COLI_V4_UNIT_NATIVE_QUANT.o
 
 $(V4_OWN_DIR):
@@ -908,6 +939,9 @@ $(V4_OWN_DIR)/COLI_V4_UNIT_ST.o: deepseek_v4.c deepseek_v4.h deepseek_v4_interna
 
 $(V4_OWN_DIR)/COLI_V4_UNIT_NATIVE_QUANT.o: deepseek_v4.c deepseek_v4.h deepseek_v4_internal.h quant.h | $(V4_OWN_DIR)
 	$(CC) $(V4_OWN_CFLAGS) -DCOLI_V4_UNIT_NATIVE_QUANT -c deepseek_v4.c -o $@
+
+$(V4_OWN_DIR)/COLI_V4_UNIT_KV_CODEC.o: deepseek_v4.c deepseek_v4.h deepseek_v4_internal.h v4_kv_codec.h | $(V4_OWN_DIR)
+	$(CC) $(V4_OWN_CFLAGS) -DCOLI_V4_UNIT_KV_CODEC -c deepseek_v4.c -o $@
 
 tests/test_v4_ownership$(EXE): tests/test_v4_ownership.c $(V4_OWNERSHIP_OBJS)
 	$(CC) $(V4_OWN_CFLAGS) $< $(V4_OWNERSHIP_OBJS) -o $@ -pthread $(LDFLAGS)

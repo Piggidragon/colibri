@@ -952,23 +952,11 @@ static uint64_t expert_record_bytes(const ColiSafetensorsIndex *index) {
 static uint64_t context_bytes(const ColiDeepSeekV4Config *config, int context,
                               ColiV4KVCodec codec,
                               ColiV4KVCodec index_codec) {
-    size_t kv_row = coli_v4_kv_row_bytes(
-        codec, COLI_V4_KV_MAIN, config->head_dim, config->qk_rope_head_dim);
-    size_t index_row = coli_v4_kv_row_bytes(
-        index_codec, COLI_V4_KV_INDEX, config->index_head_dim, 0);
-    if (!kv_row || !index_row) return UINT64_MAX;
-    uint64_t total = (uint64_t)config->num_hidden_layers *
-        config->sliding_window * kv_row;
-    for (int layer = 0; layer < config->num_hidden_layers; layer++) {
-        int ratio = config->compress_ratios[layer];
-        if (!ratio) continue;
-        uint64_t compressed = ((uint64_t)context + (uint64_t)ratio - 1) /
-                              (uint64_t)ratio;
-        total += compressed * kv_row;
-        if (ratio == 4)
-            total += compressed * index_row;
-    }
-    return total;
+    return coli_v4_kv_context_bytes(
+        config->num_hidden_layers, config->sliding_window,
+        config->head_dim, config->qk_rope_head_dim,
+        config->index_head_dim, config->compress_ratios, context,
+        codec, index_codec);
 }
 
 static int build_runtime_plan(ColiV4Engine *engine,
@@ -5388,6 +5376,64 @@ void coli_v4_attention_snapshot_destroy(ColiV4AttentionSnapshot *snapshot) {
     coli_v4_compressor_snapshot_destroy(snapshot->compressor);
     free(snapshot->compressed); free(snapshot->kv); free(snapshot);
 }
+
+#ifdef COLI_V4_TEST_HOOKS
+int coli_v4_test_attention_snapshot_roundtrip(ColiV4KVCodec codec) {
+    ColiDeepSeekV4WindowAttentionState state = {0};
+    state.window_size = 3;
+    state.head_dim = 32;
+    state.rope_dim = 16;
+    state.codec = codec;
+    state.index_codec = codec;
+    state.row_bytes = coli_v4_kv_row_bytes(
+        codec, COLI_V4_KV_MAIN, state.head_dim, state.rope_dim);
+    state.compressed_capacity = 2;
+    state.compressed_count = 2;
+    size_t kv_bytes = (size_t)state.window_size * state.row_bytes;
+    size_t compressed_bytes =
+        (size_t)state.compressed_count * state.row_bytes;
+    state.kv = malloc(kv_bytes);
+    state.compressed = malloc(compressed_bytes);
+    unsigned char *expected_kv = malloc(kv_bytes);
+    unsigned char *expected_compressed = malloc(compressed_bytes);
+    if (!state.row_bytes || !state.kv || !state.compressed || !expected_kv ||
+        !expected_compressed) {
+        free(expected_compressed); free(expected_kv);
+        free(state.compressed); free(state.kv);
+        return -1;
+    }
+    for (size_t i = 0; i < kv_bytes; i++)
+        ((unsigned char *)state.kv)[i] = (unsigned char)(i * 37u + 11u);
+    for (size_t i = 0; i < compressed_bytes; i++)
+        ((unsigned char *)state.compressed)[i] =
+            (unsigned char)(i * 19u + 7u);
+    memcpy(expected_kv, state.kv, kv_bytes);
+    memcpy(expected_compressed, state.compressed, compressed_bytes);
+
+    ColiV4AttentionSnapshot *snapshot = NULL;
+    int result = coli_v4_attention_snapshot_create(&state, &snapshot);
+    if (!result) {
+        memset(state.kv, 0, kv_bytes);
+        memset(state.compressed, 0, compressed_bytes);
+        state.compressed_count = 0;
+        result = coli_v4_attention_snapshot_restore(&state, snapshot);
+    }
+    if (!result && (state.compressed_count != 2 ||
+                    memcmp(state.kv, expected_kv, kv_bytes) ||
+                    memcmp(state.compressed, expected_compressed,
+                           compressed_bytes)))
+        result = -1;
+    if (!result) {
+        state.codec = codec == COLI_V4_KV_F32
+            ? COLI_V4_KV_NATIVE : COLI_V4_KV_F32;
+        if (!coli_v4_attention_snapshot_restore(&state, snapshot)) result = -1;
+    }
+    coli_v4_attention_snapshot_destroy(snapshot);
+    free(expected_compressed); free(expected_kv);
+    free(state.compressed); free(state.kv);
+    return result;
+}
+#endif
 #endif /* COLI_V4_UNIT_ATTENTION_TRANSACTION */
 
 #ifdef COLI_V4_UNIT_EXPERT_STORE_HOT_ROWS16
@@ -6884,10 +6930,25 @@ int coli_v4_engine_open(ColiV4Engine **output,
     if (coli_v4_config_load(&engine->config, engine->runtime.target_model_dir,
                             error, error_size))
         goto fail;
-    engine->runtime.kv_codec = COLI_V4_KV_F32;
-    engine->runtime.index_codec = COLI_V4_KV_F32;
+    engine->runtime.kv_codec = coli_v4_kv_codec_from_env(
+        "V4_KV", COLI_V4_KV_MAIN, engine->config.head_dim,
+        engine->config.qk_rope_head_dim, COLI_V4_KV_NATIVE);
+    engine->runtime.index_codec = coli_v4_kv_codec_from_env(
+        "V4_KV_INDEX", COLI_V4_KV_INDEX, engine->config.index_head_dim,
+        0, COLI_V4_KV_NATIVE);
     if (engine->runtime.context_tokens > engine->config.max_position_embeddings)
         engine->runtime.context_tokens = engine->config.max_position_embeddings;
+    fprintf(stderr,
+            "v4_kv main=%s row=%zuB index=%s row=%zuB context=%d\n",
+            coli_v4_kv_codec_name(engine->runtime.kv_codec),
+            coli_v4_kv_row_bytes(
+                engine->runtime.kv_codec, COLI_V4_KV_MAIN,
+                engine->config.head_dim, engine->config.qk_rope_head_dim),
+            coli_v4_kv_codec_name(engine->runtime.index_codec),
+            coli_v4_kv_row_bytes(
+                engine->runtime.index_codec, COLI_V4_KV_INDEX,
+                engine->config.index_head_dim, 0),
+            engine->runtime.context_tokens);
     if (coli_st_index_open(&engine->target_index,
                            engine->runtime.target_model_dir, error,
                            error_size))
@@ -7372,10 +7433,15 @@ int main(int argc, char **argv) {
     ColiDeepSeekV4WindowAttentionState **attention = calloc(
         (size_t)config.num_hidden_layers, sizeof(*attention));
     if (!state || !next || !hidden || !attention) return 1;
+    ColiV4KVCodec kv_codec = coli_v4_kv_codec_from_env(
+        "V4_KV", COLI_V4_KV_MAIN, config.head_dim,
+        config.qk_rope_head_dim, COLI_V4_KV_NATIVE);
+    ColiV4KVCodec index_codec = coli_v4_kv_codec_from_env(
+        "V4_KV_INDEX", COLI_V4_KV_INDEX, config.index_head_dim,
+        0, COLI_V4_KV_NATIVE);
     for (int layer = 0; layer < config.num_hidden_layers; layer++)
         if (coli_v4_window_attention_create(
-                &attention[layer], &config,
-                COLI_V4_KV_F32, COLI_V4_KV_F32)) return 1;
+                &attention[layer], &config, kv_codec, index_codec)) return 1;
 
     int current_token = text_mode ? prompt_ids[0] : input_token;
     int total_steps = text_mode ? prompt_count + token_count - 1 : token_count;
@@ -10642,7 +10708,10 @@ int coli_fp8_matvec_ref(float *output, const ColiTensorView *weight,
 
 #ifdef COLI_V4_UNIT_KV_CODEC
 #include "v4_kv_codec.h"
+#include "native_quant.h"
 
+#include <math.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -10653,7 +10722,172 @@ size_t coli_v4_kv_row_bytes(ColiV4KVCodec codec, ColiV4KVStream stream,
                         (rope_dim < 0 || rope_dim > head_dim)) ||
         (stream == COLI_V4_KV_INDEX && rope_dim != 0))
         return 0;
-    return codec == COLI_V4_KV_F32 ? (size_t)head_dim * sizeof(float) : 0;
+    if (codec == COLI_V4_KV_F32) return (size_t)head_dim * sizeof(float);
+    if (codec != COLI_V4_KV_NATIVE) return 0;
+    if (stream == COLI_V4_KV_INDEX)
+        return ((size_t)head_dim + 1) / 2 + ((size_t)head_dim + 31) / 32;
+    size_t nope = (size_t)(head_dim - rope_dim);
+    return nope + (nope + 63) / 64 + (size_t)rope_dim * sizeof(uint16_t);
+}
+
+static float native_index_value(const unsigned char *row, int index,
+                                float scale) {
+    uint8_t pair = row[(size_t)index / 2];
+    uint8_t code = index & 1 ? pair >> 4 : pair & 0x0f;
+    return coli_bf16_round(coli_e2m1_decode(code) * scale);
+}
+
+static float native_rope_value(const unsigned char *rope, int index) {
+    uint16_t bits;
+    memcpy(&bits, rope + (size_t)index * sizeof(bits), sizeof(bits));
+    return coli_bf16_decode(bits);
+}
+
+static void decode_native_row(float *dst, const unsigned char *row,
+                              ColiV4KVStream stream,
+                              int head_dim, int rope_dim) {
+    if (stream == COLI_V4_KV_INDEX) {
+        size_t packed = ((size_t)head_dim + 1) / 2;
+        for (int base = 0; base < head_dim; base += 32) {
+            int count = head_dim - base < 32 ? head_dim - base : 32;
+            float scale = coli_e8m0_decode(row[packed + (size_t)base / 32]);
+            for (int i = 0; i < count; i++)
+                dst[base + i] = native_index_value(row, base + i, scale);
+        }
+        return;
+    }
+    int nope = head_dim - rope_dim;
+    size_t scale_count = ((size_t)nope + 63) / 64;
+    for (int base = 0; base < nope; base += 64) {
+        int count = nope - base < 64 ? nope - base : 64;
+        float scale = coli_e8m0_decode(row[nope + (size_t)base / 64]);
+        for (int i = 0; i < count; i++)
+            dst[base + i] = coli_bf16_round(
+                coli_e4m3fn_decode(row[base + i]) * scale);
+    }
+    const unsigned char *rope = row + nope + scale_count;
+    for (int i = 0; i < rope_dim; i++)
+        dst[nope + i] = native_rope_value(rope, i);
+}
+
+static int kv_ceil_log2(float value) {
+    int exponent;
+    float fraction = frexpf(value, &exponent);
+    return fraction == 0.5f ? exponent - 1 : exponent;
+}
+
+static int same_float_bits(float left, float right) {
+    return memcmp(&left, &right, sizeof(left)) == 0;
+}
+
+static int encode_native_main(unsigned char *dst, const float *src,
+                              int head_dim, int rope_dim) {
+    int nope = head_dim - rope_dim;
+    size_t scale_count = ((size_t)nope + 63) / 64;
+    for (int base = 0; base < nope; base += 64) {
+        int count = nope - base < 64 ? nope - base : 64;
+        float maximum = 0.0f;
+        int nonfinite = 0;
+        for (int i = 0; i < count; i++) {
+            nonfinite |= !isfinite(src[base + i]);
+            maximum = fmaxf(maximum, fabsf(src[base + i]));
+        }
+        int initial = nonfinite ? 127
+            : kv_ceil_log2(fmaxf(maximum, 1e-4f) / 448.0f);
+        if (initial < -127) initial = -127;
+        if (initial > 127) initial = 127;
+        int found = 0;
+        for (int attempt = 0; attempt < 255 && !found; attempt++) {
+            int exponent = initial + attempt;
+            if (exponent > 127) exponent -= 255;
+            uint8_t encoded_scale = (uint8_t)(exponent + 127);
+            float scale = coli_e8m0_decode(encoded_scale);
+            found = 1;
+            for (int i = 0; i < count; i++) {
+                float normalized = isinf(src[base + i])
+                    ? copysignf(448.0f, src[base + i])
+                    : fmaxf(-448.0f, fminf(448.0f, src[base + i] / scale));
+                uint8_t code = coli_e4m3fn_encode(normalized);
+                float decoded = coli_bf16_round(coli_e4m3fn_decode(code) * scale);
+                if (!same_float_bits(decoded, src[base + i])) {
+                    found = 0;
+                    break;
+                }
+                dst[base + i] = code;
+            }
+            if (found) dst[nope + (size_t)base / 64] = encoded_scale;
+        }
+        if (!found) return -1;
+    }
+    for (int i = 0; i < rope_dim; i++) {
+        uint32_t bits;
+        memcpy(&bits, &src[nope + i], sizeof(bits));
+        if (bits & UINT32_C(0xffff)) return -1;
+        uint16_t bf16 = (uint16_t)(bits >> 16);
+        memcpy(dst + nope + scale_count + (size_t)i * sizeof(bf16),
+               &bf16, sizeof(bf16));
+    }
+    return 0;
+}
+
+static int fp4_code(float value) {
+    int best = 0;
+    float distance = fabsf(value - coli_e2m1_decode(0));
+    for (int code = 1; code < 16; code++) {
+        float candidate = fabsf(value - coli_e2m1_decode((uint8_t)code));
+        if (candidate < distance) {
+            best = code;
+            distance = candidate;
+        }
+    }
+    return best;
+}
+
+static int encode_native_index(unsigned char *dst, const float *src,
+                               int head_dim) {
+    size_t packed = ((size_t)head_dim + 1) / 2;
+    size_t scale_count = ((size_t)head_dim + 31) / 32;
+    memset(dst, 0, packed + scale_count);
+    for (int base = 0; base < head_dim; base += 32) {
+        int count = head_dim - base < 32 ? head_dim - base : 32;
+        float maximum = 0.0f;
+        int nonfinite = 0;
+        for (int i = 0; i < count; i++) {
+            nonfinite |= !isfinite(src[base + i]);
+            maximum = fmaxf(maximum, fabsf(src[base + i]));
+        }
+        int initial = nonfinite ? 127 : kv_ceil_log2(
+            fmaxf(maximum, 6.0f * ldexpf(1.0f, -126)) / 6.0f);
+        if (initial < -127) initial = -127;
+        if (initial > 127) initial = 127;
+        int found = 0;
+        for (int attempt = 0; attempt < 255 && !found; attempt++) {
+            int exponent = initial + attempt;
+            if (exponent > 127) exponent -= 255;
+            uint8_t encoded_scale = (uint8_t)(exponent + 127);
+            float scale = coli_e8m0_decode(encoded_scale);
+            found = 1;
+            for (int i = 0; i < count; i++) {
+                float normalized = isinf(src[base + i])
+                    ? copysignf(6.0f, src[base + i])
+                    : fmaxf(-6.0f, fminf(6.0f, src[base + i] / scale));
+                int code = fp4_code(normalized);
+                float decoded = coli_bf16_round(coli_e2m1_decode(
+                    (uint8_t)code) * scale);
+                if (!same_float_bits(decoded, src[base + i])) {
+                    found = 0;
+                    break;
+                }
+                size_t offset = (size_t)(base + i) / 2;
+                if ((base + i) & 1) dst[offset] =
+                    (uint8_t)((dst[offset] & 0x0f) | (code << 4));
+                else dst[offset] = (uint8_t)((dst[offset] & 0xf0) | code);
+            }
+            if (found) dst[packed + (size_t)base / 32] = encoded_scale;
+        }
+        if (!found) return -1;
+    }
+    return 0;
 }
 
 int coli_v4_kv_encode_row(ColiV4KVCodec codec, ColiV4KVStream stream,
@@ -10661,8 +10895,13 @@ int coli_v4_kv_encode_row(ColiV4KVCodec codec, ColiV4KVStream stream,
                           int head_dim, int rope_dim) {
     size_t bytes = coli_v4_kv_row_bytes(codec, stream, head_dim, rope_dim);
     if (!bytes || !dst || !src) return -1;
-    memcpy(dst, src, bytes);
-    return 0;
+    if (codec == COLI_V4_KV_F32) {
+        memcpy(dst, src, bytes);
+        return 0;
+    }
+    return stream == COLI_V4_KV_INDEX
+        ? encode_native_index(dst, src, head_dim)
+        : encode_native_main(dst, src, head_dim, rope_dim);
 }
 
 int coli_v4_kv_decode_row(ColiV4KVCodec codec, ColiV4KVStream stream,
@@ -10670,7 +10909,11 @@ int coli_v4_kv_decode_row(ColiV4KVCodec codec, ColiV4KVStream stream,
                           int head_dim, int rope_dim) {
     size_t bytes = coli_v4_kv_row_bytes(codec, stream, head_dim, rope_dim);
     if (!bytes || !dst || !src) return -1;
-    memcpy(dst, src, bytes);
+    if (codec == COLI_V4_KV_F32) {
+        memcpy(dst, src, bytes);
+        return 0;
+    }
+    decode_native_row(dst, src, stream, head_dim, rope_dim);
     return 0;
 }
 
@@ -10680,9 +10923,37 @@ float coli_v4_kv_dot(ColiV4KVCodec codec, ColiV4KVStream stream,
     if (!query || !row ||
         !coli_v4_kv_row_bytes(codec, stream, head_dim, rope_dim))
         return 0.0f;
-    const float *values = row;
     float result = 0.0f;
-    for (int i = 0; i < head_dim; i++) result += query[i] * values[i];
+    if (codec == COLI_V4_KV_F32) {
+        const float *values = row;
+        for (int i = 0; i < head_dim; i++) result += query[i] * values[i];
+    } else if (stream == COLI_V4_KV_INDEX) {
+        const unsigned char *values = row;
+        size_t packed = ((size_t)head_dim + 1) / 2;
+        for (int base = 0; base < head_dim; base += 32) {
+            int count = head_dim - base < 32 ? head_dim - base : 32;
+            float scale = coli_e8m0_decode(
+                values[packed + (size_t)base / 32]);
+            for (int i = 0; i < count; i++)
+                result += query[base + i] *
+                    native_index_value(values, base + i, scale);
+        }
+    } else {
+        const unsigned char *values = row;
+        int nope = head_dim - rope_dim;
+        size_t scale_count = ((size_t)nope + 63) / 64;
+        for (int base = 0; base < nope; base += 64) {
+            int count = nope - base < 64 ? nope - base : 64;
+            float scale = coli_e8m0_decode(
+                values[nope + (size_t)base / 64]);
+            for (int i = 0; i < count; i++)
+                result += query[base + i] * coli_bf16_round(
+                    coli_e4m3fn_decode(values[base + i]) * scale);
+        }
+        const unsigned char *rope = values + nope + scale_count;
+        for (int i = 0; i < rope_dim; i++)
+            result += query[nope + i] * native_rope_value(rope, i);
+    }
     return result;
 }
 
@@ -10692,8 +10963,36 @@ void coli_v4_kv_accumulate(ColiV4KVCodec codec, ColiV4KVStream stream,
     if (!acc || !row ||
         !coli_v4_kv_row_bytes(codec, stream, head_dim, rope_dim))
         return;
-    const float *values = row;
-    for (int i = 0; i < head_dim; i++) acc[i] += probability * values[i];
+    if (codec == COLI_V4_KV_F32) {
+        const float *values = row;
+        for (int i = 0; i < head_dim; i++) acc[i] += probability * values[i];
+    } else if (stream == COLI_V4_KV_INDEX) {
+        const unsigned char *values = row;
+        size_t packed = ((size_t)head_dim + 1) / 2;
+        for (int base = 0; base < head_dim; base += 32) {
+            int count = head_dim - base < 32 ? head_dim - base : 32;
+            float scale = coli_e8m0_decode(
+                values[packed + (size_t)base / 32]);
+            for (int i = 0; i < count; i++)
+                acc[base + i] += probability *
+                    native_index_value(values, base + i, scale);
+        }
+    } else {
+        const unsigned char *values = row;
+        int nope = head_dim - rope_dim;
+        size_t scale_count = ((size_t)nope + 63) / 64;
+        for (int base = 0; base < nope; base += 64) {
+            int count = nope - base < 64 ? nope - base : 64;
+            float scale = coli_e8m0_decode(
+                values[nope + (size_t)base / 64]);
+            for (int i = 0; i < count; i++)
+                acc[base + i] += probability * coli_bf16_round(
+                    coli_e4m3fn_decode(values[base + i]) * scale);
+        }
+        const unsigned char *rope = values + nope + scale_count;
+        for (int i = 0; i < rope_dim; i++)
+            acc[nope + i] += probability * native_rope_value(rope, i);
+    }
 }
 
 const char *coli_v4_kv_codec_name(ColiV4KVCodec codec) {
@@ -10738,6 +11037,34 @@ ColiV4KVCodec coli_v4_kv_codec_from_env(const char *variable,
         selected = fallback;
     }
     return selected;
+}
+
+uint64_t coli_v4_kv_context_bytes(
+    int layers, int sliding_window, int head_dim, int rope_dim,
+    int index_head_dim, const int *compress_ratios, int context,
+    ColiV4KVCodec codec, ColiV4KVCodec index_codec) {
+    if (layers < 1 || sliding_window < 1 || !compress_ratios || context < 1)
+        return UINT64_MAX;
+    size_t kv_row = coli_v4_kv_row_bytes(
+        codec, COLI_V4_KV_MAIN, head_dim, rope_dim);
+    size_t index_row = coli_v4_kv_row_bytes(
+        index_codec, COLI_V4_KV_INDEX, index_head_dim, 0);
+    if (!kv_row || !index_row) return UINT64_MAX;
+    uint64_t total = (uint64_t)layers * (uint64_t)sliding_window * kv_row;
+    for (int layer = 0; layer < layers; layer++) {
+        int ratio = compress_ratios[layer];
+        if (!ratio) continue;
+        uint64_t compressed = ((uint64_t)context + (uint64_t)ratio - 1) /
+                              (uint64_t)ratio;
+        if (compressed > (UINT64_MAX - total) / kv_row) return UINT64_MAX;
+        total += compressed * kv_row;
+        if (ratio == 4) {
+            if (compressed > (UINT64_MAX - total) / index_row)
+                return UINT64_MAX;
+            total += compressed * index_row;
+        }
+    }
+    return total;
 }
 #endif /* COLI_V4_UNIT_KV_CODEC */
 

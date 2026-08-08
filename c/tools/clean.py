@@ -30,7 +30,7 @@ FILES = [
 ARTIFACT_GLOBS = ["tests/test_*", "COLI_V4_UNIT_*.o"]
 BINARY_EXTENSIONS = {"", ".exe", ".o"}
 # Directories to remove.
-DIRS = ["tests/__pycache__", "build/ownership"]
+DIRS = ["tests/__pycache__", "build/ownership", "build/kv_snapshot"]
 
 removed = 0
 for f in FILES:

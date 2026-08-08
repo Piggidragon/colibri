@@ -205,6 +205,62 @@ static int test_switch(void) {
     return 0;
 }
 
+static int test_native_codec_equivalence(void) {
+    enum { HEADS = 3, HEAD_DIM = 512, ROPE = 64, WINDOW = 5, COMPRESSED = 7 };
+    enum { ROWS = WINDOW + COMPRESSED, NOPE = HEAD_DIM - ROPE };
+    float *legacy = malloc((size_t)ROWS * HEAD_DIM * sizeof(*legacy));
+    float *queries = malloc((size_t)HEADS * HEAD_DIM * sizeof(*queries));
+    float *reference = malloc((size_t)HEADS * HEAD_DIM * sizeof(*reference));
+    float *native = malloc((size_t)HEADS * HEAD_DIM * sizeof(*native));
+    size_t native_row = coli_v4_kv_row_bytes(
+        COLI_V4_KV_NATIVE, COLI_V4_KV_MAIN, HEAD_DIM, ROPE);
+    unsigned char *encoded = malloc((size_t)ROWS * native_row);
+    uint8_t scales[(NOPE + 63) / 64];
+    int window_indices[WINDOW], compressed_indices[COMPRESSED];
+    float sinks[HEADS];
+    if (!legacy || !queries || !reference || !native || !encoded) return 1;
+    for (int row = 0; row < ROWS; row++) {
+        float *values = legacy + (size_t)row * HEAD_DIM;
+        for (int i = 0; i < HEAD_DIM; i++) values[i] = random_float();
+        float qdq[NOPE];
+        if (coli_fp8_activation_qdq_ref(qdq, scales, values, NOPE, 64)) return 1;
+        memcpy(values, qdq, sizeof(qdq));
+        coli_bf16_round_array(values, NOPE);
+        coli_bf16_round_array(values + NOPE, ROPE);
+        if (coli_v4_kv_encode_row(
+                COLI_V4_KV_NATIVE, COLI_V4_KV_MAIN,
+                encoded + (size_t)row * native_row,
+                values, HEAD_DIM, ROPE)) return 1;
+    }
+    for (size_t i = 0; i < (size_t)HEADS * HEAD_DIM; i++)
+        queries[i] = random_float();
+    for (int i = 0; i < WINDOW; i++) window_indices[i] = i;
+    for (int i = 0; i < COMPRESSED; i++) compressed_indices[i] = i;
+    for (int i = 0; i < HEADS; i++) sinks[i] = random_float();
+    float scale = 1.0f / sqrtf((float)HEAD_DIM);
+    int failed = 0;
+    for (int flash = 0; flash <= 1 && !failed; flash++) {
+        set_flash(flash ? "1" : "0");
+        failed = coli_v4_attention_two_source_codec_ref(
+            reference, queries, legacy, WINDOW,
+            legacy + (size_t)WINDOW * HEAD_DIM, COMPRESSED,
+            window_indices, compressed_indices, COMPRESSED,
+            COLI_V4_KV_F32, ROPE, sinks, HEADS, HEAD_DIM, scale);
+        if (!failed) failed = coli_v4_attention_two_source_codec_ref(
+            native, queries, encoded, WINDOW,
+            encoded + (size_t)WINDOW * native_row, COMPRESSED,
+            window_indices, compressed_indices, COMPRESSED,
+            COLI_V4_KV_NATIVE, ROPE, sinks, HEADS, HEAD_DIM, scale);
+        if (!failed && memcmp(reference, native,
+                              (size_t)HEADS * HEAD_DIM * sizeof(*native))) {
+            fprintf(stderr, "native attention differs for flash=%d\n", flash);
+            failed = 1;
+        }
+    }
+    free(encoded); free(native); free(reference); free(queries); free(legacy);
+    return failed;
+}
+
 static double monotonic_seconds(void) {
     struct timespec now;
     clock_gettime(CLOCK_MONOTONIC, &now);
@@ -268,7 +324,7 @@ static int benchmark_long_context(void) {
 
 int main(int argc, char **argv) {
     if (test_random_cases() || test_edge_cases() || test_compressed_bounds() ||
-        test_switch()) {
+        test_switch() || test_native_codec_equivalence()) {
         fprintf(stderr, "test_v4_flash_attention: FAIL\n");
         return 1;
     }

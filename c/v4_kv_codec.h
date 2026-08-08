@@ -11,6 +11,7 @@
  */
 
 #include <stddef.h>
+#include <stdint.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -51,6 +52,11 @@ ColiV4KVCodec coli_v4_kv_codec_from_env(const char *variable,
                                         ColiV4KVStream stream,
                                         int head_dim, int rope_dim,
                                         ColiV4KVCodec fallback);
+
+uint64_t coli_v4_kv_context_bytes(
+    int layers, int sliding_window, int head_dim, int rope_dim,
+    int index_head_dim, const int *compress_ratios, int context,
+    ColiV4KVCodec codec, ColiV4KVCodec index_codec);
 
 #ifdef __cplusplus
 }
