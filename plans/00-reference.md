@@ -52,7 +52,7 @@ GPU-Anbindung. `grep -i cuda c/deepseek_v4.c` ist leer, `c/Makefile.deepseek-v4`
 ruft nur gcc mit `-fopenmp`. CUDA/Vulkan/Metal hängen ausschließlich an
 `c/colibri.c` (GLM-5.2).
 
-Dense-Gewichte (6.27 GiB), BF16-Head (0.99 GiB) und DSpark (~1.25 GiB) belegen
+Dense-Gewichte (6.27 GiB), BF16-Head (0.99 GiB) und DSpark (~1.17 GiB) belegen
 heute RAM, obwohl sie zusammen in 12 GB VRAM passen. **Das ist der Haupthebel.**
 
 ## RAM-Bilanz
@@ -82,6 +82,10 @@ KV f32                         1.68 GiB
 zwei Prefill-Zustandsbuffer   16.00 GiB
 Scratch (Default / Phase 01)   0.50 / 0.125 GiB
 ```
+
+Mit aktivem DSpark kommen beim Default `V4_MTP_GB=0.45` exakt
+`0.45 × 10⁹ + 768 × 2²⁰ = 1 255 306 368 B` hinzu: **1.255 GB, aber
+1.169 GiB**, in dieser Bilanz also rund **1.17 GiB**.
 
 Hinzu kommen die 0.32 GiB Layerreserve unten. Ob Dense und Head resident bleiben,
 ist bei 32 GiB damit eine **Tier-Entscheidung**; eine additive Baseline, die alle
@@ -160,12 +164,12 @@ Fixkosten          8.12 GiB   → ~2.6 GiB bleiben für den KV
    1.0 GiB. Sie ist kein Buchhaltungsposten, sondern der Puffer dafür, dass
    `coli_cuda_mem_info` nur eine Momentaufnahme liefert — wer sie hier wegrechnet,
    plant gegen eine Zahl, die der Planner nie vergibt.
-2. Der **Head ist 0.99 GiB, nicht 1.06**. `docs/deepseek-v4.md` nennt „about
-   1.06 GiB", aber 129280 × 4096 × 2 B = 1.059 **GB** — der Wert ist dezimal und
-   trägt das falsche Suffix. In Millisekunden gerechnet stimmt die Doku (1.059 GB
-   / 45 GB/s ≈ 24 ms, siehe unten); nur in einer GiB-Bilanz darf man sie nicht
-   ungeprüft addieren. Gilt für den Head, **nicht** für die 6.27 GiB Dense — die
-   sind echte GiB (nachgerechnet über `coli_v4_layer_plan`).
+2. Der **Head ist 0.99 GiB beziehungsweise 1.06 GB**. 129280 × 4096 × 2 B =
+   1.059 **GB**; eine frühere Doku-Fassung trug daran das falsche GiB-Suffix. In
+   Millisekunden gerechnet bleibt 1.059 GB / 45 GB/s ≈ 24 ms (siehe unten); nur
+   in einer GiB-Bilanz darf man den Dezimalwert nicht ungeprüft addieren. Gilt
+   für den Head, **nicht** für die 6.27 GiB Dense — die sind echte GiB
+   (nachgerechnet über `coli_v4_layer_plan`).
 
 Der KV entscheidet damit die erreichbare Kontextlänge:
 
@@ -463,16 +467,28 @@ sed -n '4570,4942p' c/deepseek_v4.c > /tmp/a3; diff /tmp/a1 /tmp/a2 && diff /tmp
 ```
 
 Compressor und Indexer genauso — die `_SNAPSHOT`-Units bestehen aus dem
-umbenannten Original plus dem Snapshot-Code dahinter:
+umbenannten Original plus dem Snapshot-Code dahinter. Die Rename-Makros der
+Snapshot-Units liegen bewusst außerhalb der verglichenen Bereiche:
 ```bash
-sed -n '2418,2669p' c/deepseek_v4.c > /tmp/c1; sed -n '3921,4172p' c/deepseek_v4.c > /tmp/c2
+sed -n '2418,2668p' c/deepseek_v4.c > /tmp/c1; sed -n '3922,4172p' c/deepseek_v4.c > /tmp/c2
 diff /tmp/c1 /tmp/c2
+
+sed -n '2674,2920p' c/deepseek_v4.c > /tmp/i1; sed -n '4237,4483p' c/deepseek_v4.c > /tmp/i2
+diff /tmp/i1 /tmp/i2
 ```
 
 `LAYER_RESIDENT` ist der einzige Fall, der **kein** exaktes Duplikat ist: es ist
 `deepseek_v4_layer.c` **plus** `v4_fp8_pack_rows8_inplace` ([:488](../c/deepseek_v4.c)).
 `coli_v4_layer_plan`, `coli_v4_layer_validate` und `coli_v4_layer_load` stehen
 trotzdem zweimal da — relevant für Plan 06, der `coli_v4_layer_load` ändert.
+Für einen sauberen Diff werden der zusätzliche Helfer und der resident-spezifische
+Rows8-Block ausgelassen; der übrige Unit-Text ist identisch:
+
+```bash
+sed -n '297,484p;512,541p;553,569p' c/deepseek_v4.c > /tmp/l1
+sed -n '9490,9724p' c/deepseek_v4.c > /tmp/l2
+diff /tmp/l1 /tmp/l2
+```
 
 Dazu kommt der **Batch-Pfad** `coli_v4_attention_window_batch_ref` ([:2180](../c/deepseek_v4.c)),
 der dieselbe Attention-Logik pro Item nochmal enthält (`all_kv` bei 2335,
@@ -650,7 +666,7 @@ daraus automatisch Gates. Keine zentrale Liste, kein Merge-Konflikt.
 | 04 | [TurboQuant](04-turboquant.md) | turbo2/3/4 als verlustbehafteter Tier | +0.27 GiB³ | −2.1 bei 1M |
 | 05 | [CUDA-Attention](05-cuda-attention.md) | `backend_cuda_v4`, Flash-Kernel, KV in VRAM | +0.43 GiB¹ | −0.43 |
 | 06 | [Dense in VRAM](06-dense-vram.md) | fp8-Residenz + Matmuls auf GPU | +6.3 GiB | −6.3 |
-| 07 | [Head und DSpark in VRAM](07-head-dspark-vram.md) | Head-Matvec + Drafter auf GPU | +2.24 GiB | −1.55² |
+| 07 | [Head und DSpark in VRAM](07-head-dspark-vram.md) | Head-Matvec + Drafter auf GPU | +2.16 GiB | −1.55² |
 | 08 | [VRAM-Planner](08-vram-planner.md) | Stufenplanung, 4070-Profil | — | — |
 | 09 | [Arch / CachyOS](09-arch-cachyos.md) | `omp_tune.h`, THP, CUDA-Pfade | — | — |
 | 10 | [Dual-Streaming](10-dual-streaming.md) | Mirror-Maschinerie nach V4, gewichtete Stripes | — | — |
@@ -661,7 +677,7 @@ daraus automatisch Gates. Keine zentrale Liste, kein Merge-Konflikt.
 ¹ 03 hat die KV-Zeile bereits von 1.68 auf 0.43 GiB (128k) gesenkt; 05 verschiebt
 nur noch den Rest nach VRAM, nicht das volle f32-Delta — siehe RAM-Bilanz oben.
 ² 0.99 GiB Head + ~0.56 GiB DSpark-Tensoren gehen tatsächlich auf die GPU (siehe
-VRAM-Budget oben); die restlichen ~0.69 GiB der DSpark-RAM-Reserve waren Marge für
+VRAM-Budget oben); die restlichen ~0.61 GiB der DSpark-RAM-Reserve waren Marge für
 Head/Scratch, kein eigener VRAM-Posten.
 ³ Der RAM-Gewinn gilt nur, solange der KV im RAM liegt — nach 05 liegt er im VRAM
 und 04 zahlt dort ein. Die VRAM-Spalte ist deshalb die relevante: bei 1M ist 04

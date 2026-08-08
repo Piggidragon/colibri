@@ -299,8 +299,7 @@ python ./coli run --model /path/to/DeepSeek-V4-Flash --ram 32 \
 ```
 
 状态、checkpoint 验证、统一 CLI／server 用法和动态生成的 tiny 独立
-oracle 说明，请参阅[中文版 DeepSeek V4 文档](docs/deepseek-v4.zh-CN.md)；
-英文原文见 [docs/deepseek-v4.md](docs/deepseek-v4.md)。
+oracle 说明，请参阅 [DeepSeek V4 英文文档](docs/deepseek-v4.md)。
 
 ## 下一步
 

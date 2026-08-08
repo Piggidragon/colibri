@@ -270,10 +270,12 @@ Agent nichts wieder.
 - **HCA-Layer haben keine Sparse Attention** — sie lesen den kompletten
   komprimierten Cache und dominieren unter den *gelesenen KV-Zeilen* die
   Bandbreite bei langem Kontext (aber nicht gegen den Indexer-Scan oben).
-- **Der Head ist 0.99 GiB, nicht 1.06.** `docs/deepseek-v4.md` nennt „about
-  1.06 GiB"; 129280 × 4096 × 2 B = 1.059 **GB**. Für Zeitrechnungen (÷ GB/s) ist
-  die Doku richtig, in einer GiB-Bilanz nicht. Für die 6.27 GiB Dense gilt das
-  **nicht** — die sind echte GiB.
+- **Der Head ist 0.99 GiB beziehungsweise 1.06 GB.** 129280 × 4096 × 2 B =
+  1.059 **GB**. Für Zeitrechnungen (÷ GB/s) ist der Dezimalwert richtig, in einer
+  GiB-Bilanz nicht. Für die 6.27 GiB Dense gilt das **nicht** — die sind echte
+  GiB.
+- **Die DSpark-Reserve ist 1.17 GiB, nicht 1.25.** Beim Default sind
+  `0.45 × 10⁹ + 768 × 2²⁰ = 1 255 306 368 B` genau 1.255 GB, aber 1.169 GiB.
 - **~13 tok/s ist der Bandbreiten-Deckel.** Jeder Token schiebt ~3.4 GB
   Expert-Gewichte (6 × 43 × 13.4 MB) durch den Speicherbus, auch bei 100 %
   Cache-Treffer. Auf DDR4-3200 sind das ~77 ms. Kein Plan verschiebt das; sie
