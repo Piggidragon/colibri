@@ -1,5 +1,6 @@
 #include "../v4_kv_codec.h"
 
+#include <limits.h>
 #include <stdint.h>
 #include <stdio.h>
 
@@ -26,6 +27,13 @@ int main(void) {
     }
     if (f32 != expected_f32 || native != expected_native || native >= f32) {
         fprintf(stderr, "V4 context byte accounting mismatch\n");
+        return 1;
+    }
+    int no_compression = 0;
+    if (coli_v4_kv_context_bytes(
+            INT_MAX, INT_MAX, INT_MAX, 0, 1, &no_compression, 1,
+            COLI_V4_KV_F32, COLI_V4_KV_F32) != UINT64_MAX) {
+        fprintf(stderr, "V4 sliding-window byte overflow was not rejected\n");
         return 1;
     }
     printf("V4 KV context 128k: f32=%.3f GiB native=%.3f GiB saved=%.3f GiB\n",

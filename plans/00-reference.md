@@ -7,6 +7,9 @@ Konventionen; die Phasenpläne `01`–`13` setzen das voraus und wiederholen es 
   (Schema und Reihenfolge in [AGENTS.md](../AGENTS.md))
 - Lizenz: Repo ist Apache-2.0, der TurboQuant-Referenz-Fork MIT → Attribution im
   portierten Header genügt. `reference/` selbst wird **nicht** committet.
+- In `reference/` liegen ausschließlich **Lesequellen**, kein Build-Input:
+  `DeepSpec`, `llama-cpp-turboquant` und `FlashMLA`
+  (siehe [FlashMLA](#flashmla--vendor-referenz-nicht-linkbar)).
 
 ## Zielbild
 
@@ -592,6 +595,47 @@ zugeschnitten (separates `kv_b`, latent/rope getrennt, kein Top-k, keine Sinks).
 **Vorbild für einen modellspezifischen Backend:** `backend_cuda_ink.{cu,h}` für
 Inkling, bewusst winzige API, per `INK_CUDA_OBJ` ([c/Makefile:404](../c/Makefile))
 und Objektregel ([:611](../c/Makefile)) verdrahtet. Dem folgt `backend_cuda_v4.{cu,h}`.
+
+### FlashMLA — Vendor-Referenz, nicht linkbar
+
+`reference/FlashMLA` (deepseek-ai/FlashMLA, Stand `15f13e5`, 2026-07-27) enthält
+DeepSeeks eigene Sparse-MLA-Kernel — also genau die Attention, die
+[Plan 05](05-cuda-attention.md) neu schreibt.
+
+**Warum trotzdem nur Referenz:** Support-Matrix ist **SM90 (Hopper) und SM100
+(Datacenter-Blackwell)**, CUDA ≥ 12.8, PyTorch-Extension. Die Kernel leben von
+wgmma/TMA/Warp-Specialization; nicht einmal Consumer-Blackwell `sm120` wird
+unterstützt, Ada `sm89` erst recht nicht. Auf der 4070 ist davon **keine Zeile
+lauffähig oder linkbar**, und die Toolchain (Python/PyTorch/cutlass) widerspricht
+dem Zero-Dependency-C-Ziel dieses Forks. Es wird nichts daraus portiert, ohne dass
+ein Plan das ausdrücklich als eigenen Commit ausweist.
+
+Was gelesen werden sollte:
+
+- `docs/20250929-hopper-fp8-sparse-deep-dive.md` — das fp8-Sparse-Decoding im
+  Detail, inklusive Dequantisierung in Registern. Direkt einschlägig für
+  [Plan 05](05-cuda-attention.md) und [Plan 04](04-turboquant.md).
+- `csrc/smxx/decode/combine/combine.cu` (230 Zeilen) — der Split-KV-Combine-Kernel,
+  der die partiellen Online-Softmax-Zustände mergt. Liegt bewusst unter `smxx`,
+  nicht `sm90`: kein Arch-spezifisches Inline-Assembler, also der einzige Teil des
+  Repos, der als Algorithmus unverändert auf `sm89` übertragbar wäre.
+- `csrc/sm90/decode/sparse_fp8/splitkv_mla.cuh` und
+  `csrc/sm90/prefill/sparse/phase1.cuh` — Aufteilung der KV-Zeilen über die SMs.
+  Bei Batch 1 und einem Query-Token ist das die einzige Parallelitätsquelle
+  jenseits der 64 Heads; der Head-Outer-Block aus Plan 05 füllt 46 SMs sonst nur
+  knapp.
+- `README.md`, Abschnitt *Sparse Attention* — Vendor-Konventionen, die die unseren
+  bestätigen: ungültige Indizes als `-1` (Decode) bzw. `-1` oder `>= s_kv`
+  (Prefill), Rückgabe `(out, max_logits, lse)`, also der exportierte
+  Online-Softmax-Zustand aus [Plan 02](02-flash-attention.md).
+
+**Geometrie-Unterschied, der nicht verwischt werden darf:** FlashMLA zielt auf
+DSA aus DeepSeek-V3.2-Exp — `head_dim_k=576` = 512 NoPE + 64 RoPE, gepagter Cache,
+fp8-KV-Zeile zu 656 Bytes (512 × fp8-e4m3 + 4 × f32-Scale je 128 Werte + 64 ×
+bf16 RoPE). V4-Flash hat stattdessen den hybriden Cache aus Fensterring plus
+komprimiertem Cache mit `head_dim=512` (siehe [Attention-Architektur](#attention-architektur)),
+und unser Codec ist der aus [Plan 03](03-kv-codec.md). Strukturell verwandt,
+nicht identisch — Referenz, keine Spezifikation.
 
 ### `packed_rows8` — kein Hindernis
 

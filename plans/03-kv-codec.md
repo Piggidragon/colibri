@@ -39,6 +39,14 @@ Null-, Ausreißer- und Sättigungsfälle sind per `memcmp` abgesichert;
 Attention-Ausgaben sind für
 Referenz- und Flash-Pfad zwischen `f32` und `native` bitgleich.
 
+Nach dem Merge-Review wurden die nie produktiv aufgerufenen APIs
+`coli_v4_kv_dot` und `coli_v4_kv_accumulate` wieder entfernt; damit existiert die
+native Entpacklogik nur noch in `decode_native_row`. Ablehnungen des strikt
+verlustfreien Encoders setzen nun auch in allen Attention-Pfaden eine konkrete
+Fehlermeldung. Der Indexer-Scan dekodiert in einen schleifenlokalen Puffer statt
+in `compressor_scratch`, sodass eine spätere Parallelisierung keine gemeinsam
+beschriebene Scratch-Fläche vorfindet.
+
 Die Planner-Messung mit der Paper-Geometrie bei 128k ergibt
 **1,690 GiB f32 → 0,431 GiB native**, also **1,259 GiB** zusätzliche
 Planner-Reserve. Der Test berechnet dieselben Bytes unabhängig aus Zeilenzahlen
@@ -67,7 +75,9 @@ Attention-Regression erkauft.
 
 Verifikation: Codec-, Planner-, Snapshot-, Flash- und Source-Sync-Tests grün;
 `make -C c test`, `make -C c check` sowie das bestehende Tiny-Fixture in beiden
-Codec-Modi grün.
+Codec-Modi grün. Beim Review-Nachlauf fehlten die gepinnten torch-/Transformers-
+Pakete zum erneuten Erzeugen des Fixtures; das vorhandene Fixture bestand den
+vollständigen Oracle- und Prefix-Test manuell mit `native` und `f32`.
 
 ## Ziel
 
@@ -163,24 +173,16 @@ size_t coli_v4_kv_row_bytes(ColiV4KVCodec codec, int head_dim);
 int coli_v4_kv_encode_row(ColiV4KVCodec, void *dst, const float *src, int head_dim);
 int coli_v4_kv_decode_row(ColiV4KVCodec, float *dst, const void *src, int head_dim);
 
-/* Score gegen eine kodierte Zeile, ohne sie zu materialisieren — der Pfad, den
- * der Flash-Kernel aus Plan 02 nimmt. */
-float coli_v4_kv_dot(ColiV4KVCodec, const float *query, const void *row, int head_dim);
-
-/* Gewichtete Akkumulation: acc += probability * decode(row). */
-void coli_v4_kv_accumulate(ColiV4KVCodec, float *acc, float probability,
-                           const void *row, int head_dim);
-
 const char  *coli_v4_kv_codec_name(ColiV4KVCodec);
 ColiV4KVCodec coli_v4_kv_codec_from_env(const char *variable, int head_dim,
                                         ColiV4KVCodec fallback);
 ```
 
-`coli_v4_kv_dot` und `coli_v4_kv_accumulate` sind die einzigen zwei Stellen, an
-denen ein Attention-Kernel eine Zeile anfasst — ob zweistufige Referenz (heute)
-oder Flash (Plan 02). Für `COLI_V4_KV_F32` sind sie ein direkter Dot bzw. `axpy`
-ohne Umweg. Das ist der Grund, warum das Interface so geschnitten ist, unabhängig
-davon, welcher der beiden Pläne zuerst landet.
+Attention und Indexer rufen `coli_v4_kv_decode_row` zeilenäußer auf und verwenden
+die dekodierte Zeile anschließend für alle Heads. Separate `dot`-/`accumulate`-
+APIs gehören bewusst nicht zum fertigen Interface: sie waren ohne
+Produktionsaufruf und duplizierten die native Entpacklogik. Plan 04 verwendet für
+TurboQuant stattdessen spezialisierte Kernel.
 
 `NATIVE` braucht zwei Varianten, weil Haupt- und Indexerzeilen unterschiedlich
 quantisiert sind. Die Unterscheidung läuft über `head_dim` — 512 heißt
@@ -372,8 +374,6 @@ Kopfkommentar.
   - `row_bytes` für alle Codecs × `head_dim` ∈ {32, 128, 512, 4096}; 0 wo nicht
     darstellbar.
   - Round-trip `encode → decode`: f32 und `native` **bit-identisch**.
-  - `coli_v4_kv_dot` gegen `decode` + manuellen Dot: Abweichung `< 1e-5` relativ.
-  - `coli_v4_kv_accumulate` gegen `decode` + manuelles `axpy`.
   - `coli_v4_kv_codec_from_env`: gültige Namen, Müll → Fallback, nicht darstellbares
     `head_dim` → Fallback **mit** Warnung auf stderr.
   - Randfälle: Nullzeile (E8M0-Scale-Untergrenze `1e-4f` im QDQ!), Zeile mit einem

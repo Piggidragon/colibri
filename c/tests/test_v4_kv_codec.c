@@ -49,12 +49,7 @@ static int check_native_row(ColiV4KVStream stream, float *legacy,
         COLI_V4_KV_NATIVE, stream, dimension, rope_dim);
     unsigned char *encoded = malloc(bytes);
     float *decoded = malloc((size_t)dimension * sizeof(*decoded));
-    float *query = malloc((size_t)dimension * sizeof(*query));
-    float *actual = calloc((size_t)dimension, sizeof(*actual));
-    float *expected = calloc((size_t)dimension, sizeof(*expected));
-    if (!encoded || !decoded || !query || !actual || !expected) return 1;
-    for (int i = 0; i < dimension; i++)
-        query[i] = (float)((i * 19) % 41 - 20) / 13.0f;
+    if (!encoded || !decoded) return 1;
     int failed = coli_v4_kv_encode_row(
         COLI_V4_KV_NATIVE, stream, encoded, legacy, dimension, rope_dim);
     if (failed) fprintf(stderr, "encode failed stream=%d\n", stream);
@@ -65,19 +60,7 @@ static int check_native_row(ColiV4KVStream stream, float *legacy,
         fprintf(stderr, "decode mismatch stream=%d\n", stream);
         failed = 1;
     }
-    float manual_dot = 0.0f;
-    for (int i = 0; !failed && i < dimension; i++)
-        manual_dot += query[i] * decoded[i];
-    float codec_dot = coli_v4_kv_dot(
-        COLI_V4_KV_NATIVE, stream, query, encoded, dimension, rope_dim);
-    float tolerance = 1e-5f * fmaxf(1.0f, fabsf(manual_dot));
-    if (!failed && fabsf(codec_dot - manual_dot) > tolerance) failed = 1;
-    for (int i = 0; i < dimension; i++) expected[i] += 0.375f * decoded[i];
-    coli_v4_kv_accumulate(COLI_V4_KV_NATIVE, stream, actual, 0.375f,
-                          encoded, dimension, rope_dim);
-    if (!failed && memcmp(actual, expected,
-                          (size_t)dimension * sizeof(*actual))) failed = 1;
-    free(expected); free(actual); free(query); free(decoded); free(encoded);
+    free(decoded); free(encoded);
     return failed;
 }
 
@@ -152,32 +135,18 @@ static int test_native_rejection_and_signed_zero(void) {
     return 0;
 }
 
-static int test_f32_operations(void) {
+static int test_f32_roundtrip(void) {
     enum { DIMENSION = 128 };
     float input[DIMENSION], encoded[DIMENSION], decoded[DIMENSION];
-    float query[DIMENSION], actual[DIMENSION], expected[DIMENSION];
-    for (int i = 0; i < DIMENSION; i++) {
+    for (int i = 0; i < DIMENSION; i++)
         input[i] = (float)(i - 63) / 17.0f;
-        query[i] = (float)((i * 13) % 29 - 14) / 11.0f;
-        actual[i] = expected[i] = (float)(i % 7) / 9.0f;
-    }
     if (coli_v4_kv_encode_row(COLI_V4_KV_F32, COLI_V4_KV_MAIN,
                               encoded, input, DIMENSION, 32) ||
         coli_v4_kv_decode_row(COLI_V4_KV_F32, COLI_V4_KV_MAIN,
                               decoded, encoded, DIMENSION, 32) ||
         memcmp(input, decoded, sizeof(input)))
         return 1;
-    float expected_dot = 0.0f;
-    for (int i = 0; i < DIMENSION; i++) expected_dot += query[i] * input[i];
-    float actual_dot = coli_v4_kv_dot(
-        COLI_V4_KV_F32, COLI_V4_KV_MAIN, query, encoded, DIMENSION, 32);
-    if (actual_dot != expected_dot) return 1;
-    const float probability = 0.375f;
-    for (int i = 0; i < DIMENSION; i++)
-        expected[i] += probability * input[i];
-    coli_v4_kv_accumulate(COLI_V4_KV_F32, COLI_V4_KV_MAIN,
-                          actual, probability, encoded, DIMENSION, 32);
-    return memcmp(actual, expected, sizeof(actual)) != 0;
+    return 0;
 }
 
 static int test_names_and_env(void) {
@@ -209,7 +178,7 @@ static int test_names_and_env(void) {
 
 int main(void) {
     if (test_row_sizes()) { fprintf(stderr, "row sizes failed\n"); return 1; }
-    if (test_f32_operations()) { fprintf(stderr, "f32 failed\n"); return 1; }
+    if (test_f32_roundtrip()) { fprintf(stderr, "f32 failed\n"); return 1; }
     if (test_native_main()) { fprintf(stderr, "native main failed\n"); return 1; }
     if (test_native_index()) { fprintf(stderr, "native index failed\n"); return 1; }
     if (test_native_rejection_and_signed_zero()) {

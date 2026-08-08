@@ -44,14 +44,6 @@ int coli_v4_kv_encode_row(ColiV4KVCodec codec, ColiV4KVStream stream,
 int coli_v4_kv_decode_row(ColiV4KVCodec codec, ColiV4KVStream stream,
                           float *dst, const void *src,
                           int head_dim, int rope_dim);
-float coli_v4_kv_dot(ColiV4KVCodec codec, ColiV4KVStream stream,
-                     const float *query, const void *row,
-                     int head_dim, int rope_dim);
-void coli_v4_kv_accumulate(ColiV4KVCodec codec, ColiV4KVStream stream,
-                           float *acc, float probability, const void *row,
-                           int head_dim, int rope_dim);
-/* dot returns 0 and accumulate is a no-op for invalid arguments.  Hot-path
- * callers must validate the layout once with row_bytes before using either. */
 
 const char *coli_v4_kv_codec_name(ColiV4KVCodec codec);
 ColiV4KVCodec coli_v4_kv_codec_from_env(const char *variable,

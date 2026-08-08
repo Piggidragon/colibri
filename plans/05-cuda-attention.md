@@ -181,6 +181,31 @@ pro Device, damit sie nicht driften kann. Genauso für Zentroide und Signs:
 **eine** Quelle in `c/turbo_quant.h`, per `v4_cuda_publish_tables()` hochgeladen,
 Uploads vorher abgelehnt.
 
+### Vendor-Referenz beim Kernel-Design
+
+`reference/FlashMLA` ist DeepSeeks eigener Sparse-MLA-Kernel und beim Schreiben
+dieses Kernels lesenswert — aber **nur lesend**: SM90/SM100, wgmma/TMA, PyTorch.
+Auf `sm89` läuft und linkt davon nichts, es wird nichts kopiert. Der volle
+Kontext samt Geometrie-Unterschied steht in
+[00-reference.md](00-reference.md#flashmla--vendor-referenz-nicht-linkbar).
+
+Zwei Punkte betreffen dieses Kernel-Design direkt:
+
+- **Split-KV.** Der Entwurf oben ist Block-pro-Head, also 64 Blöcke auf 46 SMs bei
+  Batch 1 — ein knapp gefüllter Chip mit ungleichmäßigem Tail, weil HCA-Layer bei
+  1M 7940 Zeilen pro Head lesen. FlashMLA teilt dafür zusätzlich die KV-Zeilen über
+  die SMs auf (`csrc/sm90/decode/sparse_fp8/splitkv_mla.cuh`) und mergt die
+  partiellen Online-Softmax-Zustände in einem separaten, arch-neutralen Kernel
+  (`csrc/smxx/decode/combine/combine.cu`). Das ist **kein Teil dieser Phase** —
+  Commit 3 liefert erst den einfachen Block-pro-Head-Kernel und misst ihn. Ergibt
+  die Messung eine SM-Auslastung deutlich unter voll, ist Split-KV der erste
+  Follow-up, und der Combine-Schritt ist dann der Grund, `running_max`/`running_sum`
+  aus dem Kernel überhaupt herauszureichen statt nur `ctx`.
+- **Indizes-Konvention.** `-1` als ungültiger Eintrag ist auch bei FlashMLA die
+  Konvention; die Tests aus [Plan 02](02-flash-attention.md) decken sie bereits ab.
+  Der CUDA-Kernel übernimmt sie unverändert, damit CPU- und GPU-Pfad dieselben
+  Fixtures teilen.
+
 ## Datenfluss und PCIe
 
 Erste Stufe: Q per H2D hoch (`64 × 512 × 4` = 128 KB), `ctx` per D2H zurück

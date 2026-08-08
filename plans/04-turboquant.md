@@ -152,9 +152,9 @@ Beim echten Modell passt dagegen **beides**: `head_dim=512 = 4×128` und
 
 `coli_v4_kv_decode_row` dequantisiert die vier Gruppen in den zeilengroßen
 Scratch, den Attention und Indexer seit dem Review-Fix aus Plan 03 einmal pro
-geteilter KV-Zeile verwenden. `coli_v4_kv_dot`/`_accumulate` bleiben als
-Codec-Primitiven und Testoberfläche erhalten, sind aber nicht mehr der normale
-CPU-Attention-Hotpath. Kein Heap und kein kontextgroßer f32-Puffer.
+geteilter KV-Zeile verwenden. Die nie produktiv aufgerufenen
+`coli_v4_kv_dot`/`_accumulate` wurden in Plan 03 entfernt; TurboQuant bekommt
+stattdessen spezialisierte Kernel. Kein Heap und kein kontextgroßer f32-Puffer.
 
 ## RoPE-Schwanz
 

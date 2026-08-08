@@ -1566,6 +1566,17 @@ static int set_error(char *error, size_t size, const char *format, ...) {
     return -1;
 }
 
+static int encode_attention_kv_row(
+    ColiDeepSeekV4WindowAttentionState *state, void *destination,
+    const float *source, const char *kind, char *error, size_t error_size) {
+    if (coli_v4_kv_encode_row(
+            state->codec, COLI_V4_KV_MAIN, destination, source,
+            state->head_dim, state->rope_dim))
+        return set_error(error, error_size,
+                         "cannot encode %s attention KV row", kind);
+    return 0;
+}
+
 static const void *layer_data(const ColiDeepSeekV4LayerWeights *weights,
                               const char *suffix,
                               const ColiDeepSeekV4TensorSpec **spec) {
@@ -1665,11 +1676,11 @@ static int attention_token_impl(float *output,
         if (!result) result = coli_v4_compressor_step(
             state->compressor, state->compressor_scratch,
             &produced, input, position, error, error_size);
-        if (!result && produced) result = coli_v4_kv_encode_row(
-            state->codec, COLI_V4_KV_MAIN,
+        if (!result && produced) result = encode_attention_kv_row(
+            state,
             (unsigned char *)state->compressed +
                 (size_t)state->compressed_count * state->row_bytes,
-            state->compressor_scratch, head_dim, state->rope_dim);
+            state->compressor_scratch, "compressed", error, error_size);
         if (!result && produced) state->compressed_count++;
         if (!result && state->indexer) {
             compressed_indices = malloc((size_t)config->index_topk *
@@ -1741,10 +1752,10 @@ static int attention_token_impl(float *output,
     const float *sinks = layer_data(weights, "attn.attn_sink", NULL);
     if (!result && state) {
         int slot = position % state->window_size;
-        result = coli_v4_kv_encode_row(
-            state->codec, COLI_V4_KV_MAIN,
+        result = encode_attention_kv_row(
+            state,
             (unsigned char *)state->kv + (size_t)slot * state->row_bytes,
-            kv, head_dim, state->rope_dim);
+            kv, "window", error, error_size);
         if (!state->indexer) compressed_selected = state->compressed_count;
         int *window_indices = malloc((size_t)state->window_size *
                                      sizeof(*window_indices));
@@ -1976,6 +1987,17 @@ static int set_error(char *error, size_t size, const char *format, ...) {
     return -1;
 }
 
+static int encode_attention_kv_row(
+    ColiDeepSeekV4WindowAttentionState *state, void *destination,
+    const float *source, const char *kind, char *error, size_t error_size) {
+    if (coli_v4_kv_encode_row(
+            state->codec, COLI_V4_KV_MAIN, destination, source,
+            state->head_dim, state->rope_dim))
+        return set_error(error, error_size,
+                         "cannot encode %s attention KV row", kind);
+    return 0;
+}
+
 static const void *layer_data(const ColiDeepSeekV4LayerWeights *weights,
                               const char *suffix,
                               const ColiDeepSeekV4TensorSpec **spec) {
@@ -2075,11 +2097,11 @@ static int attention_token_impl(float *output,
         if (!result) result = coli_v4_compressor_step(
             state->compressor, state->compressor_scratch,
             &produced, input, position, error, error_size);
-        if (!result && produced) result = coli_v4_kv_encode_row(
-            state->codec, COLI_V4_KV_MAIN,
+        if (!result && produced) result = encode_attention_kv_row(
+            state,
             (unsigned char *)state->compressed +
                 (size_t)state->compressed_count * state->row_bytes,
-            state->compressor_scratch, head_dim, state->rope_dim);
+            state->compressor_scratch, "compressed", error, error_size);
         if (!result && produced) state->compressed_count++;
         if (!result && state->indexer) {
             compressed_indices = malloc((size_t)config->index_topk *
@@ -2151,10 +2173,10 @@ static int attention_token_impl(float *output,
     const float *sinks = layer_data(weights, "attn.attn_sink", NULL);
     if (!result && state) {
         int slot = position % state->window_size;
-        result = coli_v4_kv_encode_row(
-            state->codec, COLI_V4_KV_MAIN,
+        result = encode_attention_kv_row(
+            state,
             (unsigned char *)state->kv + (size_t)slot * state->row_bytes,
-            kv, head_dim, state->rope_dim);
+            kv, "window", error, error_size);
         if (!state->indexer) compressed_selected = state->compressed_count;
         int *window_indices = malloc((size_t)state->window_size *
                                      sizeof(*window_indices));
@@ -2320,11 +2342,11 @@ int coli_v4_attention_window_batch_ref(
                 state->compressor, state->compressor_scratch,
                 &produced, inputs + (size_t)item * hidden, position,
                 error, error_size);
-            if (!result && produced) result = coli_v4_kv_encode_row(
-                state->codec, COLI_V4_KV_MAIN,
+            if (!result && produced) result = encode_attention_kv_row(
+                state,
                 (unsigned char *)state->compressed +
                     (size_t)state->compressed_count * state->row_bytes,
-                state->compressor_scratch, head_dim, state->rope_dim);
+                state->compressor_scratch, "compressed", error, error_size);
             if (!result && produced) state->compressed_count++;
             if (!result && state->indexer) {
                 selected_counts[item] = coli_v4_indexer_step(
@@ -2403,10 +2425,10 @@ int coli_v4_attention_window_batch_ref(
         float *item_q = q + (size_t)item * q_width;
         float *item_attended = attended + (size_t)item * q_width;
         int slot = position % state->window_size;
-        result = coli_v4_kv_encode_row(
-            state->codec, COLI_V4_KV_MAIN,
+        result = encode_attention_kv_row(
+            state,
             (unsigned char *)state->kv + (size_t)slot * state->row_bytes,
-            item_kv, head_dim, state->rope_dim);
+            item_kv, "window", error, error_size);
         int selected = selected_counts[item];
         int *window_indices = malloc((size_t)state->window_size *
                                      sizeof(*window_indices));
@@ -2981,12 +3003,15 @@ int coli_v4_indexer_step(ColiDeepSeekV4Indexer *state, int *indices,
     for (int candidate = 0; !result && candidate < state->count; candidate++) {
         const void *key = (const unsigned char *)state->compressed +
                           (size_t)candidate * state->row_bytes;
+        /* Keep decode storage candidate-local so a future OpenMP scan gets a
+         * private buffer per worker instead of sharing compressor scratch. */
+        float decoded[dimension];
         const float *values = key;
         if (state->codec != COLI_V4_KV_F32) {
             result = coli_v4_kv_decode_row(
                 state->codec, COLI_V4_KV_INDEX,
-                state->compressor_scratch, key, dimension, 0);
-            values = state->compressor_scratch;
+                decoded, key, dimension, 0);
+            values = decoded;
         }
         float score = 0.0f;
         for (int head = 0; !result && head < heads; head++) {
@@ -3231,6 +3256,8 @@ static int coli_v4_two_pass_attention_codec_ref(
         head_dimension < 1 || !row_bytes || !(softmax_scale > 0.0f))
         return -1;
     int topk = window_size + compressed_selected;
+    /* Row-outer decoding shares each KV row across heads, so the diagnostic
+     * two-pass path must retain one score per head and selected row. */
     float *scores = malloc((size_t)heads * topk * sizeof(*scores));
     float *maximum = malloc((size_t)heads * sizeof(*maximum));
     float *denominator = malloc((size_t)heads * sizeof(*denominator));
@@ -4839,12 +4866,15 @@ int coli_v4_indexer_step(ColiDeepSeekV4Indexer *state, int *indices,
     for (int candidate = 0; !result && candidate < state->count; candidate++) {
         const void *key = (const unsigned char *)state->compressed +
                           (size_t)candidate * state->row_bytes;
+        /* Keep decode storage candidate-local so a future OpenMP scan gets a
+         * private buffer per worker instead of sharing compressor scratch. */
+        float decoded[dimension];
         const float *values = key;
         if (state->codec != COLI_V4_KV_F32) {
             result = coli_v4_kv_decode_row(
                 state->codec, COLI_V4_KV_INDEX,
-                state->compressor_scratch, key, dimension, 0);
-            values = state->compressor_scratch;
+                decoded, key, dimension, 0);
+            values = decoded;
         }
         float score = 0.0f;
         for (int head = 0; !result && head < heads; head++) {
@@ -5085,6 +5115,17 @@ static int set_error(char *error, size_t size, const char *format, ...) {
     return -1;
 }
 
+static int encode_attention_kv_row(
+    ColiDeepSeekV4WindowAttentionState *state, void *destination,
+    const float *source, const char *kind, char *error, size_t error_size) {
+    if (coli_v4_kv_encode_row(
+            state->codec, COLI_V4_KV_MAIN, destination, source,
+            state->head_dim, state->rope_dim))
+        return set_error(error, error_size,
+                         "cannot encode %s attention KV row", kind);
+    return 0;
+}
+
 static const void *layer_data(const ColiDeepSeekV4LayerWeights *weights,
                               const char *suffix,
                               const ColiDeepSeekV4TensorSpec **spec) {
@@ -5184,11 +5225,11 @@ static int attention_token_impl(float *output,
         if (!result) result = coli_v4_compressor_step(
             state->compressor, state->compressor_scratch,
             &produced, input, position, error, error_size);
-        if (!result && produced) result = coli_v4_kv_encode_row(
-            state->codec, COLI_V4_KV_MAIN,
+        if (!result && produced) result = encode_attention_kv_row(
+            state,
             (unsigned char *)state->compressed +
                 (size_t)state->compressed_count * state->row_bytes,
-            state->compressor_scratch, head_dim, state->rope_dim);
+            state->compressor_scratch, "compressed", error, error_size);
         if (!result && produced) state->compressed_count++;
         if (!result && state->indexer) {
             compressed_indices = malloc((size_t)config->index_topk *
@@ -5260,10 +5301,10 @@ static int attention_token_impl(float *output,
     const float *sinks = layer_data(weights, "attn.attn_sink", NULL);
     if (!result && state) {
         int slot = position % state->window_size;
-        result = coli_v4_kv_encode_row(
-            state->codec, COLI_V4_KV_MAIN,
+        result = encode_attention_kv_row(
+            state,
             (unsigned char *)state->kv + (size_t)slot * state->row_bytes,
-            kv, head_dim, state->rope_dim);
+            kv, "window", error, error_size);
         if (!state->indexer) compressed_selected = state->compressed_count;
         int *window_indices = malloc((size_t)state->window_size *
                                      sizeof(*window_indices));
@@ -10846,6 +10887,9 @@ static void decode_native_row(float *dst, const unsigned char *row,
         dst[nope + i] = native_rope_value(rope, i);
 }
 
+/* This initial guess must use the same ceiling rule as ceil_log2_positive in
+ * the native QDQ producers.  A mismatch still finds a lossless encoding, but
+ * only after falling back to the encoder's exhaustive 255-scale search. */
 static int kv_ceil_log2(float value) {
     int exponent;
     float fraction = frexpf(value, &exponent);
@@ -10995,84 +11039,6 @@ int coli_v4_kv_decode_row(ColiV4KVCodec codec, ColiV4KVStream stream,
     return 0;
 }
 
-float coli_v4_kv_dot(ColiV4KVCodec codec, ColiV4KVStream stream,
-                     const float *query, const void *row,
-                     int head_dim, int rope_dim) {
-    if (!query || !row ||
-        !coli_v4_kv_row_bytes(codec, stream, head_dim, rope_dim))
-        return 0.0f;
-    float result = 0.0f;
-    if (codec == COLI_V4_KV_F32) {
-        const float *values = row;
-        for (int i = 0; i < head_dim; i++) result += query[i] * values[i];
-    } else if (stream == COLI_V4_KV_INDEX) {
-        const unsigned char *values = row;
-        size_t packed = ((size_t)head_dim + 1) / 2;
-        for (int base = 0; base < head_dim; base += 32) {
-            int count = head_dim - base < 32 ? head_dim - base : 32;
-            float scale = coli_e8m0_decode(
-                values[packed + (size_t)base / 32]);
-            for (int i = 0; i < count; i++)
-                result += query[base + i] *
-                    native_index_value(values, base + i, scale);
-        }
-    } else {
-        const unsigned char *values = row;
-        int nope = head_dim - rope_dim;
-        size_t scale_count = ((size_t)nope + 63) / 64;
-        for (int base = 0; base < nope; base += 64) {
-            int count = nope - base < 64 ? nope - base : 64;
-            float scale = coli_e8m0_decode(
-                values[nope + (size_t)base / 64]);
-            for (int i = 0; i < count; i++)
-                result += query[base + i] * coli_bf16_round(
-                    coli_e4m3fn_decode(values[base + i]) * scale);
-        }
-        const unsigned char *rope = values + nope + scale_count;
-        for (int i = 0; i < rope_dim; i++)
-            result += query[nope + i] * native_rope_value(rope, i);
-    }
-    return result;
-}
-
-void coli_v4_kv_accumulate(ColiV4KVCodec codec, ColiV4KVStream stream,
-                           float *acc, float probability, const void *row,
-                           int head_dim, int rope_dim) {
-    if (!acc || !row ||
-        !coli_v4_kv_row_bytes(codec, stream, head_dim, rope_dim))
-        return;
-    if (codec == COLI_V4_KV_F32) {
-        const float *values = row;
-        for (int i = 0; i < head_dim; i++) acc[i] += probability * values[i];
-    } else if (stream == COLI_V4_KV_INDEX) {
-        const unsigned char *values = row;
-        size_t packed = ((size_t)head_dim + 1) / 2;
-        for (int base = 0; base < head_dim; base += 32) {
-            int count = head_dim - base < 32 ? head_dim - base : 32;
-            float scale = coli_e8m0_decode(
-                values[packed + (size_t)base / 32]);
-            for (int i = 0; i < count; i++)
-                acc[base + i] += probability *
-                    native_index_value(values, base + i, scale);
-        }
-    } else {
-        const unsigned char *values = row;
-        int nope = head_dim - rope_dim;
-        size_t scale_count = ((size_t)nope + 63) / 64;
-        for (int base = 0; base < nope; base += 64) {
-            int count = nope - base < 64 ? nope - base : 64;
-            float scale = coli_e8m0_decode(
-                values[nope + (size_t)base / 64]);
-            for (int i = 0; i < count; i++)
-                acc[base + i] += probability * coli_bf16_round(
-                    coli_e4m3fn_decode(values[base + i]) * scale);
-        }
-        const unsigned char *rope = values + nope + scale_count;
-        for (int i = 0; i < rope_dim; i++)
-            acc[nope + i] += probability * native_rope_value(rope, i);
-    }
-}
-
 const char *coli_v4_kv_codec_name(ColiV4KVCodec codec) {
     switch (codec) {
         case COLI_V4_KV_F32: return "f32";
@@ -11132,7 +11098,9 @@ uint64_t coli_v4_kv_context_bytes(
     size_t index_row = coli_v4_kv_row_bytes(
         index_codec, COLI_V4_KV_INDEX, index_head_dim, 0);
     if (!kv_row || !index_row) return UINT64_MAX;
-    uint64_t total = (uint64_t)layers * (uint64_t)sliding_window * kv_row;
+    uint64_t window_rows = (uint64_t)layers * (uint64_t)sliding_window;
+    if (window_rows > UINT64_MAX / kv_row) return UINT64_MAX;
+    uint64_t total = window_rows * kv_row;
     for (int layer = 0; layer < layers; layer++) {
         int ratio = compress_ratios[layer];
         if (!ratio) continue;
