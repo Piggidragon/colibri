@@ -196,7 +196,14 @@ dem Bandbreitenabschnitt in [00-reference.md](00-reference.md):
 |---|---|
 | Bandbreiten-Deckel (100 % RAM-Treffer, DDR4-3200) | **~13 tok/s** |
 | ~17 % Residenz (32k-Endprofil), Dual-Streaming ~10 GB/s | **~3.3 tok/s** |
+| ~17 % Residenz (32k-Endprofil), ein Laufwerk ~7 GB/s | **~2.5 tok/s** |
 | ~10 % Residenz (Ausgangslage), ein Laufwerk ~7 GB/s | **~2 tok/s** |
+
+**Gemessen wird auf einem Laufwerk.** Das zweite Laufwerk ist optional (siehe
+[10-dual-streaming.md](10-dual-streaming.md)), also ist die Einzellaufwerk-Zeile
+der Maßstab für alle Phasen — sonst mischt sich der Hardwarebeitrag in jede
+Messung. Läuft eine Messreihe mit `COLI_MODEL_MIRROR`, gehört das in dieselbe
+Zeile wie die übrigen Knöpfe.
 
 Der Weg von ~2 auf gut 3 ist das, was die Pläne holen; die 13 sind die Asymptote.
 **Eine Messung deutlich über 13 tok/s ist ein Messfehler**, keine Sensation — dann
