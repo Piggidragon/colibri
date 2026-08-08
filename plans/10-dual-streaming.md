@@ -19,11 +19,13 @@ Das Modell ist ~167 GB. **Beide Laufwerke können eine vollständige Kopie halte
 ist für nur lesende Gewichte die bessere Wahl: jeder Expert ist auf beiden
 Laufwerken, also frei routbar und stripebar.
 
-**Warum das überhaupt zählt.** Bei ~20 % Expert-Residenz nach den VRAM-Phasen
+**Warum das überhaupt zählt.** Bei rund 17 % Expert-Residenz im 32k-Endprofil
 liest jeder Token 43 Layer × 6 Experten × ~13.4 MB ≈ **3.4 GB** (siehe
-Bandbreitenabschnitt in [00-reference.md](00-reference.md)), davon ~80 % von der
-Platte, also ~2.7 GB/Token. Auf Laufwerk A allein sind das bei ~7 GB/s
-**~0.39 s/Token**. Storage ist damit nach den VRAM-Phasen der dominante Posten.
+Bandbreitenabschnitt in [00-reference.md](00-reference.md)), davon ~83 % von der
+Platte, also ~2.8 GB/Token. Auf Laufwerk A allein sind das bei ~7 GB/s
+**~0.40 s/Token**. Bei 128k sinkt die Residenz auf rund 8 %, entsprechend
+~3.1 GB/Token oder ~0.44 s. Storage ist damit nach den VRAM-Phasen der dominante
+Posten; beide Kontexte gehören in die Messreihe.
 
 ## Der Fund: das meiste existiert schon — im falschen Motor
 
@@ -124,8 +126,9 @@ for (int i = 0; i < nsf; i++) {
 }
 ```
 
-Erwartung: von 7 auf ~10 GB/s aggregiert, also **~0.27 s statt ~0.39 s pro Token**
-(~30 % weniger Zeit) bei 2.7 GB Nachladung.
+Erwartung: von 7 auf ~10 GB/s aggregiert, also beim 32k-Profil **~0.28 s statt
+~0.40 s pro Token** und bei 128k **~0.31 s statt ~0.44 s** (jeweils rund 30 %
+weniger Streaming-Zeit).
 
 Die Einschränkung `len >= 4 MB` bleibt richtig — bei kleineren Reads dominiert die
 Latenz und zwei Threads kosten mehr als sie bringen. Ein Expert-Record von

@@ -133,8 +133,9 @@ Kandidaten, jeweils **erst gegen die Hülle aus Commit 1 prüfen**:
 
 **`uring.h` ausdrücklich nicht löschen.** Es ist heute nur von colibri.c benutzt und
 sähe nach totem Code aus — aber Plan 09 nennt io_uring als den plausibel größten
-Storage-Gewinn nach den VRAM-Phasen, und bei ~20 % Residenz ist Storage die
-dominante Kostenstelle. Löschen hieße, sich diese Option zu nehmen. Wer es
+Storage-Gewinn nach den VRAM-Phasen, und bei rund 17 % Residenz im 32k-Profil
+(rund 8 % bei 128k) ist Storage die dominante Kostenstelle. Löschen hieße, sich
+diese Option zu nehmen. Wer es
 trotzdem tut, sollte es bewusst tun.
 
 ## Was ausdrücklich bleibt

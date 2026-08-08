@@ -3,6 +3,13 @@
 All notable changes to colibrì are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/).
 
+## Unreleased
+
+### Removed
+
+- Removed the stale Simplified Chinese DeepSeek V4 documentation; the English
+  `docs/deepseek-v4.md` is the maintained source of truth.
+
 ## [1.1.1] — 2026-07-23
 
 A same-day patch release. **Windows users on v1.1.0 should upgrade**: Microsoft

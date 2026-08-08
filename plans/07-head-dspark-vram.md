@@ -8,7 +8,7 @@ Voraussetzung: [00-reference.md](00-reference.md), [06-dense-vram.md](06-dense-v
 
 ## Ziel
 
-Weitere **2.24 GiB RAM frei** (0.99 Head + ~1.25 DSpark) und nebenbei der beste
+Weitere **2.16 GiB RAM frei** (0.99 Head + ~1.17 DSpark-Reserve) und nebenbei der beste
 Rechenzeit-pro-Aufwand-Posten des ganzen Branches: der Head ist ein
 bandbreitengebundener Matvec über 1.059 GB pro Token.
 
@@ -37,10 +37,10 @@ gelesen**. Auf DDR4-3200 mit ~45 GB/s sind das ~24 ms (siehe
 [00-reference.md](00-reference.md)); auf dem 4070 mit ~500 GB/s ~2 ms. Faktor ~12,
 und gleichzeitig **0.99 GiB** RAM frei.
 
-**GB, nicht GiB.** `docs/deepseek-v4.md` nennt „about 1.06 GiB" — das ist der
-dezimale Wert mit dem falschen Suffix. Für die Zeitrechnung oben ist er richtig
-(÷ GB/s), für die RAM- und VRAM-Bilanzen nicht: dort sind es 0.986 GiB. Wer beide
-Zahlen mischt, verrechnet sich um 7 %.
+**GB, nicht GiB.** 1.059 GB sind 0.986 GiB; eine frühere Doku-Fassung trug am
+Dezimalwert das falsche GiB-Suffix. Für die Zeitrechnung oben ist 1.059 GB richtig
+(÷ GB/s), für die RAM- und VRAM-Bilanzen sind es 0.986 GiB. Wer beide Zahlen
+mischt, verrechnet sich um 7 %.
 
 Der Fallback darunter ([:6814](../c/deepseek_v4.c)) streamt in 64-Zeilen-Kacheln,
 wenn der Head nicht resident ist — der bleibt unverändert als letzte Stufe.
@@ -132,6 +132,9 @@ double cache = coli_v4_dspark_cache_gb() * 1e9;   /* Default 0.45, clamp 0.15..4
 double total = cache + 768.0 * 1024.0 * 1024.0;   /* ~0.56 GiB resident + Marge */
 ```
 
+Beim Default sind das `450 000 000 + 805 306 368 = 1 255 306 368 B`, also
+**1.255 GB = 1.169 GiB**. Die RAM-Bilanz bucht dafür rund 1.17 GiB, nicht 1.25.
+
 Aktiv nur wenn `V4_MTP` und `V4_DRAFT` gesetzt sind
 ([:6301](../c/deepseek_v4.c)). Fließt über `runtime->dspark_reserve_bytes` in
 `runtime_other` ([:967](../c/deepseek_v4.c)) und damit direkt gegen den
@@ -164,7 +167,7 @@ Die residenten Tensoren, aus `g_v4ds_core`
 
 ### Erwartung
 
-Konservativ **~1.25 GiB RAM frei**, wenn DSpark aktiv ist. Bei inaktivem DSpark
+Konservativ **~1.17 GiB RAM frei**, wenn DSpark aktiv ist. Bei inaktivem DSpark
 ändert sich nichts — die Reserve ist dann ohnehin 0.
 
 Zusätzlich wird DSpark schneller: der Drafter läuft dreistufig pro Token

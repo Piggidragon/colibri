@@ -1,7 +1,5 @@
 # DeepSeek V4 target engine (colibri CPU)
 
-[简体中文](deepseek-v4.zh-CN.md)
-
 This is the target-only DeepSeek V4 Flash engine for the first PR of the V4
 split. DSpark speculative decoding is intentionally excluded and belongs in a
 separate stacked follow-up.
@@ -37,8 +35,8 @@ that specialized cache layout can be removed.
 
 A typical checkpoint has 43 transformer layers, hidden size 4096, and 256
 routed experts per sparse layer with top-k 6. Dense weights occupy about
-6.27 GiB and a resident BF16 output head about 1.06 GiB. Routed-expert weights
-are streamed and cached according to the RAM budget.
+6.27 GiB and a resident BF16 output head about 0.99 GiB (1.06 GB).
+Routed-expert weights are streamed and cached according to the RAM budget.
 
 The planner reserves workspace and a minimum expert working set, then enables
 dense/head residency and grows the expert cache when memory permits. Dense
@@ -47,6 +45,10 @@ including with the legacy `--no-dspark` option.
 
 `--ram GiB` is a planner budget, not an OS-enforced limit. Without it, the
 budget is derived from currently available OS memory.
+
+For the 32 GiB target machine, scratch-reserve guidance, the reproducible
+benchmark protocol, and the current before/after measurements are maintained in
+[DeepSeek V4 tuning for 32 GiB](deepseek-v4-tuning-32gb.md).
 
 ## Download
 

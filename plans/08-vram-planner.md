@@ -138,7 +138,7 @@ Die `ram_tiers`-Zeile ([:1057](../c/deepseek_v4.c)) um eine `vram_tiers`-Zeile
 ergänzen — gleiche Form, gleicher Ort, damit beides zusammen im Log steht:
 
 ```
-ram_tiers  available=28.00GiB dense=vram target_slots=51 target_cache=27.30GiB head=vram projected=27.55GiB
+ram_tiers  available=28.00GiB dense=vram target_slots=21 target_cache=~11.2GiB head=vram projected=~11.5GiB
 vram_tiers free=11.70GiB reserve=1.00GiB kv=vram(0.43GiB) dense=vram(6.27GiB) head=vram(0.99GiB) dspark=vram(0.56GiB) used=8.55GiB
 ```
 
@@ -246,8 +246,11 @@ Abgleich der beiden Abnahmekriterien.
 
 - Auf dem 4070 (headless) zeigt `vram_tiers` alle vier Posten als `vram` bei
   `used ≈ 8.55 GiB` für `CTX=131072`/`native`, `reserve = 1.00 GiB`.
-- `ram_tiers` zeigt `target_cache ≈ 27.6 GiB` gegen ~14.4 GiB auf `main` (siehe
-  RAM-Bilanz in [00-reference.md](00-reference.md)).
+- Bei `CTX=131072` liegt `target_cache` nach Slot-Rundung innerhalb der in
+  [00-reference.md](00-reference.md) hergeleiteten Obergrenze von 11.55 GiB
+  (rund 21–22 Slots). Der Gewinn wird gegen einen echten `main`-Lauf mit
+  identischem `CTX` ausgewiesen; die früher genannten 27.6/14.4 GiB beruhten auf
+  der inzwischen korrigierten 64-Token-State-Reserve und sind kein Gate mehr.
 - Künstlich verkleinertes VRAM-Budget (`V4_VRAM_LIMIT_MB`) degradiert stufenweise
   statt zu scheitern — durchgespielt für 8, 6, 4, 2 und 0 GiB.
 - **Laufzeit-OOM je Stufe injiziert** (`V4_VRAM_FAIL_AT=kv|dense|head|dspark`):
