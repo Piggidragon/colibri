@@ -18,12 +18,16 @@ DSpark-Drafter auf genau dieser Maschine so gut wie möglich fahren**:
 | CPU | Intel **i5-13400F** — 6 P-Cores + 4 E-Cores, 16 Threads, **kein AVX-512**, **keine iGPU** |
 | RAM | 32 GB **DDR4-3200**, Dual-Channel — ~45 GB/s, siehe Bandbreitenabschnitt |
 | GPU | RTX 4070, 12 GB — **headless im V4-Betrieb**, ~11.7 GiB nutzbar |
-| Laufwerk A | 1 TB NVMe **Gen4**, DRAM-los (HMB) |
-| Laufwerk B | 512 GB SSD **Gen3**, DRAM-los (HMB) |
+| Laufwerk A | 1 TB NVMe **Gen4**, DRAM-los (HMB) — trägt das Modell |
+| Laufwerk B | 512 GB SSD **Gen3**, DRAM-los (HMB) — **optional**, zweite Kopie |
 | OS | CachyOS (Arch-Familie), **Linux x86-64 only** |
 
 Beide Laufwerke fassen je eine vollständige Modellkopie (167 GB < 512 GB) —
 Grundlage für Dual-Streaming, siehe [10-dual-streaming.md](10-dual-streaming.md).
+**Laufwerk B ist dabei ein Beschleuniger, keine Voraussetzung:** ohne es läuft
+alles unverändert, nur mit ~7 statt ~10 GB/s Lesebandbreite. Kein Plan außer 10
+kennt es, und auch 10 hat den Einzellaufwerk-Betrieb als Default und als
+Pflicht-Abnahme.
 
 **Checkpoint:** [deepseek-ai/DeepSeek-V4-Flash-0731](https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash-0731)
 
@@ -222,9 +226,11 @@ perfektem RAM-Cache, ohne jede Platte, ohne jeden Fehltreffer.
 **Kein Plan in diesem Baum verschiebt diesen Deckel.** Sie alle arbeiten daran,
 sich ihm zu nähern: im theoretischen 32k-Endprofil passen vor Slot-Rundung rund
 16–17 % der Experten in den Cache, bei 128k nur rund 8 %. Bei 17 % Residenz kommen
-~2.8 GB der 3.4 GB von der Platte; das sind bei ~10 GB/s (nach Plan 10) ~280 ms
-und damit gut 3 tok/s. Der Weg von dort auf 13 ist das, was hier zu holen ist.
-Darüber hinaus ginge nur mit anderer Hardware oder weniger aktivierten Parametern.
+~2.8 GB der 3.4 GB von der Platte: auf einem Laufwerk (~7 GB/s) sind das ~400 ms
+und damit gut 2 tok/s, mit dem optionalen zweiten Laufwerk (~10 GB/s nach Plan 10)
+~280 ms und damit gut 3 tok/s. Der Weg von dort auf 13 ist das, was hier zu holen
+ist. Darüber hinaus ginge nur mit anderer Hardware oder weniger aktivierten
+Parametern.
 
 **Was daraus folgt:**
 
@@ -714,7 +720,11 @@ VRAM-Budget ohne turbo3 nicht schließt.
 **10 ist unabhängig von allem anderen** und adressiert die Kostenstelle, die nach
 den VRAM-Phasen übrigbleibt: selbst beim 32k-Endprofil mit ~17 %
 Expert-Residenz liest jeder Token noch ~2.8 GB von der Platte. Es lässt sich
-jederzeit einschieben.
+jederzeit einschieben. Sein Commit 3 (HMB, Koaleszenz, Queue-Tiefe) trägt auch
+ohne zweites Laufwerk; nur Commit 2 braucht es. **Der Einzellaufwerk-Betrieb
+bleibt in 10 Default und Pflicht-Abnahme** — die Zahlen der Baseline in 01 werden
+weiterhin ohne Spiegel gemessen, sonst ist der Vergleich über die Phasen hinweg
+kaputt.
 
 **11 zuletzt.** Er entfernt nur und braucht als Vorlage, was er löscht.
 

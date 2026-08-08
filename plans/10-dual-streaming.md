@@ -1,4 +1,4 @@
-# 10 — Dual-Streaming über zwei DRAM-lose SSDs
+# 10 — Dual-Streaming über ein optionales zweites DRAM-loses SSD
 
 Voraussetzung: [00-reference.md](00-reference.md)
 
@@ -7,12 +7,37 @@ Voraussetzung: [00-reference.md](00-reference.md)
 2. `perf: bandwidth-weighted stripe chunks for asymmetric drives`
 3. `perf: HMB-aware queue depth for DRAM-less SSDs`
 
+## Das zweite Laufwerk ist optional — und bleibt es
+
+**Ein Laufwerk ist die Grundkonfiguration, nicht der Notfall.** Das zweite
+Laufwerk ist ein Beschleuniger, den dieses Setup zufällig danebenliegen hat; der
+Plan darf es nicht zur Voraussetzung machen. Verbindlich für alle drei Commits:
+
+- **Default ist Einzellaufwerk.** Ohne `COLI_MODEL_MIRROR` bzw. `COLI_MODEL_DIRS`
+  läuft exakt der heutige Lesepfad — dieselben `pread`s, dieselbe Koaleszenz,
+  dieselben Tokens. Das ist die Regel „Default = heutiges Verhalten" aus
+  [AGENTS.md](../AGENTS.md), hier ohne Ausnahme.
+- **Aus heißt aus, nicht „mit `nsf == 1`".** Ist nur eine Replik registriert, wird
+  weder geprobt noch geroutet noch ein zweiter Thread aufgemacht. Kein
+  Bandbreiten-Probe beim Start, kein `expert_route`-Aufruf pro Read, kein
+  Striper-Setup — der Aus-Pfad kostet **null**, sonst zahlt die Grundkonfiguration
+  für ein Feature, das sie nicht benutzt.
+- **Der Aus-Pfad ist der Pflicht-Pfad in der Abnahme.** Alle Gates laufen ohne
+  zweites Laufwerk grün; die Dual-Gates kommen zusätzlich obendrauf, nicht
+  stattdessen. Siehe [Abnahme](#abnahme).
+- **Commit 3 gilt für beide Konfigurationen.** HMB-Verhalten, Koaleszenz und
+  Queue-Tiefe hängen am einzelnen Laufwerk, nicht an ihrer Zahl — dieser Commit
+  ist auch dann der Ertrag des Plans, wenn nie ein zweites Laufwerk steckt.
+
+Damit ist der Plan auch auf einer Maschine mit nur Laufwerk A vollständig
+umsetzbar; es entfallen lediglich die Gewinne aus Commit 2.
+
 ## Zielhardware
 
-| | Kapazität | Schnittstelle | DRAM |
-|---|---|---|---|
-| Laufwerk A | 1 TB | **PCIe Gen4** ×4 | **nein** (HMB) |
-| Laufwerk B | 512 GB | **PCIe Gen3** ×4 | **nein** (HMB) |
+| | Kapazität | Schnittstelle | DRAM | |
+|---|---|---|---|---|
+| Laufwerk A | 1 TB | **PCIe Gen4** ×4 | **nein** (HMB) | Modell liegt hier, **Pflicht** |
+| Laufwerk B | 512 GB | **PCIe Gen3** ×4 | **nein** (HMB) | zweite Kopie, **optional** |
 
 Das Modell ist ~167 GB. **Beide Laufwerke können eine vollständige Kopie halten**
 (167 < 512). Damit ist Spiegelung möglich, nicht nur Aufteilung — und Spiegelung
@@ -23,9 +48,12 @@ Laufwerken, also frei routbar und stripebar.
 liest jeder Token 43 Layer × 6 Experten × ~13.4 MB ≈ **3.4 GB** (siehe
 Bandbreitenabschnitt in [00-reference.md](00-reference.md)), davon ~83 % von der
 Platte, also ~2.8 GB/Token. Auf Laufwerk A allein sind das bei ~7 GB/s
-**~0.40 s/Token**. Bei 128k sinkt die Residenz auf rund 8 %, entsprechend
-~3.1 GB/Token oder ~0.44 s. Storage ist damit nach den VRAM-Phasen der dominante
-Posten; beide Kontexte gehören in die Messreihe.
+**~0.40 s/Token** — das ist die Zahl der Grundkonfiguration, gegen die Commit 2
+antritt. Bei 128k sinkt die Residenz auf rund 8 %, entsprechend ~3.1 GB/Token oder
+~0.44 s. Storage ist damit nach den VRAM-Phasen der dominante Posten; beide
+Kontexte gehören in die Messreihe, und zwar **je einmal mit und ohne zweites
+Laufwerk** — sonst ist der Beitrag des Laufwerks nicht von dem der Commits 1 und 3
+zu trennen.
 
 ## Der Fund: das meiste existiert schon — im falschen Motor
 
@@ -81,7 +109,9 @@ und die Statistikzähler. Alles hängt nur an `shards *` aus `st.h`, nicht an
 Anzubinden in V4:
 
 - `coli_st_index_open` ([:27](../c/deepseek_v4.c)) ruft nach dem Öffnen
-  `st_mirror_add` für jeden Eintrag aus `COLI_MODEL_MIRROR`.
+  `st_mirror_add` für jeden Eintrag aus `COLI_MODEL_MIRROR`. Ist die Variable
+  ungesetzt oder zeigt sie auf ein Verzeichnis ohne passende Shards, bleibt es bei
+  einer Replik — **ohne Fehler und ohne Probe**, nur mit einer Zeile im Log.
 - Der Expert-Lesepfad (`v4_pread_full_try`, [:5639](../c/deepseek_v4.c), und der
   Slab-Pfad um [:5861](../c/deepseek_v4.c)) routet über `expert_route(layer, eid)`
   und versucht `mir_pread_striped` vor dem Einzel-Read.
@@ -89,12 +119,23 @@ Anzubinden in V4:
   **denselben** fd absetzen, den der spätere Demand-Read nimmt — sonst wärmt man
   die falsche Page-Cache-Seite. Das ist genau der Determinismus-Punkt oben.
 
+**Der Aus-Pfad wird explizit gebaut, nicht angenommen.** Ein einziges
+`if (nrep < 2)` ganz oben in den Lesepfaden springt auf den heutigen Code, bevor
+Routing oder Striper überhaupt betrachtet werden — ein vorhersagbar sprungfreier
+Zweig, kein Durchlaufen der Mirror-Logik mit `nsf == 1`. Dasselbe beim Start:
+`mirror_probe_bw` läuft nur, wenn mindestens zwei Repliken registriert sind, sonst
+kostet die Grundkonfiguration Sekunden Startzeit für eine Messung, aus der nichts
+folgt. Auch `COLI_DISK_WEIGHTS` wird dann nicht gelesen.
+
 **Reihenfolge:** Dieser Commit muss **vor** Plan 11 liegen. Wird colibri.c vorher
 gelöscht, ist die Referenzimplementierung weg.
 
 ## Commit 2 — Gewichtete Stripe-Chunks
 
-Hier liegt der eigentliche Beitrag für **asymmetrische** Laufwerke.
+Hier liegt der eigentliche Beitrag für **asymmetrische** Laufwerke — und **nur
+hier** wird das zweite Laufwerk gebraucht. Ohne zweites Laufwerk ist dieser Commit
+ein Test und tote Codepfade; das ist in Ordnung und ändert nichts an der
+Reihenfolge, aber es ist der Grund, warum die Abnahme zweigeteilt ist.
 
 `mir_pread_striped` teilt heute **gleichmäßig** ([:2064](../c/colibri.c)):
 
@@ -134,9 +175,18 @@ Die Einschränkung `len >= 4 MB` bleibt richtig — bei kleineren Reads dominier
 Latenz und zwei Threads kosten mehr als sie bringen. Ein Expert-Record von
 ~13.4 MB liegt komfortabel darüber.
 
+Bei einer Replik ist `nsf == 1`, `W == wt[0]` und die Schleife liefert
+`bound = {0, len}` — der Striper degeneriert korrekt zum Einzel-Read. Das ist die
+Rückfallebene für den Fall, dass der Aus-Pfad aus Commit 1 einmal nicht greift,
+**nicht** der Aus-Pfad selbst: der liegt davor und spart auch den Aufruf.
+
 ## Commit 3 — DRAM-lose SSDs
 
-Beide Laufwerke haben **keinen eigenen DRAM** und nutzen HMB (Host Memory Buffer),
+**Dieser Commit hängt nicht am zweiten Laufwerk.** Er gilt pro Laufwerk und trägt
+in der Grundkonfiguration genauso wie in der gespiegelten — wer nur Laufwerk A hat,
+holt hier trotzdem den Ertrag des Plans.
+
+Die Laufwerke haben **keinen eigenen DRAM** und nutzen HMB (Host Memory Buffer),
 also geliehenen Host-RAM für die FTL-Mapping-Tabelle — typisch 64 MB.
 
 Zwei Konsequenzen:
@@ -170,18 +220,29 @@ Ergebnis dieses Commits ist primär eine **Messung mit dokumentierten Einstellun
 im Tuning-Doc, nicht notwendig Code. Wenn die Messung eine feste Workerzahl oder
 Queue-Tiefe nahelegt, wird daraus ein Default für dieses Profil.
 
-## Alternative: `COLI_MODEL_DIRS` statt Spiegelung
+## Die drei Konfigurationen
 
-Wenn der Platz knapp wird (167 GB × 2 = 334 GB von 1.5 TB — er wird nicht knapp),
-wäre `COLI_MODEL_DIRS` die Alternative: Shards **aufteilen**, jeder liegt genau
-einmal. Dann summiert sich die Kapazität, aber ein Expert ist nur auf *einem*
-Laufwerk — kein Striping, kein Routing-Freiheitsgrad.
+| Konfiguration | Wie | Erwartung 32k | Wann |
+|---|---|---|---|
+| **Einzellaufwerk** (Default) | nichts setzen | ~7 GB/s, ~0.40 s/Token | immer lauffähig, Grundkonfiguration |
+| **Spiegelung** | `COLI_MODEL_MIRROR` | ~10 GB/s, ~0.28 s/Token | zweites Laufwerk mit ≥167 GB frei |
+| **Aufteilung** | `COLI_MODEL_DIRS` | ~7 GB/s, Kapazität summiert | zweites Laufwerk, aber zu klein für eine volle Kopie |
 
-**Für dieses Setup ist Spiegelung klar besser**, weil der Platz reicht und beide
-Freiheitsgrade (Routing und Striping) erhalten bleiben. Im Tuning-Doc als
-bewusste Entscheidung festhalten, nicht als Zufall.
+Die Aufteilung legt jeden Shard genau einmal ab: die Kapazität summiert sich, aber
+ein Expert liegt nur auf *einem* Laufwerk — kein Striping, kein
+Routing-Freiheitsgrad, also kein Bandbreitengewinn. Sie ist die Antwort auf zu
+wenig Platz, nicht auf zu wenig Durchsatz.
+
+**Für dieses Setup ist Spiegelung klar besser** (167 GB × 2 = 334 GB von 1.5 TB —
+der Platz reicht), weil beide Freiheitsgrade erhalten bleiben. Im Tuning-Doc als
+bewusste Entscheidung festhalten, nicht als Zufall — zusammen mit der Zahl für die
+Grundkonfiguration, damit ablesbar bleibt, was das zweite Laufwerk wirklich bringt.
 
 ## Tests
+
+**Kein Test setzt ein zweites physisches Laufwerk voraus.** Zwei Verzeichnisse auf
+demselben Dateisystem reichen für alles außer der Bandbreitenmessung; die Gates
+laufen damit auch in CI und auf einer Maschine mit einer SSD.
 
 - `c/tests/test_v4_mirror.c` — neue Make-Regel:
   - `expert_route` ist deterministisch und verteilt über viele `(layer, eid)`
@@ -191,12 +252,32 @@ bewusste Entscheidung festhalten, nicht als Zufall.
   - Entartete Fälle: eine Replik, `wt` gleich, `len` knapp über/unter 4 MB,
     `len` kleiner als `nsf × 4096`.
   - Partieller Mirror: Shard nur auf der Primärkopie → Fallback ohne Striping.
+- `c/tests/test_v4_mirror_off.c` — **der Aus-Pfad als eigenes Gate**: ohne
+  `COLI_MODEL_MIRROR` bleibt der Mirror-Zähler bei einer Replik, der
+  Bandbreiten-Probe läuft **nicht** (Zähler oder Log-Marke prüfen) und der
+  Lesepfad liefert byteidentische Puffer wie vor Commit 1. Der Test ist die
+  Zusicherung, dass die Grundkonfiguration nichts für das Feature bezahlt.
 - `c/tests/test_v4_mirror_fallback.c` — ein Lesefehler auf der Replik fällt auf
-  die Primärkopie zurück und loggt **einmal**, nicht pro Read.
+  die Primärkopie zurück und loggt **einmal**, nicht pro Read. Dazu: ein
+  `COLI_MODEL_MIRROR`, das auf ein nicht existierendes oder shard-freies
+  Verzeichnis zeigt, startet normal auf einer Replik statt abzubrechen.
 - End-to-end mit zwei Verzeichnissen auf demselben Dateisystem (Kopie des
   Tiny-Fixtures): identische Tokens mit und ohne `COLI_MODEL_MIRROR`.
 
 ## Abnahme
+
+**Pflicht — ohne zweites Laufwerk, auf jeder Maschine nachvollziehbar:**
+
+- `make -C c test && make -C c check` und `deepseek-v4-tiny-check` grün, Tokens
+  identisch zum Stand vor dem Branch.
+- `test_v4_mirror_off` belegt: eine Replik, kein Probe, kein Verhaltensdelta.
+- Startzeit und Lesezeit pro Token unverändert gegenüber `main` — Commit 1 und 2
+  dürfen die Grundkonfiguration **nicht messbar** verlangsamen (Toleranz: innerhalb
+  der Streuung der Baseline aus [01](01-measure-and-ram-budget.md)).
+- Commit 3 liefert seine Messreihe für Laufwerk A allein; die daraus abgeleiteten
+  Defaults gelten unabhängig von der Zahl der Laufwerke.
+
+**Zusätzlich, wenn ein zweites Laufwerk steckt:**
 
 - `MIRROR:`-Statistikzeile zeigt beide Laufwerke mit Bytes und Reads.
 - Der Probe meldet ~7 und ~3.5 GB/s; die Cuts stehen ≈ 2:1.
@@ -204,13 +285,24 @@ bewusste Entscheidung festhalten, nicht als Zufall.
   (Erwartung ~7 → ~10 GB/s aggregiert, ~30 % weniger Zeit).
 - Gewichtete Stripes schlagen gleichmäßige messbar — beide Varianten gegeneinander
   messen, nicht nur die neue.
-- Tokenfolge unverändert. Storage-Routing darf nie Semantik berühren.
+- Tokenfolge unverändert, mit und ohne Spiegel identisch. Storage-Routing darf nie
+  Semantik berühren.
+
+Der PR ist mit dem Pflichtteil abnahmefähig. Fehlt das zweite Laufwerk, wird das
+in der PR-Beschreibung vermerkt und der Dual-Teil nachgereicht — er wird nicht
+weggelassen und nicht geschätzt.
 
 ## Risiken
 
+- **Der Aus-Pfad verrottet still.** Ein Feature, das der Entwickler immer an hat,
+  wird ungetestet — und dann kostet die Grundkonfiguration irgendwann doch einen
+  Probe beim Start oder einen Routing-Aufruf pro Read. Dagegen steht
+  `test_v4_mirror_off` als Gate; die Messreihen in [01](01-measure-and-ram-budget.md)
+  laufen weiterhin **ohne** Spiegel, damit die Baseline vergleichbar bleibt.
 - **Zwei Kopien = doppelte Schreiblast beim Anlegen** (167 GB je Laufwerk). Bei
   DRAM-losen QLC/TLC-Laufwerken ohne SLC-Cache-Reserve kann das lange dauern und
-  den Cache füllen. Einmalig, aber im Tuning-Doc erwähnen.
+  den Cache füllen. Einmalig, aber im Tuning-Doc erwähnen — und ein Grund, die
+  Spiegelung erst anzulegen, wenn Commit 2 tatsächlich gemessen werden soll.
 - **Der Probe misst Momentanbandbreite.** Ein Laufwerk im thermischen Throttling
   oder mit vollem SLC-Cache misst niedriger, als es im Betrieb liefert. Deshalb
   bleibt `COLI_DISK_WEIGHTS` als manueller Override — für dieses Setup ist `2,1`

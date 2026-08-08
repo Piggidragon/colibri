@@ -13,8 +13,8 @@ Maschine so gut wie möglich fahren.
 | CPU | Intel **i5-13400F** — 6 P + 4 E Cores, 16 Threads, kein AVX-512 |
 | RAM | 32 GB **DDR4-3200** Dual-Channel — ~45 GB/s |
 | GPU | RTX 4070, 12 GB — **headless im V4-Betrieb**, ~11.7 GiB nutzbar |
-| Laufwerk A | 1 TB NVMe Gen4, DRAM-los (HMB) |
-| Laufwerk B | 512 GB SSD Gen3, DRAM-los (HMB) |
+| Laufwerk A | 1 TB NVMe Gen4, DRAM-los (HMB) — trägt das Modell |
+| Laufwerk B | 512 GB SSD Gen3, DRAM-los (HMB) — **optional**, zweite Kopie |
 | OS | CachyOS (Arch-Familie) |
 
 **Zielplattform ist Linux x86-64.** Windows, macOS, Metal, Vulkan, HIP und die
@@ -84,7 +84,7 @@ Die Nummern sind Kennungen, keine Reihenfolge. So wird gearbeitet:
 | 7 | **06** | Dense in VRAM — der größte RAM-Einzelposten. |
 | 8 | **07** | Head und DSpark in VRAM. |
 | 9 | **08** | VRAM-Planner, der 05–07 zu einer Entscheidung zusammenfasst. |
-| 10 | **10** | Dual-Streaming. Unabhängig, kann ab Schritt 2 jederzeit dazwischen. |
+| 10 | **10** | Dual-Streaming. Unabhängig, kann ab Schritt 2 jederzeit dazwischen. Das zweite Laufwerk ist **optional** — Einzellaufwerk bleibt Default und Pflicht-Abnahme. |
 | 11 | **09 Rest** | THP, CUDA-Pfade, Tuning-Doku. |
 | 12 | **04** | TurboQuant — **Pflicht für das 1M-Profil**, bis 512k optional (siehe VRAM-Budget in 00). |
 | 13 | **13** | Frontend. |
