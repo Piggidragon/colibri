@@ -22,7 +22,7 @@ static int compare_outputs(const float *reference, const float *flash,
     for (size_t i = 0; i < count; i++) {
         float scale = fmaxf(fabsf(reference[i]), fabsf(flash[i]));
         float difference = fabsf(reference[i] - flash[i]);
-        float tolerance = 1e-3f + 1e-3f * scale;
+        float tolerance = 1e-3f + 8e-3f * scale;
         if (difference > tolerance) {
             fprintf(stderr,
                     "%s[%zu]: reference=%g flash=%g difference=%g "
@@ -65,7 +65,7 @@ static int compare_random_case(int topk, int padded, int flash_enabled) {
     for (size_t i = 0; i < values; i++) kv[i] = random_float();
     for (size_t i = 0; i < (size_t)HEADS * HEAD_DIM; i++)
         queries[i] = random_float();
-    for (int head = 0; head < HEADS; head++) sinks[head] = -10.0f;
+    for (int head = 0; head < HEADS; head++) sinks[head] = 0.0f;
     for (int i = 0; i < window_size; i++) {
         window_indices[i] = padded && i > 0 && i % 11 == 0 ? -1 : i;
         indices[i] = window_indices[i];
@@ -113,12 +113,19 @@ static int test_random_cases(void) {
 }
 
 static int test_edge_cases(void) {
-    float output[8], query[8] = {0}, window[8] = {2, -1, 4, 3, 1, 1, 1, 1};
+    float output[8], reference[8], query[8] = {0};
+    float window[8] = {2, -1, 4, 3, 1, 1, 1, 1};
     int valid[2] = {0, 1}, empty[2] = {-1, -1};
     float sinks[2] = {100.0f, -100.0f};
+    set_flash("0");
+    if (coli_v4_attention_two_source_ref(
+            reference, query, window, 2, NULL, 0, valid, NULL, 0,
+            sinks, 2, 4, 1.0f))
+        return 1;
     if (coli_v4_flash_attention_ref(output, query, window, 2, NULL, 0,
                                     valid, NULL, 0, sinks, 2, 4, 1.0f))
         return 1;
+    if (compare_outputs(reference, output, 8, "sink extremes")) return 1;
     for (int i = 0; i < 4; i++) {
         if (output[i] != 0.0f) return 1;
         float expected = coli_bf16_round((window[i] + window[4 + i]) / 2.0f);

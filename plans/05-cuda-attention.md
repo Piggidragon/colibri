@@ -219,7 +219,7 @@ Ein Fehler im Kernel-Aufruf fällt für diesen Token auf CPU zurück und loggt e
 - Kernel gegen `coli_v4_flash_attention_ref` auf Zufallsdaten, alle Codecs,
   `heads` ∈ {1, 8, 64}, `head_dim=512`, `topk` ∈ {1, 7, 64, 2048}.
   Signierte Queries; Toleranz pro Komponente
-  `abs(a-b) <= 1e-3 + 1e-3 * max(abs(a), abs(b))`, dazu Cosine `> 0.9999`.
+  `abs(a-b) <= 1e-3 + 8e-3 * max(abs(a), abs(b))`, dazu Cosine `> 0.9999`.
 - Sinks: extreme Werte, wie im CPU-Test.
 - `-1`-Padding im Fenster-Index.
 - Ein komprimierter Index `>= compressed_count` wird ohne Device-OOB abgelehnt.

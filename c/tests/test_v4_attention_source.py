@@ -63,6 +63,46 @@ class DeepSeekV4AmalgamSourceTest(unittest.TestCase):
         )
         self.assert_copies(copies, 3, "deepseek_v4_attention.c")
 
+    def test_all_attention_callers_keep_two_source_migration(self):
+        token_callers = definitions(ENGINE, "static int attention_token_impl(")
+        self.assertEqual(len(token_callers), 3, "attention_token_impl copy count")
+        batch_callers = definitions(
+            ENGINE, "int coli_v4_attention_window_batch_ref(\n"
+        )
+        self.assertEqual(len(batch_callers), 1, "standalone batch path count")
+
+        for caller in token_callers + batch_callers:
+            self.assertEqual(caller.count("coli_v4_attention_two_source_ref("), 1)
+            self.assertEqual(
+                caller.count("window_indices[i] = i <= position ? i : -1;"), 1
+            )
+            self.assertEqual(
+                caller.count("int oldest = (position + 1) % state->window_size;"),
+                1,
+            )
+            self.assertEqual(
+                caller.count(
+                    "window_indices[i] = (oldest + i) % state->window_size;"
+                ),
+                1,
+            )
+            self.assertNotIn("all_kv", caller)
+            self.assertNotIn("coli_v4_sparse_attention_ref(", caller)
+
+        batch = batch_callers[0]
+        self.assertIn(
+            "if (!result) compressed_counts[item] = state->compressed_count;",
+            batch,
+        )
+        self.assertIn(
+            "state->compressed, compressed_counts[item], window_indices,",
+            batch,
+        )
+        self.assertIn(
+            "item_compressed_indices, selected, sinks, heads, head_dim,",
+            batch,
+        )
+
     def test_compressor_copies_stay_identical(self):
         copies = regions(
             ENGINE,

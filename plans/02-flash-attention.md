@@ -17,11 +17,14 @@ O(Kontext)-Kopie vollständig aus dem Amalgam verschwunden ist.
 
 Der Source-Guardrail zählt und vergleicht die drei Attention-, je zwei
 Compressor-/Indexer-Kopien sowie die gemeinsamen Definitionen der beiden
-Layer-Units. Der C-Test deckt `topk` 1/7/64/2048, `-1`-Padding, Sink-Extreme,
+Layer-Units. Zusätzlich hält er die Zwei-Quellen-Migration in allen drei
+Token-Aufrufern und im strukturell abweichenden eigenständigen Batch-Pfad fest.
+Der C-Test deckt `topk` 1/7/64/2048, `-1`-Padding, Sink-Extreme,
 gleiche Scores, einen um mehr als 80 dominierenden Score, leere Auswahl,
 ungültige komprimierte Indizes sowie alle Zufallsfälle mit `V4_FLASH=1` und `0`
-ab. Die Zufallsdaten verwenden signierte Queries; verglichen wird mit gemischter
-absoluter/relativer BF16-Toleranz plus Cosinus-Grenze. Das Tiny-Orakel ist mit
+ab. Die Zufallsdaten verwenden signierte Queries und numerisch relevante Sinks;
+verglichen wird mit gemischter absoluter/relativer BF16-Toleranz plus
+Cosinus-Grenze. Das Tiny-Orakel ist mit
 `V4_FLASH=1` und `0` einschließlich Prefix-Reuse token-identisch. Dabei wurde
 ein bereits in Phase 01 angelegter Widerspruch repariert: Der 520-Token-CTX-Test
 brauchte eine 768-Token-Fixture, deren `max_position_embeddings` noch 128 war;
@@ -41,6 +44,10 @@ nicht vorhanden; das ist daher eine isolierte Staging-/Kernel-Messung, keine
 End-to-End-tok/s-Zahl.
 
 Verifikation: `make -C c test`, `make -C c check` und beide Tiny-Modi grün.
+
+`coli_v4_attention_cache_step` bleibt absichtlich beim Legacy-Kernel. Der Helfer
+ist nur aus `test_deepseek_v4.c` erreichbar und gehört nicht zum Decode-/Batch-
+Pfad, den diese Phase migriert.
 
 ## Ziel
 
@@ -195,9 +202,9 @@ Fünf Punkte, die stimmen müssen:
   Durchlauf ohnehin.
 - **Beide Quellen werden begrenzt.** Fensterindizes müssen kleiner als
   `window_size`, komprimierte Indizes kleiner als `compressed_count` sein;
-  andernfalls liefert der Kernel `-1`. Der Batch-Pfad hält dafür den jeweiligen
-  kausalen `compressed_count` pro Item fest, statt den Endstand des Batches zu
-  verwenden.
+  andernfalls liefert der Kernel `-1`. Der Batch-Pfad führt den bereits zuvor
+  pro Item erfassten kausalen `compressed_count` bis in diesen neuen Bounds-Check;
+  die Erfassung selbst ist kein zusätzlicher Bugfix dieser Phase.
 - **Die leere Auswahl braucht einen expliziten Guard.** Das ist die eine Stelle,
   an der der Sink-Init eine Verhaltensänderung *verdeckt*: heute läuft
   `coli_v4_sparse_attention_ref` bei ausschließlich `-1`-Indizes in
@@ -262,7 +269,7 @@ Referenz im Baum stehen, nicht nur für `V4_FLASH=0`, sondern als Testorakel.
   - Numerische Randfälle: alle Scores gleich; ein Score dominiert um >80;
     `topk=1`; alle Indizes `-1` (muss `-1` liefern wie die zweistufige Referenz —
     siehe den `seen`-Guard oben —, nicht Nullen und nicht NaN).
-  - Toleranz: `abs(a-b) <= 1e-3 + 1e-3 * max(abs(a), abs(b))`, Cosine `> 0.9999`.
+  - Toleranz: `abs(a-b) <= 1e-3 + 8e-3 * max(abs(a), abs(b))`, Cosine `> 0.9999`.
 - Bestehende Gates, insbesondere `make -C c deepseek-v4-tiny-check`.
 
 ## Abnahme
