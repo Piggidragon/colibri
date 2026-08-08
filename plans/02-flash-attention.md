@@ -19,11 +19,13 @@ Der Source-Guardrail zählt und vergleicht die drei Attention-, je zwei
 Compressor-/Indexer-Kopien sowie die gemeinsamen Definitionen der beiden
 Layer-Units. Der C-Test deckt `topk` 1/7/64/2048, `-1`-Padding, Sink-Extreme,
 gleiche Scores, einen um mehr als 80 dominierenden Score, leere Auswahl,
-`V4_FLASH=0` und Müll-Eingabe ab. Das Tiny-Orakel ist mit `V4_FLASH=1` und `0`
-einschließlich Prefix-Reuse token-identisch. Dabei wurde ein bereits in Phase 01
-angelegter Widerspruch repariert: Der 520-Token-CTX-Test brauchte eine
-768-Token-Fixture, deren `max_position_embeddings` noch 128 war; die
-YARN-Originalgrenze bleibt unverändert 128.
+ungültige komprimierte Indizes sowie alle Zufallsfälle mit `V4_FLASH=1` und `0`
+ab. Die Zufallsdaten verwenden signierte Queries; verglichen wird mit gemischter
+absoluter/relativer BF16-Toleranz plus Cosinus-Grenze. Das Tiny-Orakel ist mit
+`V4_FLASH=1` und `0` einschließlich Prefix-Reuse token-identisch. Dabei wurde
+ein bereits in Phase 01 angelegter Widerspruch repariert: Der 520-Token-CTX-Test
+brauchte eine 768-Token-Fixture, deren `max_position_embeddings` noch 128 war;
+die YARN-Originalgrenze bleibt unverändert 128.
 
 Gemessen mit dem reproduzierbaren `--benchmark`-Modus von
 `test_v4_flash_attention` auf dem verfügbaren Entwicklungsrechner
@@ -31,9 +33,12 @@ Gemessen mit dem reproduzierbaren `--benchmark`-Modus von
 128k-CSA-Layer (128 Fenster- plus 32.768 komprimierte Zeilen, Top-k 512): Median
 aus drei Läufen zu je zehn Wiederholungen **33,397 → 23,548 ms/Layer (1,42×)**.
 Über die 21 CSA-Layer entspricht das **701,333 → 494,511 ms pro Token** für
-diesen Attention-Anteil. Der 167-GB-Checkpoint und die Zielmaschine waren in der
-Entwicklungsumgebung nicht vorhanden; das ist daher eine isolierte
-Kernel-/Staging-Messung, keine End-to-End-tok/s-Zahl.
+diesen Attention-Anteil. Der Legacy-Arm enthält dabei die reale, zuvor pro Token
+ausgeführte 67-MB-Staging-Kopie; die **1,42× messen deren Eliminierung**, nicht
+einen isolierten Gewinn des Online-Softmax gegenüber dem zweistufigen Softmax.
+Der 167-GB-Checkpoint und die Zielmaschine waren in der Entwicklungsumgebung
+nicht vorhanden; das ist daher eine isolierte Staging-/Kernel-Messung, keine
+End-to-End-tok/s-Zahl.
 
 Verifikation: `make -C c test`, `make -C c check` und beide Tiny-Modi grün.
 
@@ -148,7 +153,7 @@ Neue Funktion neben der bestehenden, die als Vergleichsmaßstab erhalten bleibt
 int coli_v4_flash_attention_ref(
     float *output, const float *queries,
     const float *window_kv, int window_size,
-    const float *compressed_kv,
+    const float *compressed_kv, int compressed_count,
     const int *window_indices,          /* -1 = leer */
     const int *compressed_indices, int compressed_selected,
     const float *sinks, int heads, int head_dimension, float softmax_scale);
@@ -179,7 +184,7 @@ for (int c = 0; c < head_dimension; c++)
     head_output[c] = coli_bf16_round(acc[c] / running_sum);
 ```
 
-Vier Punkte, die stimmen müssen:
+Fünf Punkte, die stimmen müssen:
 
 - **Sink als initialer Max-Kandidat.** Im heutigen Code steht
   `denominator = expf(sinks[head] - maximum)` außerhalb der Schleife. Startet man
@@ -188,6 +193,11 @@ Vier Punkte, die stimmen müssen:
 - **`-1`-Indizes** werden übersprungen, nicht als `-INFINITY`-Score geführt. Die
   heutige Version setzt `scores[rank] = -INFINITY` und überspringt sie im zweiten
   Durchlauf ohnehin.
+- **Beide Quellen werden begrenzt.** Fensterindizes müssen kleiner als
+  `window_size`, komprimierte Indizes kleiner als `compressed_count` sein;
+  andernfalls liefert der Kernel `-1`. Der Batch-Pfad hält dafür den jeweiligen
+  kausalen `compressed_count` pro Item fest, statt den Endstand des Batches zu
+  verwenden.
 - **Die leere Auswahl braucht einen expliziten Guard.** Das ist die eine Stelle,
   an der der Sink-Init eine Verhaltensänderung *verdeckt*: heute läuft
   `coli_v4_sparse_attention_ref` bei ausschließlich `-1`-Indizes in
@@ -252,7 +262,7 @@ Referenz im Baum stehen, nicht nur für `V4_FLASH=0`, sondern als Testorakel.
   - Numerische Randfälle: alle Scores gleich; ein Score dominiert um >80;
     `topk=1`; alle Indizes `-1` (muss `-1` liefern wie die zweistufige Referenz —
     siehe den `seen`-Guard oben —, nicht Nullen und nicht NaN).
-  - Toleranz: relative Abweichung pro Ausgabekomponente `< 1e-4`, Cosine `> 0.9999`.
+  - Toleranz: `abs(a-b) <= 1e-3 + 1e-3 * max(abs(a), abs(b))`, Cosine `> 0.9999`.
 - Bestehende Gates, insbesondere `make -C c deepseek-v4-tiny-check`.
 
 ## Abnahme

@@ -83,6 +83,10 @@ class DeepSeekV4AmalgamSourceTest(unittest.TestCase):
         # The resident unit intentionally adds rows8 packing to layer_load.
         # The surrounding definitions are still duplicated source and must not
         # drift while that one explicitly different function remains exempt.
+        self.assertIn("/* ---- begin include deepseek_v4_layer.c ---- */", ENGINE)
+        self.assertIn("/* ---- end include deepseek_v4_layer.c ---- */", ENGINE)
+        self.assertIn("/* ######## deepseek_v4_layer.c ######## */", ENGINE)
+        self.assertIn("#endif /* COLI_V4_UNIT_LAYER */", ENGINE)
         resident_start = ENGINE.index("/* ---- begin include deepseek_v4_layer.c ---- */")
         resident_end = ENGINE.index("/* ---- end include deepseek_v4_layer.c ---- */",
                                     resident_start)

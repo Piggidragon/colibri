@@ -92,10 +92,18 @@ int    v4_cuda_kv_write_row(void *base, int slot, const void *row, size_t row_by
 int v4_cuda_flash_attention(
     float *ctx, const float *q,
     const void *window_kv, int window_size, const int *window_indices,
-    const void *compressed_kv, const int *compressed_indices, int compressed_selected,
+    const void *compressed_kv, int compressed_count,
+    const int *compressed_indices, int compressed_selected,
     const float *sinks, int codec, int heads, int head_dim,
     size_t row_bytes, float scale, int rotated);
 ```
+
+Vor Upload und Launch werden Fensterindizes gegen `window_size` und komprimierte
+Indizes gegen `compressed_count` geprüft. Das erhält den CPU-Vertrag
+„ungültiger Index → `-1`“ und verhindert, dass der CUDA-Pfad wieder auf ein
+ungeprüftes Lockstep zwischen Indexer und Compressor vertraut. Im Batch ist
+`compressed_count` der kausale Stand des jeweiligen Items, nicht der Endstand
+des Batches.
 
 Intern über die vorhandenen Primitive aus [c/backend_cuda.h](../c/backend_cuda.h):
 `coli_cuda_pipe_alloc/free/upload/download/sync`, `coli_cuda_pipe_scratch`,
@@ -143,6 +151,19 @@ ctx = bf16_round(acc / running_sum)
 Der dequantisierte Wert wird **zweimal im selben Registerfenster** benutzt (Score
 und Akkumulation) und nie zurückgeschrieben. Das ist der ganze Punkt des
 Flash-Umbaus aus Plan 02.
+
+Zwei CPU-Follow-ups werden in dieser Phase separat gemessen, nicht mit dem
+Staging-Gewinn aus Plan 02 vermischt:
+
+- Der aktuelle Head-Outer-Kernel hat pro Head keinen gemeinsamen Scratch mehr.
+  Ein `#pragma omp parallel for` über die 64 Heads ist damit korrekt möglich;
+  behalten wird es nur bei einem Gewinn auf dem i5-13400F, mit der hybriden
+  P-/E-Core-Policy aus Plan 09.
+- Eine Rank-Outer-Variante hält pro Head `running_max`, `running_sum` und den
+  512-Float-Akkumulator (zusammen rund 131 KiB) und verarbeitet jede ausgewählte
+  KV-Zeile für alle Heads, bevor die nächste Zeile geladen wird. Das ist die
+  eigentliche CPU-Tiling-Variante, die den ausgewählten KV-Satz nicht Head für
+  Head erneut streamt. Sie bekommt einen eigenen A/B-Benchmark gegen Head-Outer.
 
 **Sink-Initialisierung** wie auf der CPU: `running_max = sinks[head]`,
 `running_sum = 1.0f`.
@@ -197,9 +218,11 @@ Ein Fehler im Kernel-Aufruf fällt für diesen Token auf CPU zurück und loggt e
 
 - Kernel gegen `coli_v4_flash_attention_ref` auf Zufallsdaten, alle Codecs,
   `heads` ∈ {1, 8, 64}, `head_dim=512`, `topk` ∈ {1, 7, 64, 2048}.
-  Toleranz: Cosine `> 0.9999`, relative Abweichung pro Komponente `< 1e-3`.
+  Signierte Queries; Toleranz pro Komponente
+  `abs(a-b) <= 1e-3 + 1e-3 * max(abs(a), abs(b))`, dazu Cosine `> 0.9999`.
 - Sinks: extreme Werte, wie im CPU-Test.
 - `-1`-Padding im Fenster-Index.
+- Ein komprimierter Index `>= compressed_count` wird ohne Device-OOB abgelehnt.
 - Rotierter vs. unrotierter Modus gegeneinander.
 - Tabellen-Publikation: Kernel ohne `v4_cuda_publish_tables` muss **ablehnen**,
   nicht gegen Nullen rechnen (das ist die Lehre aus `g_fp8_lut_ready`,

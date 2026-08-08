@@ -216,14 +216,14 @@ int coli_v4_sparse_attention_ref(float *output, const float *queries,
 int coli_v4_flash_attention_ref(
     float *output, const float *queries,
     const float *window_kv, int window_size,
-    const float *compressed_kv,
+    const float *compressed_kv, int compressed_count,
     const int *window_indices,
     const int *compressed_indices, int compressed_selected,
     const float *sinks, int heads, int head_dimension, float softmax_scale);
 int coli_v4_attention_two_source_ref(
     float *output, const float *queries,
     const float *window_kv, int window_size,
-    const float *compressed_kv,
+    const float *compressed_kv, int compressed_count,
     const int *window_indices,
     const int *compressed_indices, int compressed_selected,
     const float *sinks, int heads, int head_dimension, float softmax_scale);

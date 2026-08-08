@@ -1738,7 +1738,8 @@ static int attention_token_impl(float *output,
             }
             result = coli_v4_attention_two_source_ref(
                 attended, q, state->kv, state->window_size, state->compressed,
-                window_indices, state->indexer ? compressed_indices : NULL,
+                state->compressed_count, window_indices,
+                state->indexer ? compressed_indices : NULL,
                 compressed_selected, sinks, heads, head_dim,
                 1.0f / sqrtf((float)head_dim));
         }
@@ -2120,7 +2121,8 @@ static int attention_token_impl(float *output,
             }
             result = coli_v4_attention_two_source_ref(
                 attended, q, state->kv, state->window_size, state->compressed,
-                window_indices, state->indexer ? compressed_indices : NULL,
+                state->compressed_count, window_indices,
+                state->indexer ? compressed_indices : NULL,
                 compressed_selected, sinks, heads, head_dim,
                 1.0f / sqrtf((float)head_dim));
         }
@@ -2230,6 +2232,7 @@ int coli_v4_attention_window_batch_ref(
     float *norm = malloc((size_t)(q_rank > head_dim ? q_rank : head_dim) *
                          sizeof(*norm));
     int *selected_counts = calloc((size_t)batch, sizeof(*selected_counts));
+    int *compressed_counts = calloc((size_t)batch, sizeof(*compressed_counts));
     int *compressed_indices = malloc((size_t)batch * config->index_topk *
                                      sizeof(*compressed_indices));
     int end_position = start_position + batch;
@@ -2237,9 +2240,9 @@ int coli_v4_attention_window_batch_ref(
     float *cosines = malloc((size_t)end_position * rope_pairs * sizeof(*cosines));
     float *sines = malloc((size_t)end_position * rope_pairs * sizeof(*sines));
     if (!qa || !q || !kv || !attended || !oa || !norm || !selected_counts ||
-        !compressed_indices || !cosines || !sines) {
+        !compressed_counts || !compressed_indices || !cosines || !sines) {
         free(sines); free(cosines); free(compressed_indices);
-        free(selected_counts); free(norm); free(oa);
+        free(compressed_counts); free(selected_counts); free(norm); free(oa);
         free(attended); free(kv); free(q); free(qa);
         return set_error(error, error_size, "out of memory in batched attention");
     }
@@ -2280,6 +2283,7 @@ int coli_v4_attention_window_batch_ref(
             } else if (!result) {
                 selected_counts[item] = state->compressed_count;
             }
+            if (!result) compressed_counts[item] = state->compressed_count;
         }
     }
 
@@ -2364,8 +2368,8 @@ int coli_v4_attention_window_batch_ref(
                 ? compressed_indices + (size_t)item * config->index_topk : NULL;
             result = coli_v4_attention_two_source_ref(
                 item_attended, item_q, state->kv, state->window_size,
-                state->compressed, window_indices, item_compressed_indices,
-                selected, sinks, heads, head_dim,
+                state->compressed, compressed_counts[item], window_indices,
+                item_compressed_indices, selected, sinks, heads, head_dim,
                 1.0f / sqrtf((float)head_dim));
         }
         free(window_indices);
@@ -2413,7 +2417,7 @@ int coli_v4_attention_window_batch_ref(
     if (!result) coli_bf16_round_array(outputs, (size_t)batch * hidden);
 
     free(group_outputs); free(group_inputs); free(sines); free(cosines);
-    free(compressed_indices); free(selected_counts);
+    free(compressed_indices); free(compressed_counts); free(selected_counts);
     free(norm); free(oa); free(attended); free(kv); free(q); free(qa);
     return result ? set_error(error, error_size, "batched attention failed") : 0;
 }
@@ -2994,6 +2998,7 @@ int coli_v4_sparse_attention_ref(float *output, const float *queries,
 
 static const float *attention_row(
     const float *window_kv, int window_size, const float *compressed_kv,
+    int compressed_count,
     const int *window_indices, const int *compressed_indices,
     int compressed_selected, int rank, int head_dimension, int *invalid) {
     if (rank < window_size) {
@@ -3012,18 +3017,22 @@ static const float *attention_row(
     }
     int index = compressed_indices ? compressed_indices[selected] : selected;
     if (index < 0) return NULL;
+    if (index >= compressed_count) {
+        *invalid = 1;
+        return NULL;
+    }
     return compressed_kv + (size_t)index * head_dimension;
 }
 
 int coli_v4_flash_attention_ref(
     float *output, const float *queries,
     const float *window_kv, int window_size,
-    const float *compressed_kv,
+    const float *compressed_kv, int compressed_count,
     const int *window_indices,
     const int *compressed_indices, int compressed_selected,
     const float *sinks, int heads, int head_dimension, float softmax_scale) {
     if (!output || !queries || !window_kv || !window_indices || !sinks ||
-        window_size < 1 || compressed_selected < 0 ||
+        window_size < 1 || compressed_count < 0 || compressed_selected < 0 ||
         (compressed_selected && !compressed_kv) || heads < 1 ||
         head_dimension < 1 || !(softmax_scale > 0.0f))
         return -1;
@@ -3031,6 +3040,8 @@ int coli_v4_flash_attention_ref(
     for (int head = 0; head < heads; head++) {
         const float *query = queries + (size_t)head * head_dimension;
         float *accumulator = output + (size_t)head * head_dimension;
+        /* Keeping the sink in the running maximum also prevents a dominating
+         * sink from producing a positive, overflowing expf argument. */
         float running_max = sinks[head];
         float running_sum = 1.0f;
         int seen = 0;
@@ -3039,7 +3050,8 @@ int coli_v4_flash_attention_ref(
         for (int rank = 0; rank < topk; rank++) {
             int invalid = 0;
             const float *key = attention_row(
-                window_kv, window_size, compressed_kv, window_indices,
+                window_kv, window_size, compressed_kv, compressed_count,
+                window_indices,
                 compressed_indices, compressed_selected, rank, head_dimension,
                 &invalid);
             if (invalid) return -1;
@@ -3074,12 +3086,12 @@ int coli_v4_flash_attention_ref(
 static int coli_v4_two_pass_attention_ref(
     float *output, const float *queries,
     const float *window_kv, int window_size,
-    const float *compressed_kv,
+    const float *compressed_kv, int compressed_count,
     const int *window_indices,
     const int *compressed_indices, int compressed_selected,
     const float *sinks, int heads, int head_dimension, float softmax_scale) {
     if (!output || !queries || !window_kv || !window_indices || !sinks ||
-        window_size < 1 || compressed_selected < 0 ||
+        window_size < 1 || compressed_count < 0 || compressed_selected < 0 ||
         (compressed_selected && !compressed_kv) || heads < 1 ||
         head_dimension < 1 || !(softmax_scale > 0.0f))
         return -1;
@@ -3092,7 +3104,8 @@ static int coli_v4_two_pass_attention_ref(
         for (int rank = 0; rank < topk; rank++) {
             int invalid = 0;
             const float *key = attention_row(
-                window_kv, window_size, compressed_kv, window_indices,
+                window_kv, window_size, compressed_kv, compressed_count,
+                window_indices,
                 compressed_indices, compressed_selected, rank, head_dimension,
                 &invalid);
             if (invalid) {
@@ -3121,7 +3134,8 @@ static int coli_v4_two_pass_attention_ref(
         for (int rank = 0; rank < topk; rank++) {
             int invalid = 0;
             const float *value = attention_row(
-                window_kv, window_size, compressed_kv, window_indices,
+                window_kv, window_size, compressed_kv, compressed_count,
+                window_indices,
                 compressed_indices, compressed_selected, rank, head_dimension,
                 &invalid);
             if (invalid) {
@@ -3153,18 +3167,20 @@ static int v4_flash_enabled(void) {
 int coli_v4_attention_two_source_ref(
     float *output, const float *queries,
     const float *window_kv, int window_size,
-    const float *compressed_kv,
+    const float *compressed_kv, int compressed_count,
     const int *window_indices,
     const int *compressed_indices, int compressed_selected,
     const float *sinks, int heads, int head_dimension, float softmax_scale) {
     if (v4_flash_enabled())
         return coli_v4_flash_attention_ref(
             output, queries, window_kv, window_size, compressed_kv,
-            window_indices, compressed_indices, compressed_selected,
+            compressed_count, window_indices, compressed_indices,
+            compressed_selected,
             sinks, heads, head_dimension, softmax_scale);
     return coli_v4_two_pass_attention_ref(
         output, queries, window_kv, window_size, compressed_kv,
-        window_indices, compressed_indices, compressed_selected,
+        compressed_count, window_indices, compressed_indices,
+        compressed_selected,
         sinks, heads, head_dimension, softmax_scale);
 }
 #endif /* COLI_V4_UNIT_SPARSE_ATTENTION */
@@ -5038,7 +5054,8 @@ static int attention_token_impl(float *output,
             }
             result = coli_v4_attention_two_source_ref(
                 attended, q, state->kv, state->window_size, state->compressed,
-                window_indices, state->indexer ? compressed_indices : NULL,
+                state->compressed_count, window_indices,
+                state->indexer ? compressed_indices : NULL,
                 compressed_selected, sinks, heads, head_dim,
                 1.0f / sqrtf((float)head_dim));
         }
