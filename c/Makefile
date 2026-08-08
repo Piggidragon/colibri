@@ -857,6 +857,10 @@ tests/test_native_quant$(EXE): tests/test_native_quant.c deepseek_v4.c native_qu
 tests/test_v4_scratch_env$(EXE): tests/test_v4_scratch_env.c deepseek_v4.c deepseek_v4_internal.h
 	$(CC) $(CFLAGS) -DCOLI_V4_UNIT_RESOURCE_PLAN deepseek_v4.c $< -o $@ $(LDFLAGS)
 
+tests/test_v4_flash_attention$(EXE): tests/test_v4_flash_attention.c deepseek_v4.c deepseek_v4_internal.h
+	$(CC) $(CFLAGS) -DCOLI_V4_UNIT_SPARSE_ATTENTION -DCOLI_V4_UNIT_NATIVE_QUANT \
+		deepseek_v4.c $< -o $@ $(LDFLAGS)
+
 ifeq ($(COLI_V4_SUPPORTED),1)
 include Makefile.deepseek-v4.units
 V4_TEST_LINK_OBJS = \
