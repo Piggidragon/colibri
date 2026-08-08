@@ -133,6 +133,8 @@ int coli_v4_swiglu(float *output, const float *gate, const float *up,
 #include <stddef.h>
 #include <stdint.h>
 
+#include "v4_kv_codec.h"
+
 /* amalgamated: deepseek_v4_config.h */
 
 #ifdef __cplusplus
@@ -220,12 +222,28 @@ int coli_v4_flash_attention_ref(
     const int *window_indices,
     const int *compressed_indices, int compressed_selected,
     const float *sinks, int heads, int head_dimension, float softmax_scale);
+int coli_v4_flash_attention_codec_ref(
+    float *output, const float *queries,
+    const void *window_kv, int window_size,
+    const void *compressed_kv, int compressed_count,
+    const int *window_indices,
+    const int *compressed_indices, int compressed_selected,
+    ColiV4KVCodec codec, int rope_dimension,
+    const float *sinks, int heads, int head_dimension, float softmax_scale);
 int coli_v4_attention_two_source_ref(
     float *output, const float *queries,
     const float *window_kv, int window_size,
     const float *compressed_kv, int compressed_count,
     const int *window_indices,
     const int *compressed_indices, int compressed_selected,
+    const float *sinks, int heads, int head_dimension, float softmax_scale);
+int coli_v4_attention_two_source_codec_ref(
+    float *output, const float *queries,
+    const void *window_kv, int window_size,
+    const void *compressed_kv, int compressed_count,
+    const int *window_indices,
+    const int *compressed_indices, int compressed_selected,
+    ColiV4KVCodec codec, int rope_dimension,
     const float *sinks, int heads, int head_dimension, float softmax_scale);
 
 #ifdef __cplusplus
@@ -307,7 +325,9 @@ typedef struct ColiDeepSeekV4WindowAttentionState
     ColiDeepSeekV4WindowAttentionState;
 
 int coli_v4_window_attention_create(ColiDeepSeekV4WindowAttentionState **state,
-                                    const ColiDeepSeekV4Config *config);
+                                    const ColiDeepSeekV4Config *config,
+                                    ColiV4KVCodec codec,
+                                    ColiV4KVCodec index_codec);
 void coli_v4_window_attention_reset(ColiDeepSeekV4WindowAttentionState *state);
 void coli_v4_window_attention_destroy(ColiDeepSeekV4WindowAttentionState *state);
 
@@ -429,7 +449,8 @@ typedef struct ColiDeepSeekV4Indexer ColiDeepSeekV4Indexer;
 int coli_v4_indexer_create(ColiDeepSeekV4Indexer **state,
                            const ColiDeepSeekV4LayerWeights *weights,
                            const ColiDeepSeekV4Config *config,
-                           int max_context, char *error, size_t error_size);
+                           int max_context, ColiV4KVCodec codec,
+                           char *error, size_t error_size);
 int coli_v4_indexer_bind_weights(ColiDeepSeekV4Indexer *state,
                                  const ColiDeepSeekV4LayerWeights *weights,
                                  char *error, size_t error_size);
@@ -442,7 +463,7 @@ int coli_v4_indexer_step(ColiDeepSeekV4Indexer *state, int *indices,
                          int index_capacity, const float *query_rank,
                          const float *input, int position,
                          char *error, size_t error_size);
-const float *coli_v4_indexer_compressed_values(
+const void *coli_v4_indexer_compressed_values(
     const ColiDeepSeekV4Indexer *state);
 int coli_v4_indexer_compressed_count(const ColiDeepSeekV4Indexer *state);
 /* ==== end deepseek_v4_indexer.h ==== */
@@ -641,6 +662,8 @@ typedef struct {
     int pin_slots_per_layer;
     uint64_t repin_interval;
     uint64_t dspark_reserve_bytes;
+    ColiV4KVCodec kv_codec;
+    ColiV4KVCodec index_codec;
 } ColiDeepSeekV4RuntimeOptions;
 
 enum { COLI_V4_RESIDENT_MAX_LAYERS = 128 };

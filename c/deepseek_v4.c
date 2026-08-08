@@ -949,17 +949,24 @@ static uint64_t expert_record_bytes(const ColiSafetensorsIndex *index) {
     return total;
 }
 
-static uint64_t context_bytes(const ColiDeepSeekV4Config *config, int context) {
+static uint64_t context_bytes(const ColiDeepSeekV4Config *config, int context,
+                              ColiV4KVCodec codec,
+                              ColiV4KVCodec index_codec) {
+    size_t kv_row = coli_v4_kv_row_bytes(
+        codec, COLI_V4_KV_MAIN, config->head_dim, config->qk_rope_head_dim);
+    size_t index_row = coli_v4_kv_row_bytes(
+        index_codec, COLI_V4_KV_INDEX, config->index_head_dim, 0);
+    if (!kv_row || !index_row) return UINT64_MAX;
     uint64_t total = (uint64_t)config->num_hidden_layers *
-        config->sliding_window * config->head_dim * sizeof(float);
+        config->sliding_window * kv_row;
     for (int layer = 0; layer < config->num_hidden_layers; layer++) {
         int ratio = config->compress_ratios[layer];
         if (!ratio) continue;
         uint64_t compressed = ((uint64_t)context + (uint64_t)ratio - 1) /
                               (uint64_t)ratio;
-        total += compressed * config->head_dim * sizeof(float);
+        total += compressed * kv_row;
         if (ratio == 4)
-            total += compressed * config->index_head_dim * sizeof(float);
+            total += compressed * index_row;
     }
     return total;
 }
@@ -1001,7 +1008,8 @@ static int build_runtime_plan(ColiV4Engine *engine,
         context = config.max_position_embeddings;
     uint64_t session_state;
     uint64_t scratch = coli_v4_scratch_bytes();
-    uint64_t runtime_other = context_bytes(&config, context);
+    uint64_t runtime_other = context_bytes(
+        &config, context, runtime->kv_codec, runtime->index_codec);
     if (coli_v4_session_state_bytes(context, config.hc_mult,
                                    config.hidden_size, &session_state) ||
         UINT64_MAX - runtime_other < session_state) {
@@ -1454,28 +1462,47 @@ static int set_error(char *error, size_t size, const char *format, ...);
 struct ColiDeepSeekV4WindowAttentionState {
     int window_size;
     int head_dim;
+    int rope_dim;
     int layer;
     int ratio;
-    float *kv;
+    ColiV4KVCodec codec;
+    ColiV4KVCodec index_codec;
+    size_t row_bytes;
+    void *kv;
     ColiDeepSeekV4CompressorState *compressor;
     ColiDeepSeekV4Indexer *indexer;
-    float *compressed;
+    void *compressed;
+    float *compressor_scratch;
     int compressed_count;
     int compressed_capacity;
 };
 
 int coli_v4_window_attention_create(ColiDeepSeekV4WindowAttentionState **output,
-                                    const ColiDeepSeekV4Config *config) {
+                                    const ColiDeepSeekV4Config *config,
+                                    ColiV4KVCodec codec,
+                                    ColiV4KVCodec index_codec) {
     if (!output || !config || config->sliding_window < 1 || config->head_dim < 1)
+        return -1;
+    size_t row_bytes = coli_v4_kv_row_bytes(
+        codec, COLI_V4_KV_MAIN, config->head_dim, config->qk_rope_head_dim);
+    if (!row_bytes || !coli_v4_kv_row_bytes(
+            index_codec, COLI_V4_KV_INDEX, config->index_head_dim, 0))
         return -1;
     *output = calloc(1, sizeof(**output));
     if (!*output) return -1;
     (*output)->window_size = config->sliding_window;
     (*output)->head_dim = config->head_dim;
+    (*output)->rope_dim = config->qk_rope_head_dim;
+    (*output)->codec = codec;
+    (*output)->index_codec = index_codec;
+    (*output)->row_bytes = row_bytes;
     (*output)->layer = -1;
-    (*output)->kv = calloc((size_t)config->sliding_window * config->head_dim,
-                           sizeof(*(*output)->kv));
-    if (!(*output)->kv) {
+    (*output)->kv = calloc((size_t)config->sliding_window, row_bytes);
+    (*output)->compressor_scratch = calloc(
+        (size_t)config->head_dim, sizeof(*(*output)->compressor_scratch));
+    if (!(*output)->kv || !(*output)->compressor_scratch) {
+        free((*output)->compressor_scratch);
+        free((*output)->kv);
         free(*output);
         *output = NULL;
         return -1;
@@ -1486,7 +1513,7 @@ int coli_v4_window_attention_create(ColiDeepSeekV4WindowAttentionState **output,
 void coli_v4_window_attention_reset(ColiDeepSeekV4WindowAttentionState *state) {
     if (!state) return;
     memset(state->kv, 0,
-           (size_t)state->window_size * state->head_dim * sizeof(*state->kv));
+           (size_t)state->window_size * state->row_bytes);
     state->compressed_count = 0;
     if (state->compressor) coli_v4_compressor_reset(state->compressor);
     if (state->indexer) coli_v4_indexer_reset(state->indexer);
@@ -1496,6 +1523,7 @@ void coli_v4_window_attention_destroy(ColiDeepSeekV4WindowAttentionState *state)
     if (!state) return;
     coli_v4_indexer_destroy(state->indexer);
     coli_v4_compressor_destroy(state->compressor);
+    free(state->compressor_scratch);
     free(state->compressed);
     free(state->kv);
     free(state);
@@ -1511,12 +1539,13 @@ static int prepare_compressed_state(
         state->layer = weights->plan.layer;
         state->ratio = ratio;
         state->compressed_capacity = 16;
-        state->compressed = calloc((size_t)state->compressed_capacity * state->head_dim,
-                                   sizeof(*state->compressed));
+        state->compressed = calloc((size_t)state->compressed_capacity,
+                                   state->row_bytes);
         if (!state->compressed || coli_v4_compressor_create(
                 &state->compressor, weights, config, error, error_size)) return -1;
         if (ratio == 4 && coli_v4_indexer_create(
                 &state->indexer, weights, config, config->max_position_embeddings,
+                state->index_codec,
                 error, error_size)) return -1;
     } else if (state->layer != weights->plan.layer || state->ratio != ratio) {
         return set_error(error, error_size, "attention state belongs to another layer");
@@ -1532,8 +1561,7 @@ static int grow_compressed_state(ColiDeepSeekV4WindowAttentionState *state,
                                  char *error, size_t error_size) {
     if (state->compressed_count < state->compressed_capacity) return 0;
     int capacity = state->compressed_capacity * 2;
-    float *grown = realloc(state->compressed,
-        (size_t)capacity * state->head_dim * sizeof(*grown));
+    void *grown = realloc(state->compressed, (size_t)capacity * state->row_bytes);
     if (!grown) return set_error(error, error_size, "cannot grow compressed KV cache");
     state->compressed = grown;
     state->compressed_capacity = capacity;
@@ -1647,9 +1675,13 @@ static int attention_token_impl(float *output,
             result = grow_compressed_state(state, error, error_size);
         int produced = 0;
         if (!result) result = coli_v4_compressor_step(
-            state->compressor,
-            state->compressed + (size_t)state->compressed_count * head_dim,
+            state->compressor, state->compressor_scratch,
             &produced, input, position, error, error_size);
+        if (!result && produced) result = coli_v4_kv_encode_row(
+            state->codec, COLI_V4_KV_MAIN,
+            (unsigned char *)state->compressed +
+                (size_t)state->compressed_count * state->row_bytes,
+            state->compressor_scratch, head_dim, state->rope_dim);
         if (!result && produced) state->compressed_count++;
         if (!result && state->indexer) {
             compressed_indices = malloc((size_t)config->index_topk *
@@ -1721,8 +1753,10 @@ static int attention_token_impl(float *output,
     const float *sinks = layer_data(weights, "attn.attn_sink", NULL);
     if (!result && state) {
         int slot = position % state->window_size;
-        memcpy(state->kv + (size_t)slot * head_dim, kv,
-               (size_t)head_dim * sizeof(*kv));
+        result = coli_v4_kv_encode_row(
+            state->codec, COLI_V4_KV_MAIN,
+            (unsigned char *)state->kv + (size_t)slot * state->row_bytes,
+            kv, head_dim, state->rope_dim);
         if (!state->indexer) compressed_selected = state->compressed_count;
         int *window_indices = malloc((size_t)state->window_size *
                                      sizeof(*window_indices));
@@ -1736,11 +1770,12 @@ static int attention_token_impl(float *output,
                 for (int i = 0; i < state->window_size; i++)
                     window_indices[i] = (oldest + i) % state->window_size;
             }
-            result = coli_v4_attention_two_source_ref(
+            result = coli_v4_attention_two_source_codec_ref(
                 attended, q, state->kv, state->window_size, state->compressed,
                 state->compressed_count, window_indices,
                 state->indexer ? compressed_indices : NULL,
-                compressed_selected, sinks, heads, head_dim,
+                compressed_selected, state->codec, state->rope_dim,
+                sinks, heads, head_dim,
                 1.0f / sqrtf((float)head_dim));
         }
         free(window_indices);
@@ -1837,28 +1872,47 @@ static int set_error(char *error, size_t size, const char *format, ...);
 struct ColiDeepSeekV4WindowAttentionState {
     int window_size;
     int head_dim;
+    int rope_dim;
     int layer;
     int ratio;
-    float *kv;
+    ColiV4KVCodec codec;
+    ColiV4KVCodec index_codec;
+    size_t row_bytes;
+    void *kv;
     ColiDeepSeekV4CompressorState *compressor;
     ColiDeepSeekV4Indexer *indexer;
-    float *compressed;
+    void *compressed;
+    float *compressor_scratch;
     int compressed_count;
     int compressed_capacity;
 };
 
 int coli_v4_window_attention_create(ColiDeepSeekV4WindowAttentionState **output,
-                                    const ColiDeepSeekV4Config *config) {
+                                    const ColiDeepSeekV4Config *config,
+                                    ColiV4KVCodec codec,
+                                    ColiV4KVCodec index_codec) {
     if (!output || !config || config->sliding_window < 1 || config->head_dim < 1)
+        return -1;
+    size_t row_bytes = coli_v4_kv_row_bytes(
+        codec, COLI_V4_KV_MAIN, config->head_dim, config->qk_rope_head_dim);
+    if (!row_bytes || !coli_v4_kv_row_bytes(
+            index_codec, COLI_V4_KV_INDEX, config->index_head_dim, 0))
         return -1;
     *output = calloc(1, sizeof(**output));
     if (!*output) return -1;
     (*output)->window_size = config->sliding_window;
     (*output)->head_dim = config->head_dim;
+    (*output)->rope_dim = config->qk_rope_head_dim;
+    (*output)->codec = codec;
+    (*output)->index_codec = index_codec;
+    (*output)->row_bytes = row_bytes;
     (*output)->layer = -1;
-    (*output)->kv = calloc((size_t)config->sliding_window * config->head_dim,
-                           sizeof(*(*output)->kv));
-    if (!(*output)->kv) {
+    (*output)->kv = calloc((size_t)config->sliding_window, row_bytes);
+    (*output)->compressor_scratch = calloc(
+        (size_t)config->head_dim, sizeof(*(*output)->compressor_scratch));
+    if (!(*output)->kv || !(*output)->compressor_scratch) {
+        free((*output)->compressor_scratch);
+        free((*output)->kv);
         free(*output);
         *output = NULL;
         return -1;
@@ -1869,7 +1923,7 @@ int coli_v4_window_attention_create(ColiDeepSeekV4WindowAttentionState **output,
 void coli_v4_window_attention_reset(ColiDeepSeekV4WindowAttentionState *state) {
     if (!state) return;
     memset(state->kv, 0,
-           (size_t)state->window_size * state->head_dim * sizeof(*state->kv));
+           (size_t)state->window_size * state->row_bytes);
     state->compressed_count = 0;
     if (state->compressor) coli_v4_compressor_reset(state->compressor);
     if (state->indexer) coli_v4_indexer_reset(state->indexer);
@@ -1879,6 +1933,7 @@ void coli_v4_window_attention_destroy(ColiDeepSeekV4WindowAttentionState *state)
     if (!state) return;
     coli_v4_indexer_destroy(state->indexer);
     coli_v4_compressor_destroy(state->compressor);
+    free(state->compressor_scratch);
     free(state->compressed);
     free(state->kv);
     free(state);
@@ -1894,12 +1949,13 @@ static int prepare_compressed_state(
         state->layer = weights->plan.layer;
         state->ratio = ratio;
         state->compressed_capacity = 16;
-        state->compressed = calloc((size_t)state->compressed_capacity * state->head_dim,
-                                   sizeof(*state->compressed));
+        state->compressed = calloc((size_t)state->compressed_capacity,
+                                   state->row_bytes);
         if (!state->compressed || coli_v4_compressor_create(
                 &state->compressor, weights, config, error, error_size)) return -1;
         if (ratio == 4 && coli_v4_indexer_create(
                 &state->indexer, weights, config, config->max_position_embeddings,
+                state->index_codec,
                 error, error_size)) return -1;
     } else if (state->layer != weights->plan.layer || state->ratio != ratio) {
         return set_error(error, error_size, "attention state belongs to another layer");
@@ -1915,8 +1971,7 @@ static int grow_compressed_state(ColiDeepSeekV4WindowAttentionState *state,
                                  char *error, size_t error_size) {
     if (state->compressed_count < state->compressed_capacity) return 0;
     int capacity = state->compressed_capacity * 2;
-    float *grown = realloc(state->compressed,
-        (size_t)capacity * state->head_dim * sizeof(*grown));
+    void *grown = realloc(state->compressed, (size_t)capacity * state->row_bytes);
     if (!grown) return set_error(error, error_size, "cannot grow compressed KV cache");
     state->compressed = grown;
     state->compressed_capacity = capacity;
@@ -2030,9 +2085,13 @@ static int attention_token_impl(float *output,
             result = grow_compressed_state(state, error, error_size);
         int produced = 0;
         if (!result) result = coli_v4_compressor_step(
-            state->compressor,
-            state->compressed + (size_t)state->compressed_count * head_dim,
+            state->compressor, state->compressor_scratch,
             &produced, input, position, error, error_size);
+        if (!result && produced) result = coli_v4_kv_encode_row(
+            state->codec, COLI_V4_KV_MAIN,
+            (unsigned char *)state->compressed +
+                (size_t)state->compressed_count * state->row_bytes,
+            state->compressor_scratch, head_dim, state->rope_dim);
         if (!result && produced) state->compressed_count++;
         if (!result && state->indexer) {
             compressed_indices = malloc((size_t)config->index_topk *
@@ -2104,8 +2163,10 @@ static int attention_token_impl(float *output,
     const float *sinks = layer_data(weights, "attn.attn_sink", NULL);
     if (!result && state) {
         int slot = position % state->window_size;
-        memcpy(state->kv + (size_t)slot * head_dim, kv,
-               (size_t)head_dim * sizeof(*kv));
+        result = coli_v4_kv_encode_row(
+            state->codec, COLI_V4_KV_MAIN,
+            (unsigned char *)state->kv + (size_t)slot * state->row_bytes,
+            kv, head_dim, state->rope_dim);
         if (!state->indexer) compressed_selected = state->compressed_count;
         int *window_indices = malloc((size_t)state->window_size *
                                      sizeof(*window_indices));
@@ -2119,11 +2180,12 @@ static int attention_token_impl(float *output,
                 for (int i = 0; i < state->window_size; i++)
                     window_indices[i] = (oldest + i) % state->window_size;
             }
-            result = coli_v4_attention_two_source_ref(
+            result = coli_v4_attention_two_source_codec_ref(
                 attended, q, state->kv, state->window_size, state->compressed,
                 state->compressed_count, window_indices,
                 state->indexer ? compressed_indices : NULL,
-                compressed_selected, sinks, heads, head_dim,
+                compressed_selected, state->codec, state->rope_dim,
+                sinks, heads, head_dim,
                 1.0f / sqrtf((float)head_dim));
         }
         free(window_indices);
@@ -2267,10 +2329,14 @@ int coli_v4_attention_window_batch_ref(
                 result = grow_compressed_state(state, error, error_size);
             int produced = 0;
             if (!result) result = coli_v4_compressor_step(
-                state->compressor,
-                state->compressed + (size_t)state->compressed_count * head_dim,
+                state->compressor, state->compressor_scratch,
                 &produced, inputs + (size_t)item * hidden, position,
                 error, error_size);
+            if (!result && produced) result = coli_v4_kv_encode_row(
+                state->codec, COLI_V4_KV_MAIN,
+                (unsigned char *)state->compressed +
+                    (size_t)state->compressed_count * state->row_bytes,
+                state->compressor_scratch, head_dim, state->rope_dim);
             if (!result && produced) state->compressed_count++;
             if (!result && state->indexer) {
                 selected_counts[item] = coli_v4_indexer_step(
@@ -2349,8 +2415,10 @@ int coli_v4_attention_window_batch_ref(
         float *item_q = q + (size_t)item * q_width;
         float *item_attended = attended + (size_t)item * q_width;
         int slot = position % state->window_size;
-        memcpy(state->kv + (size_t)slot * head_dim, item_kv,
-               (size_t)head_dim * sizeof(*item_kv));
+        result = coli_v4_kv_encode_row(
+            state->codec, COLI_V4_KV_MAIN,
+            (unsigned char *)state->kv + (size_t)slot * state->row_bytes,
+            item_kv, head_dim, state->rope_dim);
         int selected = selected_counts[item];
         int *window_indices = malloc((size_t)state->window_size *
                                      sizeof(*window_indices));
@@ -2366,10 +2434,11 @@ int coli_v4_attention_window_batch_ref(
             }
             const int *item_compressed_indices = state->indexer
                 ? compressed_indices + (size_t)item * config->index_topk : NULL;
-            result = coli_v4_attention_two_source_ref(
+            result = coli_v4_attention_two_source_codec_ref(
                 item_attended, item_q, state->kv, state->window_size,
                 state->compressed, compressed_counts[item], window_indices,
-                item_compressed_indices, selected, sinks, heads, head_dim,
+                item_compressed_indices, selected, state->codec, state->rope_dim,
+                sinks, heads, head_dim,
                 1.0f / sqrtf((float)head_dim));
         }
         free(window_indices);
@@ -2701,7 +2770,10 @@ struct ColiDeepSeekV4Indexer {
     int layer;
     int capacity;
     int count;
-    float *compressed;
+    ColiV4KVCodec codec;
+    size_t row_bytes;
+    void *compressed;
+    float *compressor_scratch;
 };
 
 typedef struct { float score; int index; } IndexScore;
@@ -2755,7 +2827,8 @@ static int descending_score(const void *left, const void *right) {
 int coli_v4_indexer_create(ColiDeepSeekV4Indexer **output,
                            const ColiDeepSeekV4LayerWeights *weights,
                            const ColiDeepSeekV4Config *config,
-                           int max_context, char *error, size_t error_size) {
+                           int max_context, ColiV4KVCodec codec,
+                           char *error, size_t error_size) {
     if (!output || !weights || !config || !weights->plan.has_indexer ||
         max_context < 4 || config->index_head_dim < 1 ||
         config->index_n_heads < 1)
@@ -2766,14 +2839,23 @@ int coli_v4_indexer_create(ColiDeepSeekV4Indexer **output,
     state->weights = weights;
     state->config = config;
     state->layer = weights->plan.layer;
+    state->codec = codec;
+    state->row_bytes = coli_v4_kv_row_bytes(
+        codec, COLI_V4_KV_INDEX, config->index_head_dim, 0);
+    if (!state->row_bytes) {
+        free(state);
+        return set_error(error, error_size, "unsupported indexer KV codec");
+    }
     state->capacity = (max_context + 3) / 4;
     if (state->capacity > 128) state->capacity = 128;
-    state->compressed = calloc((size_t)state->capacity * config->index_head_dim,
-                               sizeof(*state->compressed));
+    state->compressed = calloc((size_t)state->capacity, state->row_bytes);
+    state->compressor_scratch = calloc(
+        (size_t)config->index_head_dim, sizeof(*state->compressor_scratch));
     ColiDeepSeekV4CompressorOptions options = {
         "attn.indexer.compressor", config->index_head_dim, 1
     };
-    if (!state->compressed || coli_v4_compressor_create_with_options(
+    if (!state->compressed || !state->compressor_scratch ||
+        coli_v4_compressor_create_with_options(
             &state->compressor, weights, config, &options, error, error_size)) {
         coli_v4_indexer_destroy(state);
         return set_error(error, error_size, "cannot create indexer compressor");
@@ -2797,13 +2879,14 @@ void coli_v4_indexer_reset(ColiDeepSeekV4Indexer *state) {
     if (!state) return;
     state->count = 0;
     memset(state->compressed, 0,
-           (size_t)state->capacity * state->config->index_head_dim * sizeof(float));
+           (size_t)state->capacity * state->row_bytes);
     coli_v4_compressor_reset(state->compressor);
 }
 
 void coli_v4_indexer_destroy(ColiDeepSeekV4Indexer *state) {
     if (!state) return;
     coli_v4_compressor_destroy(state->compressor);
+    free(state->compressor_scratch);
     free(state->compressed);
     free(state);
 }
@@ -2846,21 +2929,28 @@ int coli_v4_indexer_step(ColiDeepSeekV4Indexer *state, int *indices,
     int produced = 0;
     if ((position + 1) % 4 == 0 && state->count >= state->capacity) {
         int next_capacity = state->capacity * 2;
-        float *grown = realloc(state->compressed,
-            (size_t)next_capacity * dimension * sizeof(*grown));
+        void *grown = realloc(state->compressed,
+                              (size_t)next_capacity * state->row_bytes);
         if (!grown) return set_error(error, error_size, "cannot grow indexer cache");
-        memset(grown + (size_t)state->capacity * dimension, 0,
-               (size_t)(next_capacity - state->capacity) * dimension * sizeof(*grown));
+        memset((unsigned char *)grown +
+                   (size_t)state->capacity * state->row_bytes, 0,
+               (size_t)(next_capacity - state->capacity) * state->row_bytes);
         state->compressed = grown;
         state->capacity = next_capacity;
     }
     float *next = state->count < state->capacity
-        ? state->compressed + (size_t)state->count * dimension : NULL;
+        ? state->compressor_scratch : NULL;
     if (coli_v4_compressor_step(state->compressor, next, &produced, input,
                                 position, error, error_size)) return -1;
     if (produced) {
         if (state->count >= state->capacity)
             return set_error(error, error_size, "indexer cache capacity exceeded");
+        if (coli_v4_kv_encode_row(
+                state->codec, COLI_V4_KV_INDEX,
+                (unsigned char *)state->compressed +
+                    (size_t)state->count * state->row_bytes,
+                next, dimension, 0))
+            return set_error(error, error_size, "cannot encode indexer KV row");
         state->count++;
     }
     if (!state->count) return 0;
@@ -2901,12 +2991,13 @@ int coli_v4_indexer_step(ColiDeepSeekV4Indexer *state, int *indices,
         head_weights[head] = sum * weight_scale;
     }
     for (int candidate = 0; !result && candidate < state->count; candidate++) {
-        const float *key = state->compressed + (size_t)candidate * dimension;
+        const void *key = (const unsigned char *)state->compressed +
+                          (size_t)candidate * state->row_bytes;
         float score = 0.0f;
         for (int head = 0; head < heads; head++) {
             const float *query = queries + (size_t)head * dimension;
-            float dot = 0.0f;
-            for (int i = 0; i < dimension; i++) dot += query[i] * key[i];
+            float dot = coli_v4_kv_dot(
+                state->codec, COLI_V4_KV_INDEX, query, key, dimension, 0);
             score += fmaxf(dot, 0.0f) * head_weights[head];
         }
         scores[candidate] = (IndexScore){score, candidate};
@@ -2920,7 +3011,7 @@ int coli_v4_indexer_step(ColiDeepSeekV4Indexer *state, int *indices,
     return result ? set_error(error, error_size, "indexer scoring failed") : selected;
 }
 
-const float *coli_v4_indexer_compressed_values(
+const void *coli_v4_indexer_compressed_values(
     const ColiDeepSeekV4Indexer *state) {
     return state ? state->compressed : NULL;
 }
@@ -2996,11 +3087,11 @@ int coli_v4_sparse_attention_ref(float *output, const float *queries,
     return 0;
 }
 
-static const float *attention_row(
-    const float *window_kv, int window_size, const float *compressed_kv,
+static const void *attention_row(
+    const void *window_kv, int window_size, const void *compressed_kv,
     int compressed_count,
     const int *window_indices, const int *compressed_indices,
-    int compressed_selected, int rank, int head_dimension, int *invalid) {
+    int compressed_selected, int rank, size_t row_bytes, int *invalid) {
     if (rank < window_size) {
         int index = window_indices[rank];
         if (index < 0) return NULL;
@@ -3008,7 +3099,7 @@ static const float *attention_row(
             *invalid = 1;
             return NULL;
         }
-        return window_kv + (size_t)index * head_dimension;
+        return (const unsigned char *)window_kv + (size_t)index * row_bytes;
     }
     int selected = rank - window_size;
     if (selected >= compressed_selected) {
@@ -3021,20 +3112,23 @@ static const float *attention_row(
         *invalid = 1;
         return NULL;
     }
-    return compressed_kv + (size_t)index * head_dimension;
+    return (const unsigned char *)compressed_kv + (size_t)index * row_bytes;
 }
 
-int coli_v4_flash_attention_ref(
+int coli_v4_flash_attention_codec_ref(
     float *output, const float *queries,
-    const float *window_kv, int window_size,
-    const float *compressed_kv, int compressed_count,
+    const void *window_kv, int window_size,
+    const void *compressed_kv, int compressed_count,
     const int *window_indices,
     const int *compressed_indices, int compressed_selected,
+    ColiV4KVCodec codec, int rope_dimension,
     const float *sinks, int heads, int head_dimension, float softmax_scale) {
+    size_t row_bytes = coli_v4_kv_row_bytes(
+        codec, COLI_V4_KV_MAIN, head_dimension, rope_dimension);
     if (!output || !queries || !window_kv || !window_indices || !sinks ||
         window_size < 1 || compressed_count < 0 || compressed_selected < 0 ||
         (compressed_selected && !compressed_kv) || heads < 1 ||
-        head_dimension < 1 || !(softmax_scale > 0.0f))
+        head_dimension < 1 || !row_bytes || !(softmax_scale > 0.0f))
         return -1;
     int topk = window_size + compressed_selected;
     for (int head = 0; head < heads; head++) {
@@ -3049,18 +3143,17 @@ int coli_v4_flash_attention_ref(
                (size_t)head_dimension * sizeof(*accumulator));
         for (int rank = 0; rank < topk; rank++) {
             int invalid = 0;
-            const float *key = attention_row(
+            const void *key = attention_row(
                 window_kv, window_size, compressed_kv, compressed_count,
                 window_indices,
-                compressed_indices, compressed_selected, rank, head_dimension,
+                compressed_indices, compressed_selected, rank, row_bytes,
                 &invalid);
             if (invalid) return -1;
             if (!key) continue;
             seen++;
-            float score = 0.0f;
-            for (int column = 0; column < head_dimension; column++)
-                score += query[column] * key[column];
-            score *= softmax_scale;
+            float score = coli_v4_kv_dot(
+                codec, COLI_V4_KV_MAIN, query, key,
+                head_dimension, rope_dimension) * softmax_scale;
             if (score > running_max) {
                 float correction = expf(running_max - score);
                 running_sum *= correction;
@@ -3072,8 +3165,9 @@ int coli_v4_flash_attention_ref(
             running_sum += probability;
             /* TileLang casts the exp fragment to BF16 before value GEMM. */
             probability = coli_bf16_round(probability);
-            for (int column = 0; column < head_dimension; column++)
-                accumulator[column] += probability * key[column];
+            coli_v4_kv_accumulate(
+                codec, COLI_V4_KV_MAIN, accumulator, probability, key,
+                head_dimension, rope_dimension);
         }
         if (!seen) return -1;
         for (int column = 0; column < head_dimension; column++)
@@ -3083,17 +3177,34 @@ int coli_v4_flash_attention_ref(
     return 0;
 }
 
-static int coli_v4_two_pass_attention_ref(
+int coli_v4_flash_attention_ref(
     float *output, const float *queries,
     const float *window_kv, int window_size,
     const float *compressed_kv, int compressed_count,
     const int *window_indices,
     const int *compressed_indices, int compressed_selected,
     const float *sinks, int heads, int head_dimension, float softmax_scale) {
+    return coli_v4_flash_attention_codec_ref(
+        output, queries, window_kv, window_size, compressed_kv,
+        compressed_count, window_indices, compressed_indices,
+        compressed_selected, COLI_V4_KV_F32, 0,
+        sinks, heads, head_dimension, softmax_scale);
+}
+
+static int coli_v4_two_pass_attention_codec_ref(
+    float *output, const float *queries,
+    const void *window_kv, int window_size,
+    const void *compressed_kv, int compressed_count,
+    const int *window_indices,
+    const int *compressed_indices, int compressed_selected,
+    ColiV4KVCodec codec, int rope_dimension,
+    const float *sinks, int heads, int head_dimension, float softmax_scale) {
+    size_t row_bytes = coli_v4_kv_row_bytes(
+        codec, COLI_V4_KV_MAIN, head_dimension, rope_dimension);
     if (!output || !queries || !window_kv || !window_indices || !sinks ||
         window_size < 1 || compressed_count < 0 || compressed_selected < 0 ||
         (compressed_selected && !compressed_kv) || heads < 1 ||
-        head_dimension < 1 || !(softmax_scale > 0.0f))
+        head_dimension < 1 || !row_bytes || !(softmax_scale > 0.0f))
         return -1;
     int topk = window_size + compressed_selected;
     float *scores = malloc((size_t)topk * sizeof(*scores));
@@ -3103,10 +3214,10 @@ static int coli_v4_two_pass_attention_ref(
         float maximum = -INFINITY;
         for (int rank = 0; rank < topk; rank++) {
             int invalid = 0;
-            const float *key = attention_row(
+            const void *key = attention_row(
                 window_kv, window_size, compressed_kv, compressed_count,
                 window_indices,
-                compressed_indices, compressed_selected, rank, head_dimension,
+                compressed_indices, compressed_selected, rank, row_bytes,
                 &invalid);
             if (invalid) {
                 free(scores);
@@ -3116,10 +3227,9 @@ static int coli_v4_two_pass_attention_ref(
                 scores[rank] = -INFINITY;
                 continue;
             }
-            float score = 0.0f;
-            for (int column = 0; column < head_dimension; column++)
-                score += query[column] * key[column];
-            score *= softmax_scale;
+            float score = coli_v4_kv_dot(
+                codec, COLI_V4_KV_MAIN, query, key,
+                head_dimension, rope_dimension) * softmax_scale;
             scores[rank] = score;
             if (score > maximum) maximum = score;
         }
@@ -3133,10 +3243,10 @@ static int coli_v4_two_pass_attention_ref(
                (size_t)head_dimension * sizeof(*head_output));
         for (int rank = 0; rank < topk; rank++) {
             int invalid = 0;
-            const float *value = attention_row(
+            const void *value = attention_row(
                 window_kv, window_size, compressed_kv, compressed_count,
                 window_indices,
-                compressed_indices, compressed_selected, rank, head_dimension,
+                compressed_indices, compressed_selected, rank, row_bytes,
                 &invalid);
             if (invalid) {
                 free(scores);
@@ -3146,8 +3256,9 @@ static int coli_v4_two_pass_attention_ref(
             float probability = expf(scores[rank] - maximum);
             denominator += probability;
             probability = coli_bf16_round(probability);
-            for (int column = 0; column < head_dimension; column++)
-                head_output[column] += probability * value[column];
+            coli_v4_kv_accumulate(
+                codec, COLI_V4_KV_MAIN, head_output, probability, value,
+                head_dimension, rope_dimension);
         }
         for (int column = 0; column < head_dimension; column++)
             head_output[column] = coli_bf16_round(
@@ -3164,6 +3275,27 @@ static int v4_flash_enabled(void) {
     return 1;
 }
 
+int coli_v4_attention_two_source_codec_ref(
+    float *output, const float *queries,
+    const void *window_kv, int window_size,
+    const void *compressed_kv, int compressed_count,
+    const int *window_indices,
+    const int *compressed_indices, int compressed_selected,
+    ColiV4KVCodec codec, int rope_dimension,
+    const float *sinks, int heads, int head_dimension, float softmax_scale) {
+    if (v4_flash_enabled())
+        return coli_v4_flash_attention_codec_ref(
+            output, queries, window_kv, window_size, compressed_kv,
+            compressed_count, window_indices, compressed_indices,
+            compressed_selected, codec, rope_dimension,
+            sinks, heads, head_dimension, softmax_scale);
+    return coli_v4_two_pass_attention_codec_ref(
+        output, queries, window_kv, window_size, compressed_kv,
+        compressed_count, window_indices, compressed_indices,
+        compressed_selected, codec, rope_dimension,
+        sinks, heads, head_dimension, softmax_scale);
+}
+
 int coli_v4_attention_two_source_ref(
     float *output, const float *queries,
     const float *window_kv, int window_size,
@@ -3171,16 +3303,10 @@ int coli_v4_attention_two_source_ref(
     const int *window_indices,
     const int *compressed_indices, int compressed_selected,
     const float *sinks, int heads, int head_dimension, float softmax_scale) {
-    if (v4_flash_enabled())
-        return coli_v4_flash_attention_ref(
-            output, queries, window_kv, window_size, compressed_kv,
-            compressed_count, window_indices, compressed_indices,
-            compressed_selected,
-            sinks, heads, head_dimension, softmax_scale);
-    return coli_v4_two_pass_attention_ref(
+    return coli_v4_attention_two_source_codec_ref(
         output, queries, window_kv, window_size, compressed_kv,
         compressed_count, window_indices, compressed_indices,
-        compressed_selected,
+        compressed_selected, COLI_V4_KV_F32, 0,
         sinks, heads, head_dimension, softmax_scale);
 }
 #endif /* COLI_V4_UNIT_SPARSE_ATTENTION */
@@ -4452,7 +4578,10 @@ struct ColiDeepSeekV4Indexer {
     int layer;
     int capacity;
     int count;
-    float *compressed;
+    ColiV4KVCodec codec;
+    size_t row_bytes;
+    void *compressed;
+    float *compressor_scratch;
 };
 
 typedef struct { float score; int index; } IndexScore;
@@ -4506,7 +4635,8 @@ static int descending_score(const void *left, const void *right) {
 int coli_v4_indexer_create(ColiDeepSeekV4Indexer **output,
                            const ColiDeepSeekV4LayerWeights *weights,
                            const ColiDeepSeekV4Config *config,
-                           int max_context, char *error, size_t error_size) {
+                           int max_context, ColiV4KVCodec codec,
+                           char *error, size_t error_size) {
     if (!output || !weights || !config || !weights->plan.has_indexer ||
         max_context < 4 || config->index_head_dim < 1 ||
         config->index_n_heads < 1)
@@ -4517,14 +4647,23 @@ int coli_v4_indexer_create(ColiDeepSeekV4Indexer **output,
     state->weights = weights;
     state->config = config;
     state->layer = weights->plan.layer;
+    state->codec = codec;
+    state->row_bytes = coli_v4_kv_row_bytes(
+        codec, COLI_V4_KV_INDEX, config->index_head_dim, 0);
+    if (!state->row_bytes) {
+        free(state);
+        return set_error(error, error_size, "unsupported indexer KV codec");
+    }
     state->capacity = (max_context + 3) / 4;
     if (state->capacity > 128) state->capacity = 128;
-    state->compressed = calloc((size_t)state->capacity * config->index_head_dim,
-                               sizeof(*state->compressed));
+    state->compressed = calloc((size_t)state->capacity, state->row_bytes);
+    state->compressor_scratch = calloc(
+        (size_t)config->index_head_dim, sizeof(*state->compressor_scratch));
     ColiDeepSeekV4CompressorOptions options = {
         "attn.indexer.compressor", config->index_head_dim, 1
     };
-    if (!state->compressed || coli_v4_compressor_create_with_options(
+    if (!state->compressed || !state->compressor_scratch ||
+        coli_v4_compressor_create_with_options(
             &state->compressor, weights, config, &options, error, error_size)) {
         coli_v4_indexer_destroy(state);
         return set_error(error, error_size, "cannot create indexer compressor");
@@ -4548,13 +4687,14 @@ void coli_v4_indexer_reset(ColiDeepSeekV4Indexer *state) {
     if (!state) return;
     state->count = 0;
     memset(state->compressed, 0,
-           (size_t)state->capacity * state->config->index_head_dim * sizeof(float));
+           (size_t)state->capacity * state->row_bytes);
     coli_v4_compressor_reset(state->compressor);
 }
 
 void coli_v4_indexer_destroy(ColiDeepSeekV4Indexer *state) {
     if (!state) return;
     coli_v4_compressor_destroy(state->compressor);
+    free(state->compressor_scratch);
     free(state->compressed);
     free(state);
 }
@@ -4597,21 +4737,28 @@ int coli_v4_indexer_step(ColiDeepSeekV4Indexer *state, int *indices,
     int produced = 0;
     if ((position + 1) % 4 == 0 && state->count >= state->capacity) {
         int next_capacity = state->capacity * 2;
-        float *grown = realloc(state->compressed,
-            (size_t)next_capacity * dimension * sizeof(*grown));
+        void *grown = realloc(state->compressed,
+                              (size_t)next_capacity * state->row_bytes);
         if (!grown) return set_error(error, error_size, "cannot grow indexer cache");
-        memset(grown + (size_t)state->capacity * dimension, 0,
-               (size_t)(next_capacity - state->capacity) * dimension * sizeof(*grown));
+        memset((unsigned char *)grown +
+                   (size_t)state->capacity * state->row_bytes, 0,
+               (size_t)(next_capacity - state->capacity) * state->row_bytes);
         state->compressed = grown;
         state->capacity = next_capacity;
     }
     float *next = state->count < state->capacity
-        ? state->compressed + (size_t)state->count * dimension : NULL;
+        ? state->compressor_scratch : NULL;
     if (coli_v4_compressor_step(state->compressor, next, &produced, input,
                                 position, error, error_size)) return -1;
     if (produced) {
         if (state->count >= state->capacity)
             return set_error(error, error_size, "indexer cache capacity exceeded");
+        if (coli_v4_kv_encode_row(
+                state->codec, COLI_V4_KV_INDEX,
+                (unsigned char *)state->compressed +
+                    (size_t)state->count * state->row_bytes,
+                next, dimension, 0))
+            return set_error(error, error_size, "cannot encode indexer KV row");
         state->count++;
     }
     if (!state->count) return 0;
@@ -4652,12 +4799,13 @@ int coli_v4_indexer_step(ColiDeepSeekV4Indexer *state, int *indices,
         head_weights[head] = sum * weight_scale;
     }
     for (int candidate = 0; !result && candidate < state->count; candidate++) {
-        const float *key = state->compressed + (size_t)candidate * dimension;
+        const void *key = (const unsigned char *)state->compressed +
+                          (size_t)candidate * state->row_bytes;
         float score = 0.0f;
         for (int head = 0; head < heads; head++) {
             const float *query = queries + (size_t)head * dimension;
-            float dot = 0.0f;
-            for (int i = 0; i < dimension; i++) dot += query[i] * key[i];
+            float dot = coli_v4_kv_dot(
+                state->codec, COLI_V4_KV_INDEX, query, key, dimension, 0);
             score += fmaxf(dot, 0.0f) * head_weights[head];
         }
         scores[candidate] = (IndexScore){score, candidate};
@@ -4671,7 +4819,7 @@ int coli_v4_indexer_step(ColiDeepSeekV4Indexer *state, int *indices,
     return result ? set_error(error, error_size, "indexer scoring failed") : selected;
 }
 
-const float *coli_v4_indexer_compressed_values(
+const void *coli_v4_indexer_compressed_values(
     const ColiDeepSeekV4Indexer *state) {
     return state ? state->compressed : NULL;
 }
@@ -4695,7 +4843,9 @@ int coli_v4_indexer_compressed_count(const ColiDeepSeekV4Indexer *state) {
 struct ColiV4IndexerSnapshot {
     int count;
     int head_dim;
-    float *compressed;
+    ColiV4KVCodec codec;
+    size_t row_bytes;
+    void *compressed;
     ColiV4CompressorSnapshot *compressor;
 };
 
@@ -4706,14 +4856,15 @@ int coli_v4_indexer_snapshot_create(const ColiDeepSeekV4Indexer *state,
     if (!*output) return -1;
     (*output)->count = state->count;
     (*output)->head_dim = state->config->index_head_dim;
+    (*output)->codec = state->codec;
+    (*output)->row_bytes = state->row_bytes;
     if (state->count) {
-        (*output)->compressed = malloc((size_t)state->count *
-                                       (*output)->head_dim * sizeof(float));
+        (*output)->compressed = malloc((size_t)state->count * state->row_bytes);
         if (!(*output)->compressed) {
             coli_v4_indexer_snapshot_destroy(*output); *output = NULL; return -1;
         }
         memcpy((*output)->compressed, state->compressed,
-               (size_t)state->count * (*output)->head_dim * sizeof(float));
+               (size_t)state->count * state->row_bytes);
     }
     if (coli_v4_compressor_snapshot_create(state->compressor,
                                             &(*output)->compressor)) {
@@ -4726,11 +4877,13 @@ int coli_v4_indexer_snapshot_restore(ColiDeepSeekV4Indexer *state,
                                      const ColiV4IndexerSnapshot *snapshot) {
     if (!state || !snapshot || !state->config ||
         state->config->index_head_dim != snapshot->head_dim ||
+        state->codec != snapshot->codec ||
+        state->row_bytes != snapshot->row_bytes ||
         snapshot->count > state->capacity) return -1;
     state->count = snapshot->count;
     if (snapshot->count)
         memcpy(state->compressed, snapshot->compressed,
-               (size_t)snapshot->count * snapshot->head_dim * sizeof(float));
+               (size_t)snapshot->count * snapshot->row_bytes);
     return coli_v4_compressor_snapshot_restore(state->compressor,
                                                 snapshot->compressor);
 }
@@ -4770,28 +4923,47 @@ static int set_error(char *error, size_t size, const char *format, ...);
 struct ColiDeepSeekV4WindowAttentionState {
     int window_size;
     int head_dim;
+    int rope_dim;
     int layer;
     int ratio;
-    float *kv;
+    ColiV4KVCodec codec;
+    ColiV4KVCodec index_codec;
+    size_t row_bytes;
+    void *kv;
     ColiDeepSeekV4CompressorState *compressor;
     ColiDeepSeekV4Indexer *indexer;
-    float *compressed;
+    void *compressed;
+    float *compressor_scratch;
     int compressed_count;
     int compressed_capacity;
 };
 
 int coli_v4_window_attention_create(ColiDeepSeekV4WindowAttentionState **output,
-                                    const ColiDeepSeekV4Config *config) {
+                                    const ColiDeepSeekV4Config *config,
+                                    ColiV4KVCodec codec,
+                                    ColiV4KVCodec index_codec) {
     if (!output || !config || config->sliding_window < 1 || config->head_dim < 1)
+        return -1;
+    size_t row_bytes = coli_v4_kv_row_bytes(
+        codec, COLI_V4_KV_MAIN, config->head_dim, config->qk_rope_head_dim);
+    if (!row_bytes || !coli_v4_kv_row_bytes(
+            index_codec, COLI_V4_KV_INDEX, config->index_head_dim, 0))
         return -1;
     *output = calloc(1, sizeof(**output));
     if (!*output) return -1;
     (*output)->window_size = config->sliding_window;
     (*output)->head_dim = config->head_dim;
+    (*output)->rope_dim = config->qk_rope_head_dim;
+    (*output)->codec = codec;
+    (*output)->index_codec = index_codec;
+    (*output)->row_bytes = row_bytes;
     (*output)->layer = -1;
-    (*output)->kv = calloc((size_t)config->sliding_window * config->head_dim,
-                           sizeof(*(*output)->kv));
-    if (!(*output)->kv) {
+    (*output)->kv = calloc((size_t)config->sliding_window, row_bytes);
+    (*output)->compressor_scratch = calloc(
+        (size_t)config->head_dim, sizeof(*(*output)->compressor_scratch));
+    if (!(*output)->kv || !(*output)->compressor_scratch) {
+        free((*output)->compressor_scratch);
+        free((*output)->kv);
         free(*output);
         *output = NULL;
         return -1;
@@ -4802,7 +4974,7 @@ int coli_v4_window_attention_create(ColiDeepSeekV4WindowAttentionState **output,
 void coli_v4_window_attention_reset(ColiDeepSeekV4WindowAttentionState *state) {
     if (!state) return;
     memset(state->kv, 0,
-           (size_t)state->window_size * state->head_dim * sizeof(*state->kv));
+           (size_t)state->window_size * state->row_bytes);
     state->compressed_count = 0;
     if (state->compressor) coli_v4_compressor_reset(state->compressor);
     if (state->indexer) coli_v4_indexer_reset(state->indexer);
@@ -4812,6 +4984,7 @@ void coli_v4_window_attention_destroy(ColiDeepSeekV4WindowAttentionState *state)
     if (!state) return;
     coli_v4_indexer_destroy(state->indexer);
     coli_v4_compressor_destroy(state->compressor);
+    free(state->compressor_scratch);
     free(state->compressed);
     free(state->kv);
     free(state);
@@ -4827,12 +5000,13 @@ static int prepare_compressed_state(
         state->layer = weights->plan.layer;
         state->ratio = ratio;
         state->compressed_capacity = 16;
-        state->compressed = calloc((size_t)state->compressed_capacity * state->head_dim,
-                                   sizeof(*state->compressed));
+        state->compressed = calloc((size_t)state->compressed_capacity,
+                                   state->row_bytes);
         if (!state->compressed || coli_v4_compressor_create(
                 &state->compressor, weights, config, error, error_size)) return -1;
         if (ratio == 4 && coli_v4_indexer_create(
                 &state->indexer, weights, config, config->max_position_embeddings,
+                state->index_codec,
                 error, error_size)) return -1;
     } else if (state->layer != weights->plan.layer || state->ratio != ratio) {
         return set_error(error, error_size, "attention state belongs to another layer");
@@ -4848,8 +5022,7 @@ static int grow_compressed_state(ColiDeepSeekV4WindowAttentionState *state,
                                  char *error, size_t error_size) {
     if (state->compressed_count < state->compressed_capacity) return 0;
     int capacity = state->compressed_capacity * 2;
-    float *grown = realloc(state->compressed,
-        (size_t)capacity * state->head_dim * sizeof(*grown));
+    void *grown = realloc(state->compressed, (size_t)capacity * state->row_bytes);
     if (!grown) return set_error(error, error_size, "cannot grow compressed KV cache");
     state->compressed = grown;
     state->compressed_capacity = capacity;
@@ -4963,9 +5136,13 @@ static int attention_token_impl(float *output,
             result = grow_compressed_state(state, error, error_size);
         int produced = 0;
         if (!result) result = coli_v4_compressor_step(
-            state->compressor,
-            state->compressed + (size_t)state->compressed_count * head_dim,
+            state->compressor, state->compressor_scratch,
             &produced, input, position, error, error_size);
+        if (!result && produced) result = coli_v4_kv_encode_row(
+            state->codec, COLI_V4_KV_MAIN,
+            (unsigned char *)state->compressed +
+                (size_t)state->compressed_count * state->row_bytes,
+            state->compressor_scratch, head_dim, state->rope_dim);
         if (!result && produced) state->compressed_count++;
         if (!result && state->indexer) {
             compressed_indices = malloc((size_t)config->index_topk *
@@ -5037,8 +5214,10 @@ static int attention_token_impl(float *output,
     const float *sinks = layer_data(weights, "attn.attn_sink", NULL);
     if (!result && state) {
         int slot = position % state->window_size;
-        memcpy(state->kv + (size_t)slot * head_dim, kv,
-               (size_t)head_dim * sizeof(*kv));
+        result = coli_v4_kv_encode_row(
+            state->codec, COLI_V4_KV_MAIN,
+            (unsigned char *)state->kv + (size_t)slot * state->row_bytes,
+            kv, head_dim, state->rope_dim);
         if (!state->indexer) compressed_selected = state->compressed_count;
         int *window_indices = malloc((size_t)state->window_size *
                                      sizeof(*window_indices));
@@ -5052,11 +5231,12 @@ static int attention_token_impl(float *output,
                 for (int i = 0; i < state->window_size; i++)
                     window_indices[i] = (oldest + i) % state->window_size;
             }
-            result = coli_v4_attention_two_source_ref(
+            result = coli_v4_attention_two_source_codec_ref(
                 attended, q, state->kv, state->window_size, state->compressed,
                 state->compressed_count, window_indices,
                 state->indexer ? compressed_indices : NULL,
-                compressed_selected, sinks, heads, head_dim,
+                compressed_selected, state->codec, state->rope_dim,
+                sinks, heads, head_dim,
                 1.0f / sqrtf((float)head_dim));
         }
         free(window_indices);
@@ -5136,9 +5316,11 @@ int coli_v4_attention_window_token_ref(
 #include "deepseek_v4_internal.h"
 
 struct ColiV4AttentionSnapshot {
-    int window_size, head_dim, compressed_count;
-    float *kv;
-    float *compressed;
+    int window_size, head_dim, rope_dim, compressed_count;
+    ColiV4KVCodec codec, index_codec;
+    size_t row_bytes;
+    void *kv;
+    void *compressed;
     ColiV4CompressorSnapshot *compressor;
     ColiV4IndexerSnapshot *indexer;
 };
@@ -5151,16 +5333,20 @@ int coli_v4_attention_snapshot_create(
     if (!*output) return -1;
     (*output)->window_size = state->window_size;
     (*output)->head_dim = state->head_dim;
+    (*output)->rope_dim = state->rope_dim;
+    (*output)->codec = state->codec;
+    (*output)->index_codec = state->index_codec;
+    (*output)->row_bytes = state->row_bytes;
     (*output)->compressed_count = state->compressed_count;
-    size_t kv_count = (size_t)state->window_size * state->head_dim;
-    (*output)->kv = malloc(kv_count * sizeof(float));
+    size_t kv_bytes = (size_t)state->window_size * state->row_bytes;
+    (*output)->kv = malloc(kv_bytes);
     if (!(*output)->kv) goto failed;
-    memcpy((*output)->kv, state->kv, kv_count * sizeof(float));
+    memcpy((*output)->kv, state->kv, kv_bytes);
     if (state->compressed_count) {
-        size_t count = (size_t)state->compressed_count * state->head_dim;
-        (*output)->compressed = malloc(count * sizeof(float));
+        size_t bytes = (size_t)state->compressed_count * state->row_bytes;
+        (*output)->compressed = malloc(bytes);
         if (!(*output)->compressed) goto failed;
-        memcpy((*output)->compressed, state->compressed, count * sizeof(float));
+        memcpy((*output)->compressed, state->compressed, bytes);
     }
     if (state->compressor && coli_v4_compressor_snapshot_create(
             state->compressor, &(*output)->compressor)) goto failed;
@@ -5176,13 +5362,17 @@ int coli_v4_attention_snapshot_restore(
     const ColiV4AttentionSnapshot *snapshot) {
     if (!state || !snapshot || state->window_size != snapshot->window_size ||
         state->head_dim != snapshot->head_dim ||
+        state->rope_dim != snapshot->rope_dim ||
+        state->codec != snapshot->codec ||
+        state->index_codec != snapshot->index_codec ||
+        state->row_bytes != snapshot->row_bytes ||
         snapshot->compressed_count > state->compressed_capacity) return -1;
     memcpy(state->kv, snapshot->kv,
-           (size_t)state->window_size * state->head_dim * sizeof(float));
+           (size_t)state->window_size * state->row_bytes);
     state->compressed_count = snapshot->compressed_count;
     if (snapshot->compressed_count)
         memcpy(state->compressed, snapshot->compressed,
-               (size_t)snapshot->compressed_count * state->head_dim * sizeof(float));
+               (size_t)snapshot->compressed_count * state->row_bytes);
     if ((state->compressor != NULL) != (snapshot->compressor != NULL) ||
         (state->indexer != NULL) != (snapshot->indexer != NULL)) return -1;
     if (state->compressor && coli_v4_compressor_snapshot_restore(
@@ -6694,6 +6884,8 @@ int coli_v4_engine_open(ColiV4Engine **output,
     if (coli_v4_config_load(&engine->config, engine->runtime.target_model_dir,
                             error, error_size))
         goto fail;
+    engine->runtime.kv_codec = COLI_V4_KV_F32;
+    engine->runtime.index_codec = COLI_V4_KV_F32;
     if (engine->runtime.context_tokens > engine->config.max_position_embeddings)
         engine->runtime.context_tokens = engine->config.max_position_embeddings;
     if (coli_st_index_open(&engine->target_index,
@@ -7181,7 +7373,9 @@ int main(int argc, char **argv) {
         (size_t)config.num_hidden_layers, sizeof(*attention));
     if (!state || !next || !hidden || !attention) return 1;
     for (int layer = 0; layer < config.num_hidden_layers; layer++)
-        if (coli_v4_window_attention_create(&attention[layer], &config)) return 1;
+        if (coli_v4_window_attention_create(
+                &attention[layer], &config,
+                COLI_V4_KV_F32, COLI_V4_KV_F32)) return 1;
 
     int current_token = text_mode ? prompt_ids[0] : input_token;
     int total_steps = text_mode ? prompt_count + token_count - 1 : token_count;
@@ -7776,7 +7970,9 @@ int coli_v4_session_create(ColiV4Session **output, ColiV4Engine *engine,
     }
     for (int layer = 0; layer < session->config.num_hidden_layers; layer++) {
         if (coli_v4_window_attention_create(&session->attention[layer],
-                                            &session->config)) {
+                                            &session->config,
+                                            engine->runtime.kv_codec,
+                                            engine->runtime.index_codec)) {
             coli_v4_session_destroy(session);
             if (error && error_size)
                 snprintf(error, error_size, "cannot create attention layer %d",
@@ -8789,7 +8985,10 @@ int main(int argc, char **argv) {
         attention = calloc((size_t)config.num_hidden_layers, sizeof(*attention));
         if (!attention) goto cleanup;
         for (int layer = 0; layer < config.num_hidden_layers; layer++)
-            if (coli_v4_window_attention_create(&attention[layer], &config))
+            if (coli_v4_window_attention_create(
+                    &attention[layer], &config,
+                    engine->runtime.kv_codec,
+                    engine->runtime.index_codec))
                 goto cleanup;
 
         int tf_limit = cli.teacher_forcing;
@@ -10440,6 +10639,107 @@ int coli_fp8_matvec_ref(float *output, const ColiTensorView *weight,
     return 0;
 }
 #endif /* COLI_V4_UNIT_NATIVE_QUANT */
+
+#ifdef COLI_V4_UNIT_KV_CODEC
+#include "v4_kv_codec.h"
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+size_t coli_v4_kv_row_bytes(ColiV4KVCodec codec, ColiV4KVStream stream,
+                            int head_dim, int rope_dim) {
+    if (head_dim < 1 || (stream == COLI_V4_KV_MAIN &&
+                        (rope_dim < 0 || rope_dim > head_dim)) ||
+        (stream == COLI_V4_KV_INDEX && rope_dim != 0))
+        return 0;
+    return codec == COLI_V4_KV_F32 ? (size_t)head_dim * sizeof(float) : 0;
+}
+
+int coli_v4_kv_encode_row(ColiV4KVCodec codec, ColiV4KVStream stream,
+                          void *dst, const float *src,
+                          int head_dim, int rope_dim) {
+    size_t bytes = coli_v4_kv_row_bytes(codec, stream, head_dim, rope_dim);
+    if (!bytes || !dst || !src) return -1;
+    memcpy(dst, src, bytes);
+    return 0;
+}
+
+int coli_v4_kv_decode_row(ColiV4KVCodec codec, ColiV4KVStream stream,
+                          float *dst, const void *src,
+                          int head_dim, int rope_dim) {
+    size_t bytes = coli_v4_kv_row_bytes(codec, stream, head_dim, rope_dim);
+    if (!bytes || !dst || !src) return -1;
+    memcpy(dst, src, bytes);
+    return 0;
+}
+
+float coli_v4_kv_dot(ColiV4KVCodec codec, ColiV4KVStream stream,
+                     const float *query, const void *row,
+                     int head_dim, int rope_dim) {
+    if (!query || !row ||
+        !coli_v4_kv_row_bytes(codec, stream, head_dim, rope_dim))
+        return 0.0f;
+    const float *values = row;
+    float result = 0.0f;
+    for (int i = 0; i < head_dim; i++) result += query[i] * values[i];
+    return result;
+}
+
+void coli_v4_kv_accumulate(ColiV4KVCodec codec, ColiV4KVStream stream,
+                           float *acc, float probability, const void *row,
+                           int head_dim, int rope_dim) {
+    if (!acc || !row ||
+        !coli_v4_kv_row_bytes(codec, stream, head_dim, rope_dim))
+        return;
+    const float *values = row;
+    for (int i = 0; i < head_dim; i++) acc[i] += probability * values[i];
+}
+
+const char *coli_v4_kv_codec_name(ColiV4KVCodec codec) {
+    switch (codec) {
+        case COLI_V4_KV_F32: return "f32";
+        case COLI_V4_KV_NATIVE: return "native";
+        case COLI_V4_KV_TURBO4: return "turbo4";
+        case COLI_V4_KV_TURBO3: return "turbo3";
+        case COLI_V4_KV_TURBO2: return "turbo2";
+    }
+    return "unknown";
+}
+
+ColiV4KVCodec coli_v4_kv_codec_from_env(const char *variable,
+                                        ColiV4KVStream stream,
+                                        int head_dim, int rope_dim,
+                                        ColiV4KVCodec fallback) {
+    const char *setting = variable ? getenv(variable) : NULL;
+    ColiV4KVCodec selected = fallback;
+    int known = !setting || !*setting;
+    if (setting && !strcmp(setting, "f32")) {
+        selected = COLI_V4_KV_F32;
+        known = 1;
+    } else if (setting && !strcmp(setting, "native")) {
+        selected = COLI_V4_KV_NATIVE;
+        known = 1;
+    } else if (setting && !strcmp(setting, "turbo4")) {
+        selected = COLI_V4_KV_TURBO4;
+        known = 1;
+    } else if (setting && !strcmp(setting, "turbo3")) {
+        selected = COLI_V4_KV_TURBO3;
+        known = 1;
+    } else if (setting && !strcmp(setting, "turbo2")) {
+        selected = COLI_V4_KV_TURBO2;
+        known = 1;
+    }
+    if (!known || !coli_v4_kv_row_bytes(selected, stream, head_dim, rope_dim)) {
+        fprintf(stderr, "%s warning=unsupported-value value=%s fallback=%s\n",
+                variable ? variable : "V4_KV",
+                setting && *setting ? setting : coli_v4_kv_codec_name(selected),
+                coli_v4_kv_codec_name(fallback));
+        selected = fallback;
+    }
+    return selected;
+}
+#endif /* COLI_V4_UNIT_KV_CODEC */
 
 #ifdef COLI_V4_UNIT_NATIVE_QUANT_DUAL
 /* Folded into the DeepSeek V4 engine translation units. */

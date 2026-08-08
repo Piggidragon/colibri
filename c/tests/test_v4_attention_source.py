@@ -72,7 +72,9 @@ class DeepSeekV4AmalgamSourceTest(unittest.TestCase):
         self.assertEqual(len(batch_callers), 1, "standalone batch path count")
 
         for caller in token_callers + batch_callers:
-            self.assertEqual(caller.count("coli_v4_attention_two_source_ref("), 1)
+            self.assertEqual(
+                caller.count("coli_v4_attention_two_source_codec_ref("), 1
+            )
             self.assertEqual(
                 caller.count("window_indices[i] = i <= position ? i : -1;"), 1
             )
@@ -99,7 +101,7 @@ class DeepSeekV4AmalgamSourceTest(unittest.TestCase):
             batch,
         )
         self.assertIn(
-            "item_compressed_indices, selected, sinks, heads, head_dim,",
+            "item_compressed_indices, selected, state->codec, state->rope_dim,",
             batch,
         )
 
