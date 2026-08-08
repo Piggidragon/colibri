@@ -37,7 +37,8 @@ INDEX_HEADS = 2
 INDEX_DIM = 32
 SLIDING = 8
 COMPRESS_RATIOS = [0, 4, 8]
-MAX_POSITIONS = 128
+MAX_POSITIONS = 768
+ORIGINAL_MAX_POSITIONS = 128
 
 E2M1 = (
     0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0,
@@ -280,7 +281,7 @@ def make_runtime_config(transformers_version: str) -> dict:
         "rope_scaling": {
             "type": "yarn",
             "factor": 1.0,
-            "original_max_position_embeddings": MAX_POSITIONS,
+            "original_max_position_embeddings": ORIGINAL_MAX_POSITIONS,
             "beta_fast": 32,
             "beta_slow": 1,
         },
