@@ -1426,6 +1426,12 @@ int coli_v4_swiglu(float *output, const float *gate, const float *up,
     }
     return 0;
 }
+
+#ifdef COLI_V4_CUDA
+/* Single definition for the warn-once latch shared by the attention, batch and
+ * transaction units, which each carry their own copy of the attention source. */
+int coli_v4_attention_cuda_warned;
+#endif
 #endif /* COLI_V4_UNIT_MATH */
 
 #ifdef COLI_V4_UNIT_ATTENTION
@@ -1449,7 +1455,6 @@ int coli_v4_swiglu(float *output, const float *gate, const float *up,
 #endif
 
 static int set_error(char *error, size_t size, const char *format, ...);
-static int v4_flash_enabled(void);
 
 struct ColiDeepSeekV4WindowAttentionState {
     int window_size;
@@ -1474,18 +1479,22 @@ struct ColiDeepSeekV4WindowAttentionState {
 };
 
 #ifdef COLI_V4_CUDA
-static int v4_attention_cuda_warning_emitted;
+static void v4_attention_cuda_warn(const char *reason) {
+    if (!coli_v4_attention_cuda_warned) {
+        fprintf(stderr, "v4_cuda warning=%s; continuing-on-cpu\n", reason);
+        coli_v4_attention_cuda_warned = 1;
+    }
+}
 
+/* Drops the device mirror for good. Reserved for failures that leave the
+ * mirror unusable; a rejected kernel launch only falls back for that token. */
 static void v4_attention_cuda_disable(
     ColiDeepSeekV4WindowAttentionState *state, const char *reason) {
     v4_cuda_kv_free(state->compressed_device);
     v4_cuda_kv_free(state->kv_device);
     state->compressed_device = NULL;
     state->kv_device = NULL;
-    if (!v4_attention_cuda_warning_emitted) {
-        fprintf(stderr, "v4_cuda warning=%s; continuing-on-cpu\n", reason);
-        v4_attention_cuda_warning_emitted = 1;
-    }
+    v4_attention_cuda_warn(reason);
 }
 
 static void v4_attention_cuda_write(
@@ -1863,7 +1872,7 @@ static int attention_token_impl(float *output,
                         1.0f / sqrtf((float)head_dim)))
                     cuda_attention = 1;
                 else
-                    v4_attention_cuda_disable(state, "attention-kernel-failed");
+                    v4_attention_cuda_warn("attention-kernel-failed");
             }
 #endif
             if (!cuda_attention) result = coli_v4_attention_two_source_codec_ref(
@@ -1991,18 +2000,22 @@ struct ColiDeepSeekV4WindowAttentionState {
 };
 
 #ifdef COLI_V4_CUDA
-static int v4_attention_cuda_warning_emitted;
+static void v4_attention_cuda_warn(const char *reason) {
+    if (!coli_v4_attention_cuda_warned) {
+        fprintf(stderr, "v4_cuda warning=%s; continuing-on-cpu\n", reason);
+        coli_v4_attention_cuda_warned = 1;
+    }
+}
 
+/* Drops the device mirror for good. Reserved for failures that leave the
+ * mirror unusable; a rejected kernel launch only falls back for that token. */
 static void v4_attention_cuda_disable(
     ColiDeepSeekV4WindowAttentionState *state, const char *reason) {
     v4_cuda_kv_free(state->compressed_device);
     v4_cuda_kv_free(state->kv_device);
     state->compressed_device = NULL;
     state->kv_device = NULL;
-    if (!v4_attention_cuda_warning_emitted) {
-        fprintf(stderr, "v4_cuda warning=%s; continuing-on-cpu\n", reason);
-        v4_attention_cuda_warning_emitted = 1;
-    }
+    v4_attention_cuda_warn(reason);
 }
 
 static void v4_attention_cuda_write(
@@ -2380,7 +2393,7 @@ static int attention_token_impl(float *output,
                         1.0f / sqrtf((float)head_dim)))
                     cuda_attention = 1;
                 else
-                    v4_attention_cuda_disable(state, "attention-kernel-failed");
+                    v4_attention_cuda_warn("attention-kernel-failed");
             }
 #endif
             if (!cuda_attention) result = coli_v4_attention_two_source_codec_ref(
@@ -2661,7 +2674,7 @@ int coli_v4_attention_window_batch_ref(
                         1.0f / sqrtf((float)head_dim)))
                     cuda_attention = 1;
                 else
-                    v4_attention_cuda_disable(state, "attention-kernel-failed");
+                    v4_attention_cuda_warn("attention-kernel-failed");
             }
 #endif
             if (!cuda_attention) result = coli_v4_attention_two_source_codec_ref(
@@ -3550,13 +3563,6 @@ static int coli_v4_two_pass_attention_codec_ref(
     }
     free(decoded); free(denominator); free(maximum); free(scores);
     return result;
-}
-
-static int v4_flash_enabled(void) {
-    const char *setting = getenv("V4_FLASH");
-    if (!setting || strcmp(setting, "1") == 0) return 1;
-    if (strcmp(setting, "0") == 0) return 0;
-    return 1;
 }
 
 int coli_v4_attention_two_source_codec_ref(
@@ -5262,18 +5268,22 @@ struct ColiDeepSeekV4WindowAttentionState {
 };
 
 #ifdef COLI_V4_CUDA
-static int v4_attention_cuda_warning_emitted;
+static void v4_attention_cuda_warn(const char *reason) {
+    if (!coli_v4_attention_cuda_warned) {
+        fprintf(stderr, "v4_cuda warning=%s; continuing-on-cpu\n", reason);
+        coli_v4_attention_cuda_warned = 1;
+    }
+}
 
+/* Drops the device mirror for good. Reserved for failures that leave the
+ * mirror unusable; a rejected kernel launch only falls back for that token. */
 static void v4_attention_cuda_disable(
     ColiDeepSeekV4WindowAttentionState *state, const char *reason) {
     v4_cuda_kv_free(state->compressed_device);
     v4_cuda_kv_free(state->kv_device);
     state->compressed_device = NULL;
     state->kv_device = NULL;
-    if (!v4_attention_cuda_warning_emitted) {
-        fprintf(stderr, "v4_cuda warning=%s; continuing-on-cpu\n", reason);
-        v4_attention_cuda_warning_emitted = 1;
-    }
+    v4_attention_cuda_warn(reason);
 }
 
 static void v4_attention_cuda_write(
@@ -5651,7 +5661,7 @@ static int attention_token_impl(float *output,
                         1.0f / sqrtf((float)head_dim)))
                     cuda_attention = 1;
                 else
-                    v4_attention_cuda_disable(state, "attention-kernel-failed");
+                    v4_attention_cuda_warn("attention-kernel-failed");
             }
 #endif
             if (!cuda_attention) result = coli_v4_attention_two_source_codec_ref(

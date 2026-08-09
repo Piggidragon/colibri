@@ -237,6 +237,7 @@ __global__ static void v4_flash_attention_kernel(
     float *accumulator = values + head_dim;
     float *reduction = accumulator + head_dim;
     __shared__ float running_max, running_sum, correction, probability;
+    __shared__ int decode_failed_latch;
 
     for (int column = threadIdx.x; column < head_dim; column += blockDim.x) {
         query[column] = queries[(size_t)head * head_dim + column];
@@ -264,7 +265,13 @@ __global__ static void v4_flash_attention_kernel(
         if (!row) continue;
         v4_decode_row<Codec>(values, row, head_dim, native_nope, row_bytes,
                              decode_failed);
-        if (*decode_failed) return;
+        /* decode_failed is global and any block may set it, so a direct read
+         * would let threads of this block disagree and split the barriers
+         * below. Latch it once per block and branch uniformly instead. */
+        if (!threadIdx.x)
+            decode_failed_latch = *(volatile int *)decode_failed;
+        __syncthreads();
+        if (decode_failed_latch) return;
         float partial = 0.0f;
         for (int column = threadIdx.x; column < head_dim; column += blockDim.x)
             partial += query[column] * values[column];
