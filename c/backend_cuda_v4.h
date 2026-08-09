@@ -13,6 +13,11 @@ int v4_cuda_init(int device);
 void v4_cuda_shutdown(void);
 size_t v4_cuda_free_bytes(void);
 
+void *v4_cuda_kv_alloc(size_t bytes);
+void v4_cuda_kv_free(void *base);
+int v4_cuda_kv_write_row(void *base, int slot, const void *row,
+                         size_t row_bytes);
+
 #ifdef __cplusplus
 }
 #endif

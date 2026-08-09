@@ -669,6 +669,7 @@ typedef struct {
     uint64_t dspark_reserve_bytes;
     ColiV4KVCodec kv_codec;
     ColiV4KVCodec index_codec;
+    int vram_enabled;
 } ColiDeepSeekV4RuntimeOptions;
 
 enum { COLI_V4_RESIDENT_MAX_LAYERS = 128 };

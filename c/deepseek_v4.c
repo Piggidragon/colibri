@@ -1444,6 +1444,9 @@ int coli_v4_swiglu(float *output, const float *gate, const float *up,
 #include "deepseek_v4_internal.h"
 #include "deepseek_v4_internal.h"
 #include "native_quant.h"
+#ifdef COLI_V4_CUDA
+#include "backend_cuda_v4.h"
+#endif
 
 static int set_error(char *error, size_t size, const char *format, ...);
 
@@ -1460,10 +1463,54 @@ struct ColiDeepSeekV4WindowAttentionState {
     ColiDeepSeekV4CompressorState *compressor;
     ColiDeepSeekV4Indexer *indexer;
     void *compressed;
+#ifdef COLI_V4_CUDA
+    void *kv_device;
+    void *compressed_device;
+    int cuda_failed;
+#endif
     float *compressor_scratch;
     int compressed_count;
     int compressed_capacity;
 };
+
+#ifdef COLI_V4_CUDA
+static int v4_attention_cuda_warning_emitted;
+
+static void v4_attention_cuda_disable(
+    ColiDeepSeekV4WindowAttentionState *state, const char *reason) {
+    v4_cuda_kv_free(state->compressed_device);
+    v4_cuda_kv_free(state->kv_device);
+    state->compressed_device = NULL;
+    state->kv_device = NULL;
+    state->cuda_failed = 1;
+    if (!v4_attention_cuda_warning_emitted) {
+        fprintf(stderr, "v4_cuda warning=%s; continuing-on-cpu\n", reason);
+        v4_attention_cuda_warning_emitted = 1;
+    }
+}
+
+static void v4_attention_cuda_write(
+    ColiDeepSeekV4WindowAttentionState *state, void *device,
+    int slot, const void *row) {
+    if (device && v4_cuda_kv_write_row(device, slot, row, state->row_bytes))
+        v4_attention_cuda_disable(state, "KV-upload-failed");
+}
+
+static void v4_attention_cuda_grow_compressed(
+    ColiDeepSeekV4WindowAttentionState *state, int capacity) {
+    if (!state->compressed_device) return;
+    void *grown = v4_cuda_kv_alloc((size_t)capacity * state->row_bytes);
+    if (!grown || (state->compressed_count && v4_cuda_kv_write_row(
+            grown, 0, state->compressed,
+            (size_t)state->compressed_count * state->row_bytes))) {
+        v4_cuda_kv_free(grown);
+        v4_attention_cuda_disable(state, "KV-grow-failed");
+        return;
+    }
+    v4_cuda_kv_free(state->compressed_device);
+    state->compressed_device = grown;
+}
+#endif
 
 int coli_v4_window_attention_create(ColiDeepSeekV4WindowAttentionState **output,
                                     const ColiDeepSeekV4Config *config,
@@ -1495,6 +1542,14 @@ int coli_v4_window_attention_create(ColiDeepSeekV4WindowAttentionState **output,
         *output = NULL;
         return -1;
     }
+#ifdef COLI_V4_CUDA
+    if (v4_cuda_free_bytes()) {
+        (*output)->kv_device = v4_cuda_kv_alloc(
+            (size_t)config->sliding_window * row_bytes);
+        if (!(*output)->kv_device)
+            v4_attention_cuda_disable(*output, "window-KV-allocation-failed");
+    }
+#endif
     return 0;
 }
 
@@ -1509,6 +1564,10 @@ void coli_v4_window_attention_reset(ColiDeepSeekV4WindowAttentionState *state) {
 
 void coli_v4_window_attention_destroy(ColiDeepSeekV4WindowAttentionState *state) {
     if (!state) return;
+#ifdef COLI_V4_CUDA
+    v4_cuda_kv_free(state->compressed_device);
+    v4_cuda_kv_free(state->kv_device);
+#endif
     coli_v4_indexer_destroy(state->indexer);
     coli_v4_compressor_destroy(state->compressor);
     free(state->compressor_scratch);
@@ -1535,6 +1594,15 @@ static int prepare_compressed_state(
                 &state->indexer, weights, config, config->max_position_embeddings,
                 state->index_codec,
                 error, error_size)) return -1;
+#ifdef COLI_V4_CUDA
+        if (state->kv_device) {
+            state->compressed_device = v4_cuda_kv_alloc(
+                (size_t)state->compressed_capacity * state->row_bytes);
+            if (!state->compressed_device)
+                v4_attention_cuda_disable(
+                    state, "compressed-KV-allocation-failed");
+        }
+#endif
     } else if (state->layer != weights->plan.layer || state->ratio != ratio) {
         return set_error(error, error_size, "attention state belongs to another layer");
     }
@@ -1553,6 +1621,9 @@ static int grow_compressed_state(ColiDeepSeekV4WindowAttentionState *state,
     if (!grown) return set_error(error, error_size, "cannot grow compressed KV cache");
     state->compressed = grown;
     state->compressed_capacity = capacity;
+#ifdef COLI_V4_CUDA
+    v4_attention_cuda_grow_compressed(state, capacity);
+#endif
     return 0;
 }
 
@@ -1680,6 +1751,12 @@ static int attention_token_impl(float *output,
             (unsigned char *)state->compressed +
                 (size_t)state->compressed_count * state->row_bytes,
             state->compressor_scratch, error, error_size);
+#ifdef COLI_V4_CUDA
+        if (!result && produced) v4_attention_cuda_write(
+            state, state->compressed_device, state->compressed_count,
+            (unsigned char *)state->compressed +
+                (size_t)state->compressed_count * state->row_bytes);
+#endif
         if (!result && produced) state->compressed_count++;
         if (!result && state->indexer) {
             compressed_indices = malloc((size_t)config->index_topk *
@@ -1755,6 +1832,11 @@ static int attention_token_impl(float *output,
             state,
             (unsigned char *)state->kv + (size_t)slot * state->row_bytes,
             kv, error, error_size);
+#ifdef COLI_V4_CUDA
+        if (!result) v4_attention_cuda_write(
+            state, state->kv_device, slot,
+            (unsigned char *)state->kv + (size_t)slot * state->row_bytes);
+#endif
         if (!state->indexer) compressed_selected = state->compressed_count;
         int *window_indices = malloc((size_t)state->window_size *
                                      sizeof(*window_indices));
@@ -1864,6 +1946,9 @@ int coli_v4_attention_window_token_ref(
 #include "deepseek_v4_internal.h"
 #include "deepseek_v4_internal.h"
 #include "native_quant.h"
+#ifdef COLI_V4_CUDA
+#include "backend_cuda_v4.h"
+#endif
 
 static int set_error(char *error, size_t size, const char *format, ...);
 
@@ -1880,10 +1965,54 @@ struct ColiDeepSeekV4WindowAttentionState {
     ColiDeepSeekV4CompressorState *compressor;
     ColiDeepSeekV4Indexer *indexer;
     void *compressed;
+#ifdef COLI_V4_CUDA
+    void *kv_device;
+    void *compressed_device;
+    int cuda_failed;
+#endif
     float *compressor_scratch;
     int compressed_count;
     int compressed_capacity;
 };
+
+#ifdef COLI_V4_CUDA
+static int v4_attention_cuda_warning_emitted;
+
+static void v4_attention_cuda_disable(
+    ColiDeepSeekV4WindowAttentionState *state, const char *reason) {
+    v4_cuda_kv_free(state->compressed_device);
+    v4_cuda_kv_free(state->kv_device);
+    state->compressed_device = NULL;
+    state->kv_device = NULL;
+    state->cuda_failed = 1;
+    if (!v4_attention_cuda_warning_emitted) {
+        fprintf(stderr, "v4_cuda warning=%s; continuing-on-cpu\n", reason);
+        v4_attention_cuda_warning_emitted = 1;
+    }
+}
+
+static void v4_attention_cuda_write(
+    ColiDeepSeekV4WindowAttentionState *state, void *device,
+    int slot, const void *row) {
+    if (device && v4_cuda_kv_write_row(device, slot, row, state->row_bytes))
+        v4_attention_cuda_disable(state, "KV-upload-failed");
+}
+
+static void v4_attention_cuda_grow_compressed(
+    ColiDeepSeekV4WindowAttentionState *state, int capacity) {
+    if (!state->compressed_device) return;
+    void *grown = v4_cuda_kv_alloc((size_t)capacity * state->row_bytes);
+    if (!grown || (state->compressed_count && v4_cuda_kv_write_row(
+            grown, 0, state->compressed,
+            (size_t)state->compressed_count * state->row_bytes))) {
+        v4_cuda_kv_free(grown);
+        v4_attention_cuda_disable(state, "KV-grow-failed");
+        return;
+    }
+    v4_cuda_kv_free(state->compressed_device);
+    state->compressed_device = grown;
+}
+#endif
 
 int coli_v4_window_attention_create(ColiDeepSeekV4WindowAttentionState **output,
                                     const ColiDeepSeekV4Config *config,
@@ -1915,6 +2044,14 @@ int coli_v4_window_attention_create(ColiDeepSeekV4WindowAttentionState **output,
         *output = NULL;
         return -1;
     }
+#ifdef COLI_V4_CUDA
+    if (v4_cuda_free_bytes()) {
+        (*output)->kv_device = v4_cuda_kv_alloc(
+            (size_t)config->sliding_window * row_bytes);
+        if (!(*output)->kv_device)
+            v4_attention_cuda_disable(*output, "window-KV-allocation-failed");
+    }
+#endif
     return 0;
 }
 
@@ -1929,6 +2066,10 @@ void coli_v4_window_attention_reset(ColiDeepSeekV4WindowAttentionState *state) {
 
 void coli_v4_window_attention_destroy(ColiDeepSeekV4WindowAttentionState *state) {
     if (!state) return;
+#ifdef COLI_V4_CUDA
+    v4_cuda_kv_free(state->compressed_device);
+    v4_cuda_kv_free(state->kv_device);
+#endif
     coli_v4_indexer_destroy(state->indexer);
     coli_v4_compressor_destroy(state->compressor);
     free(state->compressor_scratch);
@@ -1955,6 +2096,15 @@ static int prepare_compressed_state(
                 &state->indexer, weights, config, config->max_position_embeddings,
                 state->index_codec,
                 error, error_size)) return -1;
+#ifdef COLI_V4_CUDA
+        if (state->kv_device) {
+            state->compressed_device = v4_cuda_kv_alloc(
+                (size_t)state->compressed_capacity * state->row_bytes);
+            if (!state->compressed_device)
+                v4_attention_cuda_disable(
+                    state, "compressed-KV-allocation-failed");
+        }
+#endif
     } else if (state->layer != weights->plan.layer || state->ratio != ratio) {
         return set_error(error, error_size, "attention state belongs to another layer");
     }
@@ -1973,6 +2123,9 @@ static int grow_compressed_state(ColiDeepSeekV4WindowAttentionState *state,
     if (!grown) return set_error(error, error_size, "cannot grow compressed KV cache");
     state->compressed = grown;
     state->compressed_capacity = capacity;
+#ifdef COLI_V4_CUDA
+    v4_attention_cuda_grow_compressed(state, capacity);
+#endif
     return 0;
 }
 
@@ -2100,6 +2253,12 @@ static int attention_token_impl(float *output,
             (unsigned char *)state->compressed +
                 (size_t)state->compressed_count * state->row_bytes,
             state->compressor_scratch, error, error_size);
+#ifdef COLI_V4_CUDA
+        if (!result && produced) v4_attention_cuda_write(
+            state, state->compressed_device, state->compressed_count,
+            (unsigned char *)state->compressed +
+                (size_t)state->compressed_count * state->row_bytes);
+#endif
         if (!result && produced) state->compressed_count++;
         if (!result && state->indexer) {
             compressed_indices = malloc((size_t)config->index_topk *
@@ -2175,6 +2334,11 @@ static int attention_token_impl(float *output,
             state,
             (unsigned char *)state->kv + (size_t)slot * state->row_bytes,
             kv, error, error_size);
+#ifdef COLI_V4_CUDA
+        if (!result) v4_attention_cuda_write(
+            state, state->kv_device, slot,
+            (unsigned char *)state->kv + (size_t)slot * state->row_bytes);
+#endif
         if (!state->indexer) compressed_selected = state->compressed_count;
         int *window_indices = malloc((size_t)state->window_size *
                                      sizeof(*window_indices));
@@ -2345,6 +2509,12 @@ int coli_v4_attention_window_batch_ref(
                 (unsigned char *)state->compressed +
                     (size_t)state->compressed_count * state->row_bytes,
                 state->compressor_scratch, error, error_size);
+#ifdef COLI_V4_CUDA
+            if (!result && produced) v4_attention_cuda_write(
+                state, state->compressed_device, state->compressed_count,
+                (unsigned char *)state->compressed +
+                    (size_t)state->compressed_count * state->row_bytes);
+#endif
             if (!result && produced) state->compressed_count++;
             if (!result && state->indexer) {
                 selected_counts[item] = coli_v4_indexer_step(
@@ -2427,6 +2597,11 @@ int coli_v4_attention_window_batch_ref(
             state,
             (unsigned char *)state->kv + (size_t)slot * state->row_bytes,
             item_kv, error, error_size);
+#ifdef COLI_V4_CUDA
+        if (!result) v4_attention_cuda_write(
+            state, state->kv_device, slot,
+            (unsigned char *)state->kv + (size_t)slot * state->row_bytes);
+#endif
         int selected = selected_counts[item];
         int *window_indices = malloc((size_t)state->window_size *
                                      sizeof(*window_indices));
@@ -5011,6 +5186,9 @@ int coli_v4_test_indexer_snapshot_rejections(void) {
 #include "deepseek_v4_internal.h"
 #include "deepseek_v4_internal.h"
 #include "native_quant.h"
+#ifdef COLI_V4_CUDA
+#include "backend_cuda_v4.h"
+#endif
 
 static int set_error(char *error, size_t size, const char *format, ...);
 
@@ -5027,10 +5205,54 @@ struct ColiDeepSeekV4WindowAttentionState {
     ColiDeepSeekV4CompressorState *compressor;
     ColiDeepSeekV4Indexer *indexer;
     void *compressed;
+#ifdef COLI_V4_CUDA
+    void *kv_device;
+    void *compressed_device;
+    int cuda_failed;
+#endif
     float *compressor_scratch;
     int compressed_count;
     int compressed_capacity;
 };
+
+#ifdef COLI_V4_CUDA
+static int v4_attention_cuda_warning_emitted;
+
+static void v4_attention_cuda_disable(
+    ColiDeepSeekV4WindowAttentionState *state, const char *reason) {
+    v4_cuda_kv_free(state->compressed_device);
+    v4_cuda_kv_free(state->kv_device);
+    state->compressed_device = NULL;
+    state->kv_device = NULL;
+    state->cuda_failed = 1;
+    if (!v4_attention_cuda_warning_emitted) {
+        fprintf(stderr, "v4_cuda warning=%s; continuing-on-cpu\n", reason);
+        v4_attention_cuda_warning_emitted = 1;
+    }
+}
+
+static void v4_attention_cuda_write(
+    ColiDeepSeekV4WindowAttentionState *state, void *device,
+    int slot, const void *row) {
+    if (device && v4_cuda_kv_write_row(device, slot, row, state->row_bytes))
+        v4_attention_cuda_disable(state, "KV-upload-failed");
+}
+
+static void v4_attention_cuda_grow_compressed(
+    ColiDeepSeekV4WindowAttentionState *state, int capacity) {
+    if (!state->compressed_device) return;
+    void *grown = v4_cuda_kv_alloc((size_t)capacity * state->row_bytes);
+    if (!grown || (state->compressed_count && v4_cuda_kv_write_row(
+            grown, 0, state->compressed,
+            (size_t)state->compressed_count * state->row_bytes))) {
+        v4_cuda_kv_free(grown);
+        v4_attention_cuda_disable(state, "KV-grow-failed");
+        return;
+    }
+    v4_cuda_kv_free(state->compressed_device);
+    state->compressed_device = grown;
+}
+#endif
 
 int coli_v4_window_attention_create(ColiDeepSeekV4WindowAttentionState **output,
                                     const ColiDeepSeekV4Config *config,
@@ -5062,6 +5284,14 @@ int coli_v4_window_attention_create(ColiDeepSeekV4WindowAttentionState **output,
         *output = NULL;
         return -1;
     }
+#ifdef COLI_V4_CUDA
+    if (v4_cuda_free_bytes()) {
+        (*output)->kv_device = v4_cuda_kv_alloc(
+            (size_t)config->sliding_window * row_bytes);
+        if (!(*output)->kv_device)
+            v4_attention_cuda_disable(*output, "window-KV-allocation-failed");
+    }
+#endif
     return 0;
 }
 
@@ -5076,6 +5306,10 @@ void coli_v4_window_attention_reset(ColiDeepSeekV4WindowAttentionState *state) {
 
 void coli_v4_window_attention_destroy(ColiDeepSeekV4WindowAttentionState *state) {
     if (!state) return;
+#ifdef COLI_V4_CUDA
+    v4_cuda_kv_free(state->compressed_device);
+    v4_cuda_kv_free(state->kv_device);
+#endif
     coli_v4_indexer_destroy(state->indexer);
     coli_v4_compressor_destroy(state->compressor);
     free(state->compressor_scratch);
@@ -5102,6 +5336,15 @@ static int prepare_compressed_state(
                 &state->indexer, weights, config, config->max_position_embeddings,
                 state->index_codec,
                 error, error_size)) return -1;
+#ifdef COLI_V4_CUDA
+        if (state->kv_device) {
+            state->compressed_device = v4_cuda_kv_alloc(
+                (size_t)state->compressed_capacity * state->row_bytes);
+            if (!state->compressed_device)
+                v4_attention_cuda_disable(
+                    state, "compressed-KV-allocation-failed");
+        }
+#endif
     } else if (state->layer != weights->plan.layer || state->ratio != ratio) {
         return set_error(error, error_size, "attention state belongs to another layer");
     }
@@ -5120,6 +5363,9 @@ static int grow_compressed_state(ColiDeepSeekV4WindowAttentionState *state,
     if (!grown) return set_error(error, error_size, "cannot grow compressed KV cache");
     state->compressed = grown;
     state->compressed_capacity = capacity;
+#ifdef COLI_V4_CUDA
+    v4_attention_cuda_grow_compressed(state, capacity);
+#endif
     return 0;
 }
 
@@ -5247,6 +5493,12 @@ static int attention_token_impl(float *output,
             (unsigned char *)state->compressed +
                 (size_t)state->compressed_count * state->row_bytes,
             state->compressor_scratch, error, error_size);
+#ifdef COLI_V4_CUDA
+        if (!result && produced) v4_attention_cuda_write(
+            state, state->compressed_device, state->compressed_count,
+            (unsigned char *)state->compressed +
+                (size_t)state->compressed_count * state->row_bytes);
+#endif
         if (!result && produced) state->compressed_count++;
         if (!result && state->indexer) {
             compressed_indices = malloc((size_t)config->index_topk *
@@ -5322,6 +5574,11 @@ static int attention_token_impl(float *output,
             state,
             (unsigned char *)state->kv + (size_t)slot * state->row_bytes,
             kv, error, error_size);
+#ifdef COLI_V4_CUDA
+        if (!result) v4_attention_cuda_write(
+            state, state->kv_device, slot,
+            (unsigned char *)state->kv + (size_t)slot * state->row_bytes);
+#endif
         if (!state->indexer) compressed_selected = state->compressed_count;
         int *window_indices = malloc((size_t)state->window_size *
                                      sizeof(*window_indices));
@@ -5477,6 +5734,18 @@ int coli_v4_attention_snapshot_restore(
     if (snapshot->compressed_count)
         memcpy(state->compressed, snapshot->compressed,
                (size_t)snapshot->compressed_count * state->row_bytes);
+#ifdef COLI_V4_CUDA
+    for (int slot = 0; state->kv_device && slot < state->window_size; slot++)
+        v4_attention_cuda_write(
+            state, state->kv_device, slot,
+            (unsigned char *)state->kv + (size_t)slot * state->row_bytes);
+    for (int slot = 0; state->compressed_device &&
+                       slot < state->compressed_count; slot++)
+        v4_attention_cuda_write(
+            state, state->compressed_device, slot,
+            (unsigned char *)state->compressed +
+                (size_t)slot * state->row_bytes);
+#endif
     if ((state->compressor != NULL) != (snapshot->compressor != NULL) ||
         (state->indexer != NULL) != (snapshot->indexer != NULL)) return -1;
     if (state->compressor && coli_v4_compressor_snapshot_restore(
@@ -6813,6 +7082,10 @@ int coli_v4_route_bf16(float *weights, int *indices, const float *hidden,
 #include <stdlib.h>
 #include <string.h>
 
+#ifdef COLI_V4_CUDA
+#include "backend_cuda_v4.h"
+#endif
+
 /* Provided by LAYER_RESIDENT. */
 void coli_v4_layer_resident_reference_free(ColiV4Engine *engine,
                                            ColiDeepSeekV4LayerWeights *weights);
@@ -6834,6 +7107,11 @@ void coli_v4_engine_detach_session(ColiV4Engine *engine) {
 }
 
 int coli_v4_full_dspark_wanted;
+
+static int v4_vram_requested(void) {
+    const char *setting = getenv("V4_VRAM");
+    return setting && strcmp(setting, "1") == 0;
+}
 
 double coli_v4_dspark_cache_gb(void) {
     const char *setting = getenv("V4_MTP_GB");
@@ -7025,6 +7303,12 @@ void coli_v4_engine_destroy(ColiV4Engine *engine) {
     engine->runtime.target_model_dir = NULL;
     free(engine->owned_target_model_dir);
     engine->owned_target_model_dir = NULL;
+#ifdef COLI_V4_CUDA
+    if (engine->runtime.vram_enabled) {
+        v4_cuda_shutdown();
+        engine->runtime.vram_enabled = 0;
+    }
+#endif
     free(engine);
 }
 
@@ -7067,6 +7351,21 @@ int coli_v4_engine_open(ColiV4Engine **output,
     engine->runtime.index_codec = coli_v4_kv_codec_from_env(
         "V4_KV_INDEX", COLI_V4_KV_INDEX, engine->config.index_head_dim,
         0, COLI_V4_KV_NATIVE);
+#ifdef COLI_V4_CUDA
+    if (v4_vram_requested()) {
+        if (!v4_cuda_init(0)) {
+            engine->runtime.vram_enabled = 1;
+            fprintf(stderr, "v4_cuda mode=kv-attention device=0\n");
+        } else {
+            fprintf(stderr,
+                    "v4_cuda warning=initialization-failed; continuing-on-cpu\n");
+        }
+    }
+#else
+    if (v4_vram_requested())
+        fprintf(stderr,
+                "v4_cuda warning=CUDA-build-required; continuing-on-cpu\n");
+#endif
     if (engine->runtime.context_tokens > engine->config.max_position_embeddings)
         engine->runtime.context_tokens = engine->config.max_position_embeddings;
     fprintf(stderr,
