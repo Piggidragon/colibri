@@ -374,7 +374,9 @@ int coli_v4_attention_snapshot_restore(
     const ColiV4AttentionSnapshot *snapshot);
 void coli_v4_attention_snapshot_destroy(ColiV4AttentionSnapshot *snapshot);
 #ifdef COLI_V4_TEST_HOOKS
+int coli_v4_test_attention_encode_rejection_error(void);
 int coli_v4_test_attention_snapshot_roundtrip(ColiV4KVCodec codec);
+int coli_v4_test_indexer_snapshot_rejections(void);
 #endif
 /* ==== end deepseek_v4_attention_transaction.h ==== */
 

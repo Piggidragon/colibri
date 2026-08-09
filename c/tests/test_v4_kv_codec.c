@@ -49,7 +49,9 @@ static int check_native_row(ColiV4KVStream stream, float *legacy,
         COLI_V4_KV_NATIVE, stream, dimension, rope_dim);
     unsigned char *encoded = malloc(bytes);
     float *decoded = malloc((size_t)dimension * sizeof(*decoded));
-    if (!encoded || !decoded) return 1;
+    if (!encoded || !decoded) {
+        free(decoded); free(encoded); return 1;
+    }
     int failed = coli_v4_kv_encode_row(
         COLI_V4_KV_NATIVE, stream, encoded, legacy, dimension, rope_dim);
     if (failed) fprintf(stderr, "encode failed stream=%d\n", stream);
@@ -84,6 +86,24 @@ static int test_native_main(void) {
     coli_bf16_round_array(legacy, NOPE);
     memset(legacy + NOPE, 0, ROPE * sizeof(*legacy));
     return check_native_row(COLI_V4_KV_MAIN, legacy, DIMENSION, ROPE);
+}
+
+static int test_native_main_rope_edges(void) {
+    enum { DIMENSION = 64 };
+    float raw[DIMENSION], legacy[DIMENSION];
+    uint8_t scales[1];
+    for (int i = 0; i < DIMENSION; i++)
+        raw[i] = (float)((i * 17) % 61 - 30) / 5.0f;
+
+    memcpy(legacy, raw, sizeof(legacy));
+    coli_bf16_round_array(legacy, DIMENSION);
+    if (check_native_row(
+            COLI_V4_KV_MAIN, legacy, DIMENSION, DIMENSION)) return 1;
+
+    if (coli_fp8_activation_qdq_ref(
+            legacy, scales, raw, DIMENSION, DIMENSION)) return 1;
+    coli_bf16_round_array(legacy, DIMENSION);
+    return check_native_row(COLI_V4_KV_MAIN, legacy, DIMENSION, 0);
 }
 
 static int test_native_index(void) {
@@ -180,6 +200,9 @@ int main(void) {
     if (test_row_sizes()) { fprintf(stderr, "row sizes failed\n"); return 1; }
     if (test_f32_roundtrip()) { fprintf(stderr, "f32 failed\n"); return 1; }
     if (test_native_main()) { fprintf(stderr, "native main failed\n"); return 1; }
+    if (test_native_main_rope_edges()) {
+        fprintf(stderr, "native main RoPE edges failed\n"); return 1;
+    }
     if (test_native_index()) { fprintf(stderr, "native index failed\n"); return 1; }
     if (test_native_rejection_and_signed_zero()) {
         fprintf(stderr, "native rejection/signed zero failed\n"); return 1;

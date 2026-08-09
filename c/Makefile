@@ -871,6 +871,9 @@ tests/test_v4_context_bytes$(EXE): tests/test_v4_context_bytes.c deepseek_v4.c v
 		deepseek_v4.c $< -o $@ $(LDFLAGS)
 
 V4_KV_SNAPSHOT_DIR = build/kv_snapshot
+# attention.o contains the full attention transaction unit.  This isolated
+# snapshot test intentionally relies on function/data sections plus the linker
+# GC flag below to discard unrelated engine references; keep both in sync.
 V4_KV_SNAPSHOT_CFLAGS = $(CFLAGS) -ffunction-sections -fdata-sections \
 	-DCOLI_V4_TEST_HOOKS
 ifneq (,$(DARWIN))
@@ -886,6 +889,10 @@ $(V4_KV_SNAPSHOT_DIR)/attention.o: deepseek_v4.c deepseek_v4_internal.h v4_kv_co
 	$(CC) $(V4_KV_SNAPSHOT_CFLAGS) -DCOLI_V4_UNIT_ATTENTION_TRANSACTION \
 		-c deepseek_v4.c -o $@
 
+$(V4_KV_SNAPSHOT_DIR)/indexer_snapshot.o: deepseek_v4.c deepseek_v4_internal.h v4_kv_codec.h | $(V4_KV_SNAPSHOT_DIR)
+	$(CC) $(V4_KV_SNAPSHOT_CFLAGS) -DCOLI_V4_UNIT_INDEXER_SNAPSHOT \
+		-c deepseek_v4.c -o $@
+
 $(V4_KV_SNAPSHOT_DIR)/codec.o: deepseek_v4.c v4_kv_codec.h native_quant.h | $(V4_KV_SNAPSHOT_DIR)
 	$(CC) $(V4_KV_SNAPSHOT_CFLAGS) -DCOLI_V4_UNIT_KV_CODEC \
 		-c deepseek_v4.c -o $@
@@ -896,6 +903,7 @@ $(V4_KV_SNAPSHOT_DIR)/quant.o: deepseek_v4.c native_quant.h | $(V4_KV_SNAPSHOT_D
 
 tests/test_v4_kv_snapshot$(EXE): tests/test_v4_kv_snapshot.c \
 	$(V4_KV_SNAPSHOT_DIR)/attention.o $(V4_KV_SNAPSHOT_DIR)/codec.o \
+	$(V4_KV_SNAPSHOT_DIR)/indexer_snapshot.o \
 	$(V4_KV_SNAPSHOT_DIR)/quant.o
 	$(CC) $(V4_KV_SNAPSHOT_CFLAGS) $^ -o $@ $(LDFLAGS) \
 		$(V4_KV_SNAPSHOT_GC_LDFLAG)

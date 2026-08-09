@@ -218,19 +218,29 @@ static int test_native_codec_equivalence(void) {
     uint8_t scales[(NOPE + 63) / 64];
     int window_indices[WINDOW], compressed_indices[COMPRESSED];
     float sinks[HEADS];
-    if (!legacy || !queries || !reference || !native || !encoded) return 1;
+    int failed = 0;
+    if (!legacy || !queries || !reference || !native || !encoded) {
+        failed = 1;
+        goto cleanup;
+    }
     for (int row = 0; row < ROWS; row++) {
         float *values = legacy + (size_t)row * HEAD_DIM;
         for (int i = 0; i < HEAD_DIM; i++) values[i] = random_float();
         float qdq[NOPE];
-        if (coli_fp8_activation_qdq_ref(qdq, scales, values, NOPE, 64)) return 1;
+        if (coli_fp8_activation_qdq_ref(qdq, scales, values, NOPE, 64)) {
+            failed = 1;
+            goto cleanup;
+        }
         memcpy(values, qdq, sizeof(qdq));
         coli_bf16_round_array(values, NOPE);
         coli_bf16_round_array(values + NOPE, ROPE);
         if (coli_v4_kv_encode_row(
                 COLI_V4_KV_NATIVE, COLI_V4_KV_MAIN,
                 encoded + (size_t)row * native_row,
-                values, HEAD_DIM, ROPE)) return 1;
+                values, HEAD_DIM, ROPE)) {
+            failed = 1;
+            goto cleanup;
+        }
     }
     for (size_t i = 0; i < (size_t)HEADS * HEAD_DIM; i++)
         queries[i] = random_float();
@@ -238,7 +248,6 @@ static int test_native_codec_equivalence(void) {
     for (int i = 0; i < COMPRESSED; i++) compressed_indices[i] = i;
     for (int i = 0; i < HEADS; i++) sinks[i] = random_float();
     float scale = 1.0f / sqrtf((float)HEAD_DIM);
-    int failed = 0;
     for (int flash = 0; flash <= 1 && !failed; flash++) {
         set_flash(flash ? "1" : "0");
         failed = coli_v4_attention_two_source_codec_ref(
@@ -257,6 +266,7 @@ static int test_native_codec_equivalence(void) {
             failed = 1;
         }
     }
+cleanup:
     free(encoded); free(native); free(reference); free(queries); free(legacy);
     return failed;
 }
@@ -283,24 +293,30 @@ static int benchmark_long_context(void) {
     int *window_indices = malloc(WINDOW * sizeof(*window_indices));
     int *compressed_indices = malloc(HCA_SELECTED * sizeof(*compressed_indices));
     float sinks[HEADS];
+    int failed = 0;
     if (!values || !staged || !encoded || !queries || !output || !indices ||
         !window_indices || !compressed_indices) {
-        free(compressed_indices); free(window_indices); free(indices);
-        free(output); free(queries); free(encoded); free(staged); free(values);
-        return 1;
+        failed = 1;
+        goto cleanup;
     }
     float qdq[NOPE];
     uint8_t scales[(NOPE + 63) / 64];
     for (size_t row = 0; row < rows; row++) {
         float *value = values + row * HEAD_DIM;
         for (int i = 0; i < HEAD_DIM; i++) value[i] = random_float();
-        if (coli_fp8_activation_qdq_ref(qdq, scales, value, NOPE, 64)) return 1;
+        if (coli_fp8_activation_qdq_ref(qdq, scales, value, NOPE, 64)) {
+            failed = 1;
+            goto cleanup;
+        }
         memcpy(value, qdq, sizeof(qdq));
         coli_bf16_round_array(value, NOPE);
         coli_bf16_round_array(value + NOPE, ROPE);
         if (coli_v4_kv_encode_row(
                 COLI_V4_KV_NATIVE, COLI_V4_KV_MAIN,
-                encoded + row * native_row, value, HEAD_DIM, ROPE)) return 1;
+                encoded + row * native_row, value, HEAD_DIM, ROPE)) {
+            failed = 1;
+            goto cleanup;
+        }
     }
     for (size_t i = 0; i < (size_t)HEADS * HEAD_DIM; i++)
         queries[i] = random_float();
@@ -316,7 +332,10 @@ static int benchmark_long_context(void) {
         memcpy(staged, values, rows * HEAD_DIM * sizeof(*staged));
         if (coli_v4_sparse_attention_ref(output, queries, staged, sinks, indices,
                                          HEADS, HEAD_DIM, (int)rows,
-                                         WINDOW + SELECTED, scale)) return 1;
+                                         WINDOW + SELECTED, scale)) {
+            failed = 1;
+            goto cleanup;
+        }
     }
     double legacy = monotonic_seconds() - start;
     start = monotonic_seconds();
@@ -325,7 +344,10 @@ static int benchmark_long_context(void) {
                 output, queries, values, WINDOW,
                 values + (size_t)WINDOW * HEAD_DIM,
                 COMPRESSED, window_indices, compressed_indices, SELECTED,
-                sinks, HEADS, HEAD_DIM, scale)) return 1;
+                sinks, HEADS, HEAD_DIM, scale)) {
+            failed = 1;
+            goto cleanup;
+        }
     double flash = monotonic_seconds() - start;
     start = monotonic_seconds();
     for (int repeat = 0; repeat < REPEATS; repeat++)
@@ -334,7 +356,10 @@ static int benchmark_long_context(void) {
                 encoded + (size_t)WINDOW * native_row,
                 COMPRESSED, window_indices, compressed_indices, SELECTED,
                 COLI_V4_KV_NATIVE, ROPE,
-                sinks, HEADS, HEAD_DIM, scale)) return 1;
+                sinks, HEADS, HEAD_DIM, scale)) {
+            failed = 1;
+            goto cleanup;
+        }
     double native = monotonic_seconds() - start;
     double legacy_ms = legacy * 1000.0 / REPEATS;
     double flash_ms = flash * 1000.0 / REPEATS;
@@ -352,7 +377,10 @@ static int benchmark_long_context(void) {
                 values + (size_t)WINDOW * HEAD_DIM,
                 HCA_SELECTED, window_indices, compressed_indices, HCA_SELECTED,
                 COLI_V4_KV_F32, ROPE,
-                sinks, HEADS, HEAD_DIM, scale)) return 1;
+                sinks, HEADS, HEAD_DIM, scale)) {
+            failed = 1;
+            goto cleanup;
+        }
     double hca_f32 = monotonic_seconds() - start;
     start = monotonic_seconds();
     for (int repeat = 0; repeat < REPEATS; repeat++)
@@ -361,7 +389,10 @@ static int benchmark_long_context(void) {
                 encoded + (size_t)WINDOW * native_row,
                 HCA_SELECTED, window_indices, compressed_indices, HCA_SELECTED,
                 COLI_V4_KV_NATIVE, ROPE,
-                sinks, HEADS, HEAD_DIM, scale)) return 1;
+                sinks, HEADS, HEAD_DIM, scale)) {
+            failed = 1;
+            goto cleanup;
+        }
     double hca_native = monotonic_seconds() - start;
     double hca_f32_ms = hca_f32 * 1000.0 / REPEATS;
     double hca_native_ms = hca_native * 1000.0 / REPEATS;
@@ -369,9 +400,10 @@ static int benchmark_long_context(void) {
            "20-layer contribution %.3f -> %.3f ms/token\n",
            hca_f32_ms, hca_native_ms, hca_native / hca_f32,
            hca_f32_ms * 20.0, hca_native_ms * 20.0);
+cleanup:
     free(compressed_indices); free(window_indices); free(indices);
     free(output); free(queries); free(encoded); free(staged); free(values);
-    return 0;
+    return failed;
 }
 
 static int benchmark_indexer_scan(void) {
@@ -382,8 +414,10 @@ static int benchmark_indexer_scan(void) {
     unsigned char *encoded = malloc((size_t)CANDIDATES * native_row);
     float *queries = malloc((size_t)HEADS * DIMENSION * sizeof(*queries));
     float *weights = malloc((size_t)HEADS * sizeof(*weights));
+    int failed = 0;
     if (!values || !encoded || !queries || !weights) {
-        free(weights); free(queries); free(encoded); free(values); return 1;
+        failed = 1;
+        goto cleanup;
     }
     float raw[DIMENSION], qdq[DIMENSION];
     uint8_t scales[(DIMENSION + 31) / 32];
@@ -391,13 +425,19 @@ static int benchmark_indexer_scan(void) {
         float *row = values + (size_t)candidate * DIMENSION;
         for (int i = 0; i < DIMENSION; i++) raw[i] = random_float();
         if (coli_fp4_activation_qdq_ref(
-                qdq, scales, raw, DIMENSION, 32)) return 1;
+                qdq, scales, raw, DIMENSION, 32)) {
+            failed = 1;
+            goto cleanup;
+        }
         memcpy(row, qdq, sizeof(qdq));
         coli_bf16_round_array(row, DIMENSION);
         if (coli_v4_kv_encode_row(
                 COLI_V4_KV_NATIVE, COLI_V4_KV_INDEX,
                 encoded + (size_t)candidate * native_row,
-                row, DIMENSION, 0)) return 1;
+                row, DIMENSION, 0)) {
+            failed = 1;
+            goto cleanup;
+        }
     }
     for (size_t i = 0; i < (size_t)HEADS * DIMENSION; i++)
         queries[i] = random_float();
@@ -424,7 +464,10 @@ static int benchmark_indexer_scan(void) {
             if (coli_v4_kv_decode_row(
                     COLI_V4_KV_NATIVE, COLI_V4_KV_INDEX, decoded,
                     encoded + (size_t)candidate * native_row,
-                    DIMENSION, 0)) return 1;
+                    DIMENSION, 0)) {
+                failed = 1;
+                goto cleanup;
+            }
             float score = 0.0f;
             for (int head = 0; head < HEADS; head++) {
                 const float *query = queries + (size_t)head * DIMENSION;
@@ -440,8 +483,9 @@ static int benchmark_indexer_scan(void) {
            "(checksum=%g)\n",
            f32 * 1000.0 / REPEATS, native * 1000.0 / REPEATS,
            native / f32, checksum);
+cleanup:
     free(weights); free(queries); free(encoded); free(values);
-    return 0;
+    return failed;
 }
 
 int main(int argc, char **argv) {

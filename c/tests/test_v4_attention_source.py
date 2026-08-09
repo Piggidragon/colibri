@@ -110,7 +110,7 @@ class DeepSeekV4AmalgamSourceTest(unittest.TestCase):
     def test_attention_encode_failures_set_an_error(self):
         helpers = definitions(ENGINE, "static int encode_attention_kv_row(")
         self.assert_copies(helpers, 3, "attention KV encode helper")
-        self.assertIn("cannot encode %s attention KV row", helpers[0])
+        self.assertIn('"cannot encode KV row"', helpers[0])
 
     def test_compressor_copies_stay_identical(self):
         copies = regions(

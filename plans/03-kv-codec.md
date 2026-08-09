@@ -47,6 +47,11 @@ Fehlermeldung. Der Indexer-Scan dekodiert in einen schleifenlokalen Puffer statt
 in `compressor_scratch`, sodass eine spätere Parallelisierung keine gemeinsam
 beschriebene Scratch-Fläche vorfindet.
 
+Die für vorzeichenbehaftete Null nötige Änderung an `coli_e2m1_decode(8)` wirkt
+nicht nur im KV-Codec: Der Decoder gehört zu `native_quant` und wird auch vom
+allgemeinen FP4-Gewichtspfad verwendet. Numerische Akkumulationen bleiben davon
+unverändert; `signbit`- und bitweise Vergleiche können den Unterschied sehen.
+
 Die Planner-Messung mit der Paper-Geometrie bei 128k ergibt
 **1,690 GiB f32 → 0,431 GiB native**, also **1,259 GiB** zusätzliche
 Planner-Reserve. Der Test berechnet dieselben Bytes unabhängig aus Zeilenzahlen

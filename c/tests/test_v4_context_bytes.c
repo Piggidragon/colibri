@@ -31,9 +31,38 @@ int main(void) {
     }
     int no_compression = 0;
     if (coli_v4_kv_context_bytes(
+            0, 1, 1, 0, 1, &no_compression, 1,
+            COLI_V4_KV_F32, COLI_V4_KV_F32) != UINT64_MAX ||
+        coli_v4_kv_context_bytes(
+            1, 0, 1, 0, 1, &no_compression, 1,
+            COLI_V4_KV_F32, COLI_V4_KV_F32) != UINT64_MAX ||
+        coli_v4_kv_context_bytes(
+            1, 1, 1, 0, 1, NULL, 1,
+            COLI_V4_KV_F32, COLI_V4_KV_F32) != UINT64_MAX ||
+        coli_v4_kv_context_bytes(
+            1, 1, 1, 0, 1, &no_compression, 0,
+            COLI_V4_KV_F32, COLI_V4_KV_F32) != UINT64_MAX) {
+        fprintf(stderr, "V4 invalid context byte arguments were not rejected\n");
+        return 1;
+    }
+    if (coli_v4_kv_context_bytes(
             INT_MAX, INT_MAX, INT_MAX, 0, 1, &no_compression, 1,
             COLI_V4_KV_F32, COLI_V4_KV_F32) != UINT64_MAX) {
         fprintf(stderr, "V4 sliding-window byte overflow was not rejected\n");
+        return 1;
+    }
+    int ratio = 1;
+    if (coli_v4_kv_context_bytes(
+            1, INT_MAX, INT_MAX, 0, 1, &ratio, INT_MAX,
+            COLI_V4_KV_F32, COLI_V4_KV_F32) != UINT64_MAX) {
+        fprintf(stderr, "V4 compressed byte overflow was not rejected\n");
+        return 1;
+    }
+    ratio = 4;
+    if (coli_v4_kv_context_bytes(
+            1, 1200000000, INT_MAX, 0, INT_MAX, &ratio, INT_MAX,
+            COLI_V4_KV_F32, COLI_V4_KV_F32) != UINT64_MAX) {
+        fprintf(stderr, "V4 index byte overflow was not rejected\n");
         return 1;
     }
     printf("V4 KV context 128k: f32=%.3f GiB native=%.3f GiB saved=%.3f GiB\n",
