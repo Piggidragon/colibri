@@ -45,6 +45,59 @@ beschriebene Verhalten:
   und kollidierte unter `make -j` mit dem Sub-Make von `tests/test_deepseek_v4`.
   Eigenes `build/v4-dense-tier/`, Muster `V4_ROWS8_DIR`.
 
+### Nachtrag 2: zweite Review-Runde zu PR #8
+
+Sechs weitere Befunde, alle nachgezogen. Der erste ist der einzige mit
+Laufzeitwirkung auf den Default-Pfad:
+
+- **Der CPU-Pfad hatte die fusionierte Dual-Matvec verloren.**
+  `coli_v4_dense_shared_expert` ersetzte `coli_v4_shared_expert_forward_ref`
+  durch zwei getrennte `coli_v4_dense_matmul`-Aufrufe für `w1` und `w3` — und
+  quantisierte damit dieselbe 4096-Aktivierung zweimal und lief zweimal über sie,
+  statt den `_mm256_set1_ps`-Broadcast pro Spalte zwischen beiden Gewichts-
+  strömen zu teilen. Bit-identisch, aber eine Regression pro Layer und Token
+  ausgerechnet in der Konfiguration, die diese Phase nicht anfassen sollte
+  (`V4_VRAM=0`, ohne CUDA-Build), und die die GPU-Messungen oben nicht abdecken.
+  Die Funktion nimmt jetzt den fusionierten Weg, sobald sich die drei
+  Tensor-Views bauen lassen; genau dann liegen die Host-Buffer noch da. Nur ein
+  Layer, dessen FP8 auf der Karte liegt, splittet in zwei Dispatches.
+- **Der Latch griff auch bei Host-OOM.** `v4_dense_cuda_disable()` feuerte für
+  `!qdq || !scales`, also ein fehlgeschlagenes `malloc` von wenigen KB. Unter
+  `coli serve` mit einem auf die RAM-Decke gespannten Expert-Cache hätte eine
+  einzige vorübergehende Fehlallokation die GPU für die Lebensdauer des Prozesses
+  abgeschaltet — und weil die Host-FP8-Buffer beim Upload freigegeben sind,
+  danach *jede* Projektion *jeder* weiteren Anfrage scheitern lassen. Der Latch
+  gilt jetzt nur noch für eine echte Dispatch-Fehlschlag von
+  `coli_cuda_fp8_matmul_rows`. Die Aussage des ersten Nachtrags bleibt damit
+  gültig; sie war nie auf die Hostallokation gemünzt.
+- **Die Host-Buffer-Freigabe war breiter als der Upload.** Die zweite Schleife in
+  `v4_layer_cuda_upload` gab jeden FP8/E8M0-Tensor frei, die erste lud aber nur
+  `rank == 2` mit unmittelbar folgender Skala hoch. Heute deckt sich beides, weil
+  `coli_v4_layer_plan` FP8 ausschließlich über `add_fp8` ausgibt — der erste
+  rank-1-FP8-Tensor hätte seinen Hostbuffer ohne Device-Kopie und ohne Meldung
+  verloren. Die Freigabe folgt jetzt `device[i] != NULL`, also exakt dem, was der
+  Upload angefasst hat.
+- **`gpu_resident` wurde vor dem `memset` gelesen.** Das Feld war ein
+  Ein-/Ausgabe-Parameter auf einer Ausgabestruktur: ein Aufrufer mit
+  uninitialisiertem `ColiDeepSeekV4LayerWeights` konnte im CUDA-Build durch
+  Zufallsmüll den Upload-und-Host-freigeben-Weg wählen. Die Kopie unter
+  `COLI_V4_UNIT_LAYER` hat keinen Wrapper, der das Feld vorher setzt. Der Loader
+  leitet die Residenz jetzt direkt aus `engine->runtime.dense_location` ab; das
+  Feld ist reine Ausgabe und sagt, wo der Layer wirklich gelandet ist.
+- **Der Scale-Puffer der Aktivierung war eine eigene Allokation**, obwohl der
+  Kernel nur die dequantisierten Floats liest. Er hängt jetzt am selben `malloc`
+  wie `qdq` — eine Allokation statt zwei, ~8× pro Layer und Token.
+- **Sechs Kopien von `static int fp8_view(...)` waren tot** und nur durch
+  `-Wno-unused-function` unsichtbar. Gelöscht. `coli_v4_shared_expert_forward_ref`
+  und `coli_fp8_dual_matvec_ref` sind entgegen dem Review **nicht** tot: der
+  Drafter ruft sie über [`deepseek_v4_dspark.inc:793`](../c/deepseek_v4_dspark.inc),
+  und der wiederhergestellte CPU-Pfad oben ruft sie ebenfalls.
+
+Abnahme dieser Runde: `make -C c test`, `make -C c check` und
+`make -C c deepseek-v4-tiny-check` grün, das Tiny-Fixture tokenidentisch;
+`make -f Makefile.deepseek-v4 CUDA=1 v4-cuda-test` auf der RTX 4070 mit 0
+Abweichungen über alle acht Dense-Formen.
+
 Die Full-Checkpoint-Inventur hat die zentrale Planannahme korrigiert: **6.267 GiB**
 sind das gesamte Dense-Inventar, aber nur **5.456 GiB** davon sind FP8-Gewichte
 und expandierte Scales und können in dieser Phase wandern. **0.810 GiB**

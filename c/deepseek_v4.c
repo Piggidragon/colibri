@@ -539,18 +539,24 @@ static int v4_layer_cuda_upload(ColiDeepSeekV4LayerWeights *weights) {
         }
         weights->device_bytes += coli_cuda_tensor_bytes(weights->device[i]);
     }
+    /* Only the pairs the loop above actually uploaded may lose their host copy.
+     * An FP8 tensor the upload skipped -- rank 1, or a scale that does not
+     * immediately follow -- still has to be reachable from the CPU path, and
+     * freeing it would strand it with no device copy to fall back on.  A
+     * non-NULL device[i] means tensor i is FP8 rank 2 and i + 1 is its scale. */
     uint64_t released = 0;
     for (size_t i = 0; i < weights->plan.tensor_count; i++) {
-        ColiDeepSeekV4TensorSpec *spec = &weights->plan.tensors[i];
-        if (spec->dtype != COLI_ST_F8_E4M3 &&
-            spec->dtype != COLI_ST_F8_E8M0) continue;
-        const ColiSafetensorsTensor *tensor =
-            coli_st_find(weights->source_index, spec->name);
-        if (tensor) released += tensor->dtype == COLI_ST_F8_E8M0
-            ? (uint64_t)tensor->numel * sizeof(float)
-            : (uint64_t)tensor->nbytes;
-        free(weights->data[i]);
-        weights->data[i] = NULL;
+        if (!weights->device[i]) continue;
+        for (size_t pair = i; pair < i + 2; pair++) {
+            ColiDeepSeekV4TensorSpec *spec = &weights->plan.tensors[pair];
+            const ColiSafetensorsTensor *tensor =
+                coli_st_find(weights->source_index, spec->name);
+            if (tensor) released += tensor->dtype == COLI_ST_F8_E8M0
+                ? (uint64_t)tensor->numel * sizeof(float)
+                : (uint64_t)tensor->nbytes;
+            free(weights->data[pair]);
+            weights->data[pair] = NULL;
+        }
     }
     weights->host_bytes = weights->stats.total_bytes - released;
     return 0;
@@ -586,9 +592,12 @@ int coli_v4_layer_load(ColiV4Engine *engine,
                        const ColiDeepSeekV4Config *config,
                        const ColiSafetensorsIndex *index, int layer,
                        char *error, size_t error_size) {
-    (void)engine;
     if (!weights) return set_error(error, error_size, "missing layer weights output");
-    int gpu_resident = weights->gpu_resident;
+    /* Residency is an engine decision, not a field the caller pre-seeds on an
+     * output struct: reading it back out of *weights before the reset would let
+     * an uninitialized caller struct pick the VRAM path by accident. */
+    int gpu_resident = engine &&
+        engine->runtime.dense_location == COLI_V4_DENSE_VRAM;
     memset(weights, 0, sizeof(*weights));
     weights->gpu_resident = gpu_resident;
     if (coli_v4_layer_plan(&weights->plan, config, layer, error, error_size) != 0 ||
@@ -695,12 +704,9 @@ int coli_v4_layer_load(ColiV4Engine *engine,
     if (!weights || !effective_config || !index || layer < 0 ||
         layer >= effective_config->num_hidden_layers ||
         layer >= COLI_V4_RESIDENT_MAX_LAYERS_V2) return -1;
-    if (!resident_enabled_v2(engine)) {
-        weights->gpu_resident = engine &&
-            engine->runtime.dense_location == COLI_V4_DENSE_VRAM;
+    if (!resident_enabled_v2(engine))
         return coli_v4_layer_resident_reference_load(
-            NULL, weights, effective_config, index, layer, error, error_size);
-    }
+            engine, weights, effective_config, index, layer, error, error_size);
     if (engine->dense_resident.index && engine->dense_resident.index != index) {
         if (error && error_size)
             snprintf(error, error_size,
@@ -710,10 +716,8 @@ int coli_v4_layer_load(ColiV4Engine *engine,
     engine->dense_resident.index = index;
     if (!engine->dense_resident.ready[layer]) {
         ColiDeepSeekV4LayerWeights loaded = {0};
-        loaded.gpu_resident =
-            engine->runtime.dense_location == COLI_V4_DENSE_VRAM;
         if (coli_v4_layer_resident_reference_load(
-                NULL, &loaded, effective_config, index,
+                engine, &loaded, effective_config, index,
                 layer, error, error_size)) return -1;
         if (engine->runtime.dense_location == COLI_V4_DENSE_VRAM &&
             !loaded.gpu_resident) {
@@ -1339,10 +1343,12 @@ int coli_v4_expert_store_open_planned(
 #ifdef COLI_V4_CUDA
 /* The GPU dense path has no cheap fallback: v4_layer_cuda_upload() frees the
  * host FP8 buffers, so a failed dispatch would otherwise re-read the tensor
- * from the checkpoint on every projection.  Nothing that gets us here heals by
- * the next call -- the scratch reserve, launch and memcpy all fail because the
- * card is full, and the activation buffers fail because the host is -- so latch
- * the path off after the first one and say so once. */
+ * from the checkpoint on every projection.  A failed dispatch does not heal by
+ * the next call either -- the scratch reserve, launch and memcpy all fail
+ * because the card is full -- so latch the path off after the first one and say
+ * so once.  Only genuine dispatch failures get here: a host allocation that
+ * comes up short is transient, and latching on it would take the GPU down for
+ * the life of the process over a few kilobytes the next request will have. */
 int coli_v4_dense_cuda_disabled;
 
 static void v4_dense_cuda_disable(const char *reason) {
@@ -1374,6 +1380,34 @@ static int dense_tensor_indices(
     return *weight_index == SIZE_MAX || *scale_index == SIZE_MAX ? -1 : 0;
 }
 
+/* The whole tensor as the native FP8 kernels want to see it.  Fails for a layer
+ * whose host buffers went to the GPU, which is what makes it a usable test for
+ * "can this still run on the CPU". */
+static int dense_tensor_view_at(ColiTensorView *view,
+                                const ColiDeepSeekV4LayerWeights *weights,
+                                size_t wi, size_t si) {
+    if (!view) return -1;
+    const ColiDeepSeekV4TensorSpec *ws = &weights->plan.tensors[wi];
+    const ColiDeepSeekV4TensorSpec *ss = &weights->plan.tensors[si];
+    if (ws->dtype != COLI_ST_F8_E4M3 || ss->dtype != COLI_ST_F8_E8M0 ||
+        ws->rank != 2 || !weights->data[wi] || !weights->data[si]) return -1;
+    *view = (ColiTensorView){
+        COLI_TENSOR_FP8_E4M3_BLOCK, COLI_SCALE_F32,
+        weights->data[wi], weights->data[si],
+        (size_t)ws->shape[0] * (size_t)ws->shape[1],
+        (size_t)ss->shape[0] * (size_t)ss->shape[1] * sizeof(float),
+        ws->shape[0], ws->shape[1], ws->packed_rows8 ? 8 : 128, 128};
+    return 0;
+}
+
+static int dense_tensor_view(ColiTensorView *view,
+                             const ColiDeepSeekV4LayerWeights *weights,
+                             const char *prefix) {
+    size_t wi, si;
+    if (dense_tensor_indices(weights, prefix, &wi, &si)) return -1;
+    return dense_tensor_view_at(view, weights, wi, si);
+}
+
 int coli_v4_dense_matmul(float *output,
                          const ColiDeepSeekV4LayerWeights *weights,
                          const char *prefix, const float *input, int batch,
@@ -1394,10 +1428,15 @@ int coli_v4_dense_matmul(float *output,
 #ifdef COLI_V4_CUDA
     if (weights->gpu_resident && weights->device[wi] &&
         !coli_v4_dense_cuda_disabled) {
+        /* One allocation for both halves: the quantizer insists on writing the
+         * block scales, but the kernel reads only the dequantized floats, so
+         * the tail is scratch nobody looks at.  This runs eight times per layer
+         * per token -- the malloc pair it replaces was not free. */
         size_t count = (size_t)batch * columns;
-        float *qdq = malloc(count * sizeof(*qdq));
-        uint8_t *scales = malloc((size_t)batch * (size_t)columns / 128);
-        int failed = !qdq || !scales;
+        float *qdq = malloc(count * sizeof(*qdq) + count / 128);
+        if (!qdq) return -1;
+        uint8_t *scales = (uint8_t *)(qdq + count);
+        int failed = 0;
         for (int item = 0; !failed && item < batch; item++)
             failed = coli_fp8_activation_qdq_ref(
                 qdq + (size_t)item * columns,
@@ -1405,22 +1444,15 @@ int coli_v4_dense_matmul(float *output,
                 input + (size_t)item * columns, (size_t)columns, 128);
         int computed = !failed && coli_cuda_fp8_matmul_rows(
             weights->device[wi], output, qdq, batch, row_start, rows);
-        free(scales);
         free(qdq);
         if (computed) return 0;
-        v4_dense_cuda_disable(failed ? "dense-activation-quant-failed"
-                                     : "dense-matmul-failed");
+        if (!failed) v4_dense_cuda_disable("dense-matmul-failed");
     }
 #endif
     /* Resident-on-GPU tensors have no host copy left; failing loudly beats
      * silently reloading 13-34 MB per projection off the checkpoint. */
-    if (!weights->data[wi] || !weights->data[si]) return -1;
-    ColiTensorView view = {
-        COLI_TENSOR_FP8_E4M3_BLOCK, COLI_SCALE_F32,
-        weights->data[wi], weights->data[si],
-        (size_t)total_rows * columns,
-        (size_t)ss->shape[0] * (size_t)ss->shape[1] * sizeof(float),
-        total_rows, columns, ws->packed_rows8 ? 8 : 128, 128};
+    ColiTensorView view;
+    if (dense_tensor_view_at(&view, weights, wi, si)) return -1;
     int scale_columns = (columns + 127) / 128;
     view.data = (const unsigned char *)view.data + (size_t)row_start * columns;
     view.scales = (const float *)view.scales +
@@ -1437,6 +1469,17 @@ int coli_v4_dense_matmul(float *output,
 int coli_v4_dense_shared_expert(
     float *output, const ColiDeepSeekV4LayerWeights *weights,
     const float *input, float swiglu_limit) {
+    /* On the CPU the fused path still pays: it quantizes the activation once
+     * and shares the per-column broadcast between w1 and w3 instead of walking
+     * the same 4096 floats twice.  Only a layer whose host buffers went to the
+     * GPU has to split the two into separate dispatches -- and there the views
+     * do not build, which is exactly the test here. */
+    ColiTensorView w1, w2, w3;
+    if (!dense_tensor_view(&w1, weights, "ffn.shared_experts.w1") &&
+        !dense_tensor_view(&w2, weights, "ffn.shared_experts.w2") &&
+        !dense_tensor_view(&w3, weights, "ffn.shared_experts.w3"))
+        return coli_v4_shared_expert_forward_ref(
+            output, &w1, &w2, &w3, input, swiglu_limit);
     size_t wi, si;
     if (dense_tensor_indices(weights, "ffn.shared_experts.w1", &wi, &si))
         return -1;
@@ -2001,29 +2044,6 @@ static const void *layer_data(const ColiDeepSeekV4LayerWeights *weights,
     return coli_v4_layer_data(weights, name, spec);
 }
 
-static int fp8_view(ColiTensorView *view,
-                    const ColiDeepSeekV4LayerWeights *weights,
-                    const char *prefix) {
-    char suffix[128];
-    const ColiDeepSeekV4TensorSpec *weight_spec = NULL, *scale_spec = NULL;
-    snprintf(suffix, sizeof(suffix), "%s.weight", prefix);
-    const void *data = layer_data(weights, suffix, &weight_spec);
-    snprintf(suffix, sizeof(suffix), "%s.scale", prefix);
-    const void *scales = layer_data(weights, suffix, &scale_spec);
-    if (!data || !scales || !weight_spec || !scale_spec ||
-        weight_spec->dtype != COLI_ST_F8_E4M3 ||
-        scale_spec->dtype != COLI_ST_F8_E8M0 || weight_spec->rank != 2)
-        return -1;
-    *view = (ColiTensorView){
-        COLI_TENSOR_FP8_E4M3_BLOCK, COLI_SCALE_F32, data, scales,
-        (size_t)(weight_spec->shape[0] * weight_spec->shape[1]),
-        (size_t)(scale_spec->shape[0] * scale_spec->shape[1]) * sizeof(float),
-        weight_spec->shape[0], weight_spec->shape[1],
-        weight_spec->packed_rows8 ? 8 : 128, 128
-    };
-    return 0;
-}
-
 static int decode_bf16(float *output, const void *data, size_t count) {
     if (!output || !data) return -1;
     const uint16_t *values = data;
@@ -2506,29 +2526,6 @@ static const void *layer_data(const ColiDeepSeekV4LayerWeights *weights,
     char name[COLI_V4_MAX_TENSOR_NAME];
     snprintf(name, sizeof(name), "layers.%d.%s", weights->plan.layer, suffix);
     return coli_v4_layer_data(weights, name, spec);
-}
-
-static int fp8_view(ColiTensorView *view,
-                    const ColiDeepSeekV4LayerWeights *weights,
-                    const char *prefix) {
-    char suffix[128];
-    const ColiDeepSeekV4TensorSpec *weight_spec = NULL, *scale_spec = NULL;
-    snprintf(suffix, sizeof(suffix), "%s.weight", prefix);
-    const void *data = layer_data(weights, suffix, &weight_spec);
-    snprintf(suffix, sizeof(suffix), "%s.scale", prefix);
-    const void *scales = layer_data(weights, suffix, &scale_spec);
-    if (!data || !scales || !weight_spec || !scale_spec ||
-        weight_spec->dtype != COLI_ST_F8_E4M3 ||
-        scale_spec->dtype != COLI_ST_F8_E8M0 || weight_spec->rank != 2)
-        return -1;
-    *view = (ColiTensorView){
-        COLI_TENSOR_FP8_E4M3_BLOCK, COLI_SCALE_F32, data, scales,
-        (size_t)(weight_spec->shape[0] * weight_spec->shape[1]),
-        (size_t)(scale_spec->shape[0] * scale_spec->shape[1]) * sizeof(float),
-        weight_spec->shape[0], weight_spec->shape[1],
-        weight_spec->packed_rows8 ? 8 : 128, 128
-    };
-    return 0;
 }
 
 static int decode_bf16(float *output, const void *data, size_t count) {
@@ -3334,27 +3331,6 @@ static const void *value(const ColiDeepSeekV4LayerWeights *weights,
     return coli_v4_layer_data(weights, name, spec);
 }
 
-static int fp8_view(ColiTensorView *view,
-                    const ColiDeepSeekV4LayerWeights *weights,
-                    const char *prefix) {
-    char suffix[128];
-    const ColiDeepSeekV4TensorSpec *ws = NULL, *ss = NULL;
-    snprintf(suffix, sizeof(suffix), "%s.weight", prefix);
-    const void *data = value(weights, suffix, &ws);
-    snprintf(suffix, sizeof(suffix), "%s.scale", prefix);
-    const void *scales = value(weights, suffix, &ss);
-    if (!data || !scales || !ws || !ss || ws->rank != 2 ||
-        ws->dtype != COLI_ST_F8_E4M3 || ss->dtype != COLI_ST_F8_E8M0)
-        return -1;
-    *view = (ColiTensorView){
-        COLI_TENSOR_FP8_E4M3_BLOCK, COLI_SCALE_F32, data, scales,
-        (size_t)(ws->shape[0] * ws->shape[1]),
-        (size_t)(ss->shape[0] * ss->shape[1]) * sizeof(float),
-        ws->shape[0], ws->shape[1], ws->packed_rows8 ? 8 : 128, 128
-    };
-    return 0;
-}
-
 static int descending_score(const void *left, const void *right) {
     const IndexScore *a = left, *b = right;
     if (a->score < b->score) return 1;
@@ -3940,25 +3916,6 @@ static const void *value(const ColiDeepSeekV4LayerWeights *weights,
     char name[COLI_V4_MAX_TENSOR_NAME];
     snprintf(name, sizeof(name), "layers.%d.%s", weights->plan.layer, suffix);
     return coli_v4_layer_data(weights, name, spec);
-}
-
-static int fp8_view(ColiTensorView *view,
-                    const ColiDeepSeekV4LayerWeights *weights,
-                    const char *prefix) {
-    char name[128];
-    const ColiDeepSeekV4TensorSpec *ws = NULL, *ss = NULL;
-    snprintf(name, sizeof(name), "%s.weight", prefix);
-    const void *data = value(weights, name, &ws);
-    snprintf(name, sizeof(name), "%s.scale", prefix);
-    const void *scales = value(weights, name, &ss);
-    if (!data || !scales || !ws || !ss || ws->rank != 2) return -1;
-    *view = (ColiTensorView){
-        COLI_TENSOR_FP8_E4M3_BLOCK, COLI_SCALE_F32, data, scales,
-        (size_t)(ws->shape[0] * ws->shape[1]),
-        (size_t)(ss->shape[0] * ss->shape[1]) * sizeof(float),
-        ws->shape[0], ws->shape[1], ws->packed_rows8 ? 8 : 128, 128
-    };
-    return 0;
 }
 
 static void decode_bf16(float *output, const uint16_t *input, size_t count) {
@@ -5179,27 +5136,6 @@ static const void *value(const ColiDeepSeekV4LayerWeights *weights,
     return coli_v4_layer_data(weights, name, spec);
 }
 
-static int fp8_view(ColiTensorView *view,
-                    const ColiDeepSeekV4LayerWeights *weights,
-                    const char *prefix) {
-    char suffix[128];
-    const ColiDeepSeekV4TensorSpec *ws = NULL, *ss = NULL;
-    snprintf(suffix, sizeof(suffix), "%s.weight", prefix);
-    const void *data = value(weights, suffix, &ws);
-    snprintf(suffix, sizeof(suffix), "%s.scale", prefix);
-    const void *scales = value(weights, suffix, &ss);
-    if (!data || !scales || !ws || !ss || ws->rank != 2 ||
-        ws->dtype != COLI_ST_F8_E4M3 || ss->dtype != COLI_ST_F8_E8M0)
-        return -1;
-    *view = (ColiTensorView){
-        COLI_TENSOR_FP8_E4M3_BLOCK, COLI_SCALE_F32, data, scales,
-        (size_t)(ws->shape[0] * ws->shape[1]),
-        (size_t)(ss->shape[0] * ss->shape[1]) * sizeof(float),
-        ws->shape[0], ws->shape[1], ws->packed_rows8 ? 8 : 128, 128
-    };
-    return 0;
-}
-
 static int descending_score(const void *left, const void *right) {
     const IndexScore *a = left, *b = right;
     if (a->score < b->score) return 1;
@@ -5733,29 +5669,6 @@ static const void *layer_data(const ColiDeepSeekV4LayerWeights *weights,
     char name[COLI_V4_MAX_TENSOR_NAME];
     snprintf(name, sizeof(name), "layers.%d.%s", weights->plan.layer, suffix);
     return coli_v4_layer_data(weights, name, spec);
-}
-
-static int fp8_view(ColiTensorView *view,
-                    const ColiDeepSeekV4LayerWeights *weights,
-                    const char *prefix) {
-    char suffix[128];
-    const ColiDeepSeekV4TensorSpec *weight_spec = NULL, *scale_spec = NULL;
-    snprintf(suffix, sizeof(suffix), "%s.weight", prefix);
-    const void *data = layer_data(weights, suffix, &weight_spec);
-    snprintf(suffix, sizeof(suffix), "%s.scale", prefix);
-    const void *scales = layer_data(weights, suffix, &scale_spec);
-    if (!data || !scales || !weight_spec || !scale_spec ||
-        weight_spec->dtype != COLI_ST_F8_E4M3 ||
-        scale_spec->dtype != COLI_ST_F8_E8M0 || weight_spec->rank != 2)
-        return -1;
-    *view = (ColiTensorView){
-        COLI_TENSOR_FP8_E4M3_BLOCK, COLI_SCALE_F32, data, scales,
-        (size_t)(weight_spec->shape[0] * weight_spec->shape[1]),
-        (size_t)(scale_spec->shape[0] * scale_spec->shape[1]) * sizeof(float),
-        weight_spec->shape[0], weight_spec->shape[1],
-        weight_spec->packed_rows8 ? 8 : 128, 128
-    };
-    return 0;
 }
 
 static int decode_bf16(float *output, const void *data, size_t count) {
@@ -10918,9 +10831,12 @@ int coli_v4_layer_load(ColiV4Engine *engine,
                        const ColiDeepSeekV4Config *config,
                        const ColiSafetensorsIndex *index, int layer,
                        char *error, size_t error_size) {
-    (void)engine;
     if (!weights) return set_error(error, error_size, "missing layer weights output");
-    int gpu_resident = weights->gpu_resident;
+    /* Residency is an engine decision, not a field the caller pre-seeds on an
+     * output struct: reading it back out of *weights before the reset would let
+     * an uninitialized caller struct pick the VRAM path by accident. */
+    int gpu_resident = engine &&
+        engine->runtime.dense_location == COLI_V4_DENSE_VRAM;
     memset(weights, 0, sizeof(*weights));
     weights->gpu_resident = gpu_resident;
     if (coli_v4_layer_plan(&weights->plan, config, layer, error, error_size) != 0 ||

@@ -202,8 +202,10 @@ typedef struct {
 typedef struct {
     ColiDeepSeekV4LayerPlan plan;
     ColiDeepSeekV4LayerStats stats;
-    /* Set before loading so GPU-bound FP8 stays in checkpoint row-major order.
-     * The reference loader preserves this flag across its struct reset. */
+    /* Written by the loader from the engine's dense location: it decides
+     * whether the FP8 stays in checkpoint row-major order for the GPU.  Read it
+     * afterwards to see whether the layer really landed in VRAM -- an upload
+     * that fell back to the CPU clears it again. */
     int gpu_resident;
     void *data[COLI_V4_MAX_LAYER_TENSORS];
 #ifdef COLI_V4_CUDA
