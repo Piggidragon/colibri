@@ -196,6 +196,9 @@ typedef struct {
 typedef struct {
     ColiDeepSeekV4LayerPlan plan;
     ColiDeepSeekV4LayerStats stats;
+    /* Set before loading so GPU-bound FP8 stays in checkpoint row-major order.
+     * The reference loader preserves this flag across its struct reset. */
+    int gpu_resident;
     void *data[COLI_V4_MAX_LAYER_TENSORS];
 } ColiDeepSeekV4LayerWeights;
 
@@ -216,6 +219,11 @@ void coli_v4_layer_free(ColiV4Engine *engine,
 const void *coli_v4_layer_data(const ColiDeepSeekV4LayerWeights *weights,
                                const char *name,
                                const ColiDeepSeekV4TensorSpec **spec);
+#ifdef COLI_V4_TEST_HOOKS
+int coli_v4_test_fp8_maybe_pack_rows8(unsigned char *data,
+                                      int64_t rows, int64_t columns,
+                                      int gpu_resident);
+#endif
 
 #ifdef __cplusplus
 }

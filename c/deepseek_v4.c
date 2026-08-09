@@ -509,6 +509,21 @@ static int v4_fp8_pack_rows8_inplace(unsigned char *data,
 #endif
 }
 
+static int v4_fp8_maybe_pack_rows8(unsigned char *data,
+                                   int64_t rows, int64_t columns,
+                                   int gpu_resident) {
+    return gpu_resident ? 0
+                        : v4_fp8_pack_rows8_inplace(data, rows, columns);
+}
+
+#ifdef COLI_V4_TEST_HOOKS
+int coli_v4_test_fp8_maybe_pack_rows8(unsigned char *data,
+                                      int64_t rows, int64_t columns,
+                                      int gpu_resident) {
+    return v4_fp8_maybe_pack_rows8(data, rows, columns, gpu_resident);
+}
+#endif
+
 int coli_v4_layer_load(ColiV4Engine *engine,
                        ColiDeepSeekV4LayerWeights *weights,
                        const ColiDeepSeekV4Config *config,
@@ -516,7 +531,9 @@ int coli_v4_layer_load(ColiV4Engine *engine,
                        char *error, size_t error_size) {
     (void)engine;
     if (!weights) return set_error(error, error_size, "missing layer weights output");
+    int gpu_resident = weights->gpu_resident;
     memset(weights, 0, sizeof(*weights));
+    weights->gpu_resident = gpu_resident;
     if (coli_v4_layer_plan(&weights->plan, config, layer, error, error_size) != 0 ||
         coli_v4_layer_validate(&weights->plan, index, &weights->stats,
                                error, error_size) != 0)
@@ -540,8 +557,9 @@ int coli_v4_layer_load(ColiV4Engine *engine,
             return set_error(error, error_size, "cannot read tensor: %s", spec->name);
         }
         if (spec->dtype == COLI_ST_F8_E4M3 && spec->rank == 2) {
-            int packed = v4_fp8_pack_rows8_inplace(
-                weights->data[i], spec->shape[0], spec->shape[1]);
+            int packed = v4_fp8_maybe_pack_rows8(
+                weights->data[i], spec->shape[0], spec->shape[1],
+                weights->gpu_resident);
             if (packed < 0) {
                 coli_v4_layer_free(NULL, weights);
                 return set_error(error, error_size,
@@ -590,9 +608,11 @@ int coli_v4_layer_load(ColiV4Engine *engine,
     if (!weights || !effective_config || !index || layer < 0 ||
         layer >= effective_config->num_hidden_layers ||
         layer >= COLI_V4_RESIDENT_MAX_LAYERS_V2) return -1;
-    if (!resident_enabled_v2(engine))
+    if (!resident_enabled_v2(engine)) {
+        weights->gpu_resident = engine && engine->runtime.vram_enabled;
         return coli_v4_layer_resident_reference_load(
             NULL, weights, effective_config, index, layer, error, error_size);
+    }
     if (engine->dense_resident.index && engine->dense_resident.index != index) {
         if (error && error_size)
             snprintf(error, error_size,
@@ -601,6 +621,8 @@ int coli_v4_layer_load(ColiV4Engine *engine,
     }
     engine->dense_resident.index = index;
     if (!engine->dense_resident.ready[layer]) {
+        engine->dense_resident.layers[layer].gpu_resident =
+            engine->runtime.vram_enabled;
         if (coli_v4_layer_resident_reference_load(
                 NULL, &engine->dense_resident.layers[layer], effective_config, index,
                 layer, error, error_size)) return -1;
@@ -10644,7 +10666,9 @@ int coli_v4_layer_load(ColiV4Engine *engine,
                        char *error, size_t error_size) {
     (void)engine;
     if (!weights) return set_error(error, error_size, "missing layer weights output");
+    int gpu_resident = weights->gpu_resident;
     memset(weights, 0, sizeof(*weights));
+    weights->gpu_resident = gpu_resident;
     if (coli_v4_layer_plan(&weights->plan, config, layer, error, error_size) != 0 ||
         coli_v4_layer_validate(&weights->plan, index, &weights->stats,
                                error, error_size) != 0)
