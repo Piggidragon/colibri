@@ -140,6 +140,7 @@ typedef struct {
 } Quality;
 
 static int measure_quality(ColiV4KVCodec codec, int fp8_input,
+                           float rope_scale,
                            Quality *quality) {
     enum { DIMENSION = 512, ROWS = 32, NOPE = 448 };
     size_t row_bytes = coli_v4_kv_row_bytes(
@@ -156,6 +157,7 @@ static int measure_quality(ColiV4KVCodec codec, int fp8_input,
     random_state = UINT64_C(0x4d595df4d0f33173);
     for (int row = 0; row < ROWS; row++) {
         for (int i = 0; i < DIMENSION; i++) source[i] = normal_random();
+        for (int i = NOPE; i < DIMENSION; i++) source[i] *= rope_scale;
         if (fp8_input) {
             if (coli_fp8_activation_qdq_ref(
                     prepared, scales, source, NOPE, 64)) {
@@ -209,8 +211,8 @@ static int test_quality(void) {
     };
     for (size_t i = 0; i < sizeof(codecs) / sizeof(codecs[0]); i++) {
         Quality continuous, fp8;
-        if (measure_quality(codecs[i].codec, 0, &continuous) ||
-            measure_quality(codecs[i].codec, 1, &fp8))
+        if (measure_quality(codecs[i].codec, 0, 1.0f, &continuous) ||
+            measure_quality(codecs[i].codec, 1, 1.0f, &fp8))
             return 1;
         printf("%s continuous cosine=%.6f norm=%.6f; "
                "fp8-grid cosine=%.6f norm=%.6f nope=%.6f rope=%.6f\n",
@@ -227,6 +229,63 @@ static int test_quality(void) {
                     coli_v4_kv_codec_name(codecs[i].codec));
             return 1;
         }
+    }
+    return 0;
+}
+
+static int test_rope_scale_sensitivity(void) {
+    static const float scales[] = {0.25f, 0.0625f, 16.0f};
+    Quality quality[sizeof(scales) / sizeof(scales[0])];
+    for (size_t i = 0; i < sizeof(scales) / sizeof(scales[0]); i++) {
+        if (measure_quality(
+                COLI_V4_KV_TURBO3, 1, scales[i], &quality[i]))
+            return 1;
+        printf("turbo3 rope-scale=%g cosine=%.6f norm=%.6f "
+               "nope=%.6f rope=%.6f\n",
+               scales[i], quality[i].cosine, quality[i].norm_ratio,
+               quality[i].nope_cosine, quality[i].rope_cosine);
+        if (!isfinite(quality[i].cosine) ||
+            !isfinite(quality[i].nope_cosine) ||
+            !isfinite(quality[i].rope_cosine) || quality[i].cosine < 0.98) {
+            fprintf(stderr, "turbo3 rope-scale=%g quality failed\n", scales[i]);
+            return 1;
+        }
+    }
+    /* The aggregate cosine hides whichever 64/448-dimensional half has the
+     * smaller variance.  Keep that limitation visible in this test instead of
+     * treating the equal-scale result as evidence for a uniform layout. */
+    if (!(quality[1].rope_cosine < 0.8 && quality[1].nope_cosine > 0.95 &&
+          quality[2].nope_cosine < 0.95 && quality[2].rope_cosine > 0.95)) {
+        fprintf(stderr, "TurboQuant split-scale sensitivity disappeared\n");
+        return 1;
+    }
+    return 0;
+}
+
+static int test_rejected_norms_and_alignment(void) {
+    float source[COLI_TQ_GROUP], decoded[COLI_TQ_GROUP];
+    unsigned char storage[sizeof(ColiTurbo4Block) + 1];
+    void *misaligned = storage + 1;
+    for (int bits = 2; bits <= 4; bits++) {
+        for (int i = 0; i < COLI_TQ_GROUP; i++) source[i] = 100000.0f;
+        if (coli_tq_encode_group(misaligned, source, bits) != -1) {
+            fprintf(stderr, "turbo%d accepted an fp16-overflowing norm\n", bits);
+            return 1;
+        }
+        source[0] = NAN;
+        if (coli_tq_encode_group(misaligned, source, bits) != -1) {
+            fprintf(stderr, "turbo%d accepted a non-finite input\n", bits);
+            return 1;
+        }
+        for (int i = 0; i < COLI_TQ_GROUP; i++)
+            source[i] = (float)(i - 64) / 128.0f;
+        if (coli_tq_encode_group(misaligned, source, bits) ||
+            coli_tq_decode_group(decoded, misaligned, bits)) {
+            fprintf(stderr, "turbo%d rejected a misaligned byte buffer\n", bits);
+            return 1;
+        }
+        for (int i = 0; i < COLI_TQ_GROUP; i++)
+            if (!isfinite(decoded[i])) return 1;
     }
     return 0;
 }
@@ -279,7 +338,9 @@ static int test_zero_rows(void) {
 
 int main(void) {
     if (test_wht() || test_fp16() || test_turbo3_packing() ||
-        test_codec_geometry() || test_zero_rows() || test_quality())
+        test_codec_geometry() || test_zero_rows() ||
+        test_rejected_norms_and_alignment() || test_quality() ||
+        test_rope_scale_sensitivity())
         return 1;
     puts("V4 TurboQuant tests passed");
     return 0;

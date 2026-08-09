@@ -38,7 +38,8 @@ size_t coli_v4_kv_row_bytes(ColiV4KVCodec codec, ColiV4KVStream stream,
  * BF16-rounded state produced by the V4 attention/compressor path.  Values it
  * cannot reconstruct bit-for-bit are rejected.  Turbo codecs deliberately
  * quantize that state again and are therefore used only when explicitly
- * selected through V4_KV or V4_KV_INDEX. */
+ * selected through V4_KV or V4_KV_INDEX.  Turbo encoding rejects non-finite
+ * inputs and norms that cannot be represented by its fp16 scale. */
 int coli_v4_kv_encode_row(ColiV4KVCodec codec, ColiV4KVStream stream,
                           void *dst, const float *src,
                           int head_dim, int rope_dim);

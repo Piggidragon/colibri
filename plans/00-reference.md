@@ -6,7 +6,8 @@ Konventionen; die Phasenpläne `01`–`13` setzen das voraus und wiederholen es 
 - Pläne auf Branch `planning`; jede Phase bekommt einen eigenen Branch und PR
   (Schema und Reihenfolge in [AGENTS.md](../AGENTS.md))
 - Lizenz: Repo ist Apache-2.0, der TurboQuant-Referenz-Fork MIT → Attribution im
-  portierten Header genügt. `reference/` selbst wird **nicht** committet.
+  portierten Header plus vollständiger Lizenztext in `THIRD_PARTY_NOTICES`.
+  `reference/` selbst wird **nicht** committet.
 - In `reference/` liegen ausschließlich **Lesequellen**, kein Build-Input:
   `DeepSpec`, `llama-cpp-turboquant` und `FlashMLA`
   (siehe [FlashMLA](#flashmla--vendor-referenz-nicht-linkbar)).
@@ -534,7 +535,11 @@ Die Fork-Dokumentation nannte turbo3 Cosine ≈ 1,0 und turbo4 ≈ 0,9956 auf
 Zufallsvektoren kontinuierlich / nach dem realen FP8+BF16-Vorgitter stattdessen
 turbo2 **0,9411 / 0,9411**, turbo3 **0,9833 / 0,9832** und turbo4
 **0,9954 / 0,9954**. Diese reproduzierbaren Port-Werte sind die belastbaren
-Schranken; siehe Plan 04.
+Schranken für **gleich skalierte** NoPE-/RoPE-Hälften; siehe Plan 04. Bei
+RoPE-Skalen von 1/4, 1/16 und 16 bleibt der Gesamt-Cosine von turbo3 zwar bei
+~0,983, aber der kleinere Anteil fällt bis 0,507 (RoPE bei 1/16) beziehungsweise
+0,838 (NoPE bei 16). Der Gesamtwert allein entscheidet deshalb nicht gegen ein
+getrenntes RoPE-Layout.
 
 ### KV-Bilanz mit den echten Zahlen
 

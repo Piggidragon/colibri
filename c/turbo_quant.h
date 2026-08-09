@@ -220,53 +220,59 @@ static inline int coli_tq_encode_group(void *destination, const float *source,
     float values[COLI_TQ_GROUP];
     float norm_squared = 0.0f;
     for (int i = 0; i < COLI_TQ_GROUP; i++) {
+        if (!isfinite(source[i])) return -1;
         values[i] = source[i];
         norm_squared += values[i] * values[i];
     }
+    if (!isfinite(norm_squared)) return -1;
     float norm = sqrtf(norm_squared);
-    float inverse_norm = norm > 1e-10f ? 1.0f / norm : 0.0f;
+    float inverse_norm = norm > 0.0f ? 1.0f / norm : 0.0f;
     for (int i = 0; i < COLI_TQ_GROUP; i++) values[i] *= inverse_norm;
     coli_tq_fwht(values);
 
     float reconstruction_squared = 0.0f;
+    ColiTurbo2Block block2 = {0};
+    ColiTurbo3Block block3 = {0};
+    ColiTurbo4Block block4 = {0};
     if (bits == 2) {
-        ColiTurbo2Block *block = (ColiTurbo2Block *)destination;
-        memset(block->qs, 0, sizeof(block->qs));
         for (int i = 0; i < COLI_TQ_GROUP; i++) {
             int index = coli_tq_nearest2(values[i]);
-            block->qs[i / 4] |= (uint8_t)(index << ((i % 4) * 2));
+            block2.qs[i / 4] |= (uint8_t)(index << ((i % 4) * 2));
             reconstruction_squared += coli_tq_centroids2[index] *
                                       coli_tq_centroids2[index];
         }
-        float reconstruction_norm = sqrtf(reconstruction_squared);
-        block->norm = coli_tq_fp16_encode(reconstruction_norm > 1e-10f
-            ? norm / reconstruction_norm : norm);
     } else if (bits == 3) {
-        ColiTurbo3Block *block = (ColiTurbo3Block *)destination;
-        memset(block->qs, 0, sizeof(block->qs));
-        memset(block->signs, 0, sizeof(block->signs));
         for (int i = 0; i < COLI_TQ_GROUP; i++) {
             int index = coli_tq_nearest3(values[i]);
-            block->qs[i / 4] |= (uint8_t)((index & 3) << ((i % 4) * 2));
-            if (index & 4) block->signs[i / 8] |= (uint8_t)(1u << (i % 8));
+            block3.qs[i / 4] |= (uint8_t)((index & 3) << ((i % 4) * 2));
+            if (index & 4) block3.signs[i / 8] |= (uint8_t)(1u << (i % 8));
             reconstruction_squared += coli_tq_centroids3[index] *
                                       coli_tq_centroids3[index];
         }
-        float reconstruction_norm = sqrtf(reconstruction_squared);
-        block->norm = coli_tq_fp16_encode(reconstruction_norm > 1e-10f
-            ? norm / reconstruction_norm : norm);
     } else {
-        ColiTurbo4Block *block = (ColiTurbo4Block *)destination;
-        memset(block->qs, 0, sizeof(block->qs));
         for (int i = 0; i < COLI_TQ_GROUP; i++) {
             int index = coli_tq_nearest4(values[i]);
-            block->qs[i / 2] |= (uint8_t)(index << ((i % 2) * 4));
+            block4.qs[i / 2] |= (uint8_t)(index << ((i % 2) * 4));
             reconstruction_squared += coli_tq_centroids4[index] *
                                       coli_tq_centroids4[index];
         }
-        float reconstruction_norm = sqrtf(reconstruction_squared);
-        block->norm = coli_tq_fp16_encode(reconstruction_norm > 1e-10f
-            ? norm / reconstruction_norm : norm);
+    }
+
+    float reconstruction_norm = sqrtf(reconstruction_squared);
+    float corrected = reconstruction_norm > 0.0f
+        ? norm / reconstruction_norm : norm;
+    if (!isfinite(corrected)) return -1;
+    uint16_t encoded_norm = coli_tq_fp16_encode(corrected);
+    if ((encoded_norm & UINT16_C(0x7c00)) == UINT16_C(0x7c00)) return -1;
+    if (bits == 2) {
+        memcpy(&block2.norm, &encoded_norm, sizeof(encoded_norm));
+        memcpy(destination, &block2, sizeof(block2));
+    } else if (bits == 3) {
+        memcpy(&block3.norm, &encoded_norm, sizeof(encoded_norm));
+        memcpy(destination, &block3, sizeof(block3));
+    } else {
+        memcpy(&block4.norm, &encoded_norm, sizeof(encoded_norm));
+        memcpy(destination, &block4, sizeof(block4));
     }
     return 0;
 }
@@ -276,14 +282,18 @@ static inline int coli_tq_decode_group(float *destination, const void *source,
     if (!destination || !source || !coli_tq_block_bytes(bits)) return -1;
     float norm;
     if (bits == 2) {
-        const ColiTurbo2Block *block = (const ColiTurbo2Block *)source;
+        ColiTurbo2Block stored;
+        memcpy(&stored, source, sizeof(stored));
+        const ColiTurbo2Block *block = &stored;
         norm = coli_tq_fp16_decode(block->norm);
         for (int i = 0; i < COLI_TQ_GROUP; i++) {
             int index = (block->qs[i / 4] >> ((i % 4) * 2)) & 3;
             destination[i] = coli_tq_centroids2[index] * norm;
         }
     } else if (bits == 3) {
-        const ColiTurbo3Block *block = (const ColiTurbo3Block *)source;
+        ColiTurbo3Block stored;
+        memcpy(&stored, source, sizeof(stored));
+        const ColiTurbo3Block *block = &stored;
         norm = coli_tq_fp16_decode(block->norm);
         for (int i = 0; i < COLI_TQ_GROUP; i++) {
             int low = (block->qs[i / 4] >> ((i % 4) * 2)) & 3;
@@ -291,13 +301,16 @@ static inline int coli_tq_decode_group(float *destination, const void *source,
             destination[i] = coli_tq_centroids3[low | (high << 2)] * norm;
         }
     } else {
-        const ColiTurbo4Block *block = (const ColiTurbo4Block *)source;
+        ColiTurbo4Block stored;
+        memcpy(&stored, source, sizeof(stored));
+        const ColiTurbo4Block *block = &stored;
         norm = coli_tq_fp16_decode(block->norm);
         for (int i = 0; i < COLI_TQ_GROUP; i++) {
             int index = (block->qs[i / 2] >> ((i % 2) * 4)) & 15;
             destination[i] = coli_tq_centroids4[index] * norm;
         }
     }
+    if (!isfinite(norm)) return -1;
     coli_tq_fwht_inverse(destination);
     return 0;
 }

@@ -10865,6 +10865,15 @@ int coli_fp8_matvec_ref(float *output, const ColiTensorView *weight,
 #include <stdlib.h>
 #include <string.h>
 
+static int kv_codec_bits(ColiV4KVCodec codec) {
+    switch (codec) {
+        case COLI_V4_KV_TURBO2: return 2;
+        case COLI_V4_KV_TURBO3: return 3;
+        case COLI_V4_KV_TURBO4: return 4;
+        default: return 0;
+    }
+}
+
 size_t coli_v4_kv_row_bytes(ColiV4KVCodec codec, ColiV4KVStream stream,
                             int head_dim, int rope_dim) {
     if ((stream != COLI_V4_KV_MAIN && stream != COLI_V4_KV_INDEX) ||
@@ -10880,9 +10889,7 @@ size_t coli_v4_kv_row_bytes(ColiV4KVCodec codec, ColiV4KVStream stream,
         return nope + (nope + 63) / 64 + (size_t)rope_dim * sizeof(uint16_t);
     }
     if (head_dim % COLI_TQ_GROUP) return 0;
-    int bits = codec == COLI_V4_KV_TURBO2 ? 2
-        : codec == COLI_V4_KV_TURBO3 ? 3
-        : codec == COLI_V4_KV_TURBO4 ? 4 : 0;
+    int bits = kv_codec_bits(codec);
     size_t block_bytes = coli_tq_block_bytes(bits);
     return block_bytes ? (size_t)(head_dim / COLI_TQ_GROUP) * block_bytes : 0;
 }
@@ -11062,8 +11069,8 @@ int coli_v4_kv_encode_row(ColiV4KVCodec codec, ColiV4KVStream stream,
         return 0;
     }
     if (codec != COLI_V4_KV_NATIVE) {
-        int bits = codec == COLI_V4_KV_TURBO2 ? 2
-            : codec == COLI_V4_KV_TURBO3 ? 3 : 4;
+        int bits = kv_codec_bits(codec);
+        if (!bits) return -1;
         return coli_tq_encode(dst, src, head_dim, bits);
     }
     return stream == COLI_V4_KV_INDEX
@@ -11081,8 +11088,8 @@ int coli_v4_kv_decode_row(ColiV4KVCodec codec, ColiV4KVStream stream,
         return 0;
     }
     if (codec != COLI_V4_KV_NATIVE) {
-        int bits = codec == COLI_V4_KV_TURBO2 ? 2
-            : codec == COLI_V4_KV_TURBO3 ? 3 : 4;
+        int bits = kv_codec_bits(codec);
+        if (!bits) return -1;
         return coli_tq_decode(dst, src, head_dim, bits);
     }
     decode_native_row(dst, src, stream, head_dim, rope_dim);

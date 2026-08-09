@@ -45,6 +45,9 @@ static int test_row_sizes(void) {
                 return 1;
         }
     }
+    if (coli_v4_kv_row_bytes(
+            (ColiV4KVCodec)99, COLI_V4_KV_MAIN, 128, 64) != 0)
+        return 1;
     return 0;
 }
 

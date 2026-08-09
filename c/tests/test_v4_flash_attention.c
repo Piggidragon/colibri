@@ -271,6 +271,73 @@ cleanup:
     return failed;
 }
 
+static int test_turbo_codec_equivalence(void) {
+    enum { HEADS = 3, HEAD_DIM = 128, ROPE = 64, WINDOW = 5, COMPRESSED = 7 };
+    enum { ROWS = WINDOW + COMPRESSED, NOPE = HEAD_DIM - ROPE };
+    size_t turbo_row = coli_v4_kv_row_bytes(
+        COLI_V4_KV_TURBO3, COLI_V4_KV_MAIN, HEAD_DIM, ROPE);
+    float *staged = malloc((size_t)ROWS * HEAD_DIM * sizeof(*staged));
+    float *queries = malloc((size_t)HEADS * HEAD_DIM * sizeof(*queries));
+    float *reference = malloc((size_t)HEADS * HEAD_DIM * sizeof(*reference));
+    float *turbo = malloc((size_t)HEADS * HEAD_DIM * sizeof(*turbo));
+    unsigned char *encoded = malloc((size_t)ROWS * turbo_row);
+    int window_indices[WINDOW] = {0, -1, 2, 3, 4};
+    int compressed_indices[COMPRESSED] = {0, 1, -1, 3, 4, 5, 6};
+    uint8_t scales[(NOPE + 63) / 64];
+    float sinks[HEADS];
+    int failed = 0;
+    if (!staged || !queries || !reference || !turbo || !encoded) {
+        failed = 1;
+        goto cleanup;
+    }
+    for (int row = 0; row < ROWS; row++) {
+        float source[HEAD_DIM], prepared[HEAD_DIM];
+        for (int i = 0; i < HEAD_DIM; i++) source[i] = random_float();
+        if (coli_fp8_activation_qdq_ref(
+                prepared, scales, source, NOPE, 64)) {
+            failed = 1;
+            goto cleanup;
+        }
+        coli_bf16_round_array(prepared, NOPE);
+        for (int i = NOPE; i < HEAD_DIM; i++)
+            prepared[i] = coli_bf16_round(source[i]);
+        if (coli_v4_kv_encode_row(
+                COLI_V4_KV_TURBO3, COLI_V4_KV_MAIN,
+                encoded + (size_t)row * turbo_row,
+                prepared, HEAD_DIM, ROPE) ||
+            coli_v4_kv_decode_row(
+                COLI_V4_KV_TURBO3, COLI_V4_KV_MAIN,
+                staged + (size_t)row * HEAD_DIM,
+                encoded + (size_t)row * turbo_row,
+                HEAD_DIM, ROPE)) {
+            failed = 1;
+            goto cleanup;
+        }
+    }
+    for (size_t i = 0; i < (size_t)HEADS * HEAD_DIM; i++)
+        queries[i] = random_float();
+    for (int head = 0; head < HEADS; head++) sinks[head] = random_float();
+    float scale = 1.0f / sqrtf((float)HEAD_DIM);
+    failed = coli_v4_flash_attention_codec_ref(
+        reference, queries, staged, WINDOW,
+        staged + (size_t)WINDOW * HEAD_DIM, COMPRESSED,
+        window_indices, compressed_indices, COMPRESSED,
+        COLI_V4_KV_F32, ROPE, sinks, HEADS, HEAD_DIM, scale);
+    if (!failed) failed = coli_v4_flash_attention_codec_ref(
+        turbo, queries, encoded, WINDOW,
+        encoded + (size_t)WINDOW * turbo_row, COMPRESSED,
+        window_indices, compressed_indices, COMPRESSED,
+        COLI_V4_KV_TURBO3, ROPE, sinks, HEADS, HEAD_DIM, scale);
+    if (!failed && memcmp(reference, turbo,
+                          (size_t)HEADS * HEAD_DIM * sizeof(*turbo))) {
+        fprintf(stderr, "turbo3 attention row decoding differs\n");
+        failed = 1;
+    }
+cleanup:
+    free(encoded); free(turbo); free(reference); free(queries); free(staged);
+    return failed;
+}
+
 static double monotonic_seconds(void) {
     struct timespec now;
     clock_gettime(CLOCK_MONOTONIC, &now);
@@ -284,9 +351,12 @@ static int benchmark_long_context(void) {
     size_t rows = WINDOW + COMPRESSED;
     size_t native_row = coli_v4_kv_row_bytes(
         COLI_V4_KV_NATIVE, COLI_V4_KV_MAIN, HEAD_DIM, ROPE);
+    size_t turbo_row = coli_v4_kv_row_bytes(
+        COLI_V4_KV_TURBO3, COLI_V4_KV_MAIN, HEAD_DIM, ROPE);
     float *values = malloc(rows * HEAD_DIM * sizeof(*values));
     float *staged = malloc(rows * HEAD_DIM * sizeof(*staged));
     unsigned char *encoded = malloc(rows * native_row);
+    unsigned char *turbo_encoded = malloc(rows * turbo_row);
     float *queries = malloc((size_t)HEADS * HEAD_DIM * sizeof(*queries));
     float *output = malloc((size_t)HEADS * HEAD_DIM * sizeof(*output));
     int *indices = malloc((WINDOW + SELECTED) * sizeof(*indices));
@@ -294,8 +364,8 @@ static int benchmark_long_context(void) {
     int *compressed_indices = malloc(HCA_SELECTED * sizeof(*compressed_indices));
     float sinks[HEADS];
     int failed = 0;
-    if (!values || !staged || !encoded || !queries || !output || !indices ||
-        !window_indices || !compressed_indices) {
+    if (!values || !staged || !encoded || !turbo_encoded || !queries ||
+        !output || !indices || !window_indices || !compressed_indices) {
         failed = 1;
         goto cleanup;
     }
@@ -314,6 +384,12 @@ static int benchmark_long_context(void) {
         if (coli_v4_kv_encode_row(
                 COLI_V4_KV_NATIVE, COLI_V4_KV_MAIN,
                 encoded + row * native_row, value, HEAD_DIM, ROPE)) {
+            failed = 1;
+            goto cleanup;
+        }
+        if (coli_v4_kv_encode_row(
+                COLI_V4_KV_TURBO3, COLI_V4_KV_MAIN,
+                turbo_encoded + row * turbo_row, value, HEAD_DIM, ROPE)) {
             failed = 1;
             goto cleanup;
         }
@@ -361,14 +437,29 @@ static int benchmark_long_context(void) {
             goto cleanup;
         }
     double native = monotonic_seconds() - start;
+    start = monotonic_seconds();
+    for (int repeat = 0; repeat < REPEATS; repeat++)
+        if (coli_v4_flash_attention_codec_ref(
+                output, queries, turbo_encoded, WINDOW,
+                turbo_encoded + (size_t)WINDOW * turbo_row,
+                COMPRESSED, window_indices, compressed_indices, SELECTED,
+                COLI_V4_KV_TURBO3, ROPE,
+                sinks, HEADS, HEAD_DIM, scale)) {
+            failed = 1;
+            goto cleanup;
+        }
+    double turbo = monotonic_seconds() - start;
     double legacy_ms = legacy * 1000.0 / REPEATS;
     double flash_ms = flash * 1000.0 / REPEATS;
     double native_ms = native * 1000.0 / REPEATS;
+    double turbo_ms = turbo * 1000.0 / REPEATS;
     printf("128k CSA attention: legacy %.3f ms/layer, flash f32 %.3f ms/layer, "
-           "native %.3f ms/layer; flash %.2fx legacy, native/f32 %.2fx; "
-           "21-layer contribution %.3f -> %.3f -> %.3f ms/token\n",
-           legacy_ms, flash_ms, native_ms, legacy / flash, native / flash,
-           legacy_ms * 21.0, flash_ms * 21.0, native_ms * 21.0);
+           "native %.3f ms/layer, turbo3 %.3f ms/layer; flash %.2fx legacy, "
+           "native/f32 %.2fx, turbo3/f32 %.2fx; 21-layer contribution "
+           "%.3f -> %.3f -> %.3f -> %.3f ms/token\n",
+           legacy_ms, flash_ms, native_ms, turbo_ms, legacy / flash,
+           native / flash, turbo / flash, legacy_ms * 21.0,
+           flash_ms * 21.0, native_ms * 21.0, turbo_ms * 21.0);
     for (int i = 0; i < HCA_SELECTED; i++) compressed_indices[i] = i;
     start = monotonic_seconds();
     for (int repeat = 0; repeat < REPEATS; repeat++)
@@ -394,15 +485,31 @@ static int benchmark_long_context(void) {
             goto cleanup;
         }
     double hca_native = monotonic_seconds() - start;
+    start = monotonic_seconds();
+    for (int repeat = 0; repeat < REPEATS; repeat++)
+        if (coli_v4_flash_attention_codec_ref(
+                output, queries, turbo_encoded, WINDOW,
+                turbo_encoded + (size_t)WINDOW * turbo_row,
+                HCA_SELECTED, window_indices, compressed_indices, HCA_SELECTED,
+                COLI_V4_KV_TURBO3, ROPE,
+                sinks, HEADS, HEAD_DIM, scale)) {
+            failed = 1;
+            goto cleanup;
+        }
+    double hca_turbo = monotonic_seconds() - start;
     double hca_f32_ms = hca_f32 * 1000.0 / REPEATS;
     double hca_native_ms = hca_native * 1000.0 / REPEATS;
-    printf("128k HCA attention: f32 %.3f ms/layer, native %.3f ms/layer, %.2fx; "
-           "20-layer contribution %.3f -> %.3f ms/token\n",
-           hca_f32_ms, hca_native_ms, hca_native / hca_f32,
-           hca_f32_ms * 20.0, hca_native_ms * 20.0);
+    double hca_turbo_ms = hca_turbo * 1000.0 / REPEATS;
+    printf("128k HCA attention: f32 %.3f ms/layer, native %.3f ms/layer, "
+           "turbo3 %.3f ms/layer; native/f32 %.2fx, turbo3/f32 %.2fx; "
+           "20-layer contribution %.3f -> %.3f -> %.3f ms/token\n",
+           hca_f32_ms, hca_native_ms, hca_turbo_ms, hca_native / hca_f32,
+           hca_turbo / hca_f32, hca_f32_ms * 20.0,
+           hca_native_ms * 20.0, hca_turbo_ms * 20.0);
 cleanup:
     free(compressed_indices); free(window_indices); free(indices);
-    free(output); free(queries); free(encoded); free(staged); free(values);
+    free(output); free(queries); free(turbo_encoded); free(encoded);
+    free(staged); free(values);
     return failed;
 }
 
@@ -410,12 +517,15 @@ static int benchmark_indexer_scan(void) {
     enum { HEADS = 64, DIMENSION = 128, CANDIDATES = 32768, REPEATS = 3 };
     size_t native_row = coli_v4_kv_row_bytes(
         COLI_V4_KV_NATIVE, COLI_V4_KV_INDEX, DIMENSION, 0);
+    size_t turbo_row = coli_v4_kv_row_bytes(
+        COLI_V4_KV_TURBO3, COLI_V4_KV_INDEX, DIMENSION, 0);
     float *values = malloc((size_t)CANDIDATES * DIMENSION * sizeof(*values));
     unsigned char *encoded = malloc((size_t)CANDIDATES * native_row);
+    unsigned char *turbo_encoded = malloc((size_t)CANDIDATES * turbo_row);
     float *queries = malloc((size_t)HEADS * DIMENSION * sizeof(*queries));
     float *weights = malloc((size_t)HEADS * sizeof(*weights));
     int failed = 0;
-    if (!values || !encoded || !queries || !weights) {
+    if (!values || !encoded || !turbo_encoded || !queries || !weights) {
         failed = 1;
         goto cleanup;
     }
@@ -434,6 +544,13 @@ static int benchmark_indexer_scan(void) {
         if (coli_v4_kv_encode_row(
                 COLI_V4_KV_NATIVE, COLI_V4_KV_INDEX,
                 encoded + (size_t)candidate * native_row,
+                row, DIMENSION, 0)) {
+            failed = 1;
+            goto cleanup;
+        }
+        if (coli_v4_kv_encode_row(
+                COLI_V4_KV_TURBO3, COLI_V4_KV_INDEX,
+                turbo_encoded + (size_t)candidate * turbo_row,
                 row, DIMENSION, 0)) {
             failed = 1;
             goto cleanup;
@@ -479,18 +596,41 @@ static int benchmark_indexer_scan(void) {
             checksum += score;
         }
     double native = monotonic_seconds() - start;
-    printf("128k indexer scan/layer: f32 %.3f ms, native %.3f ms, %.2fx "
+    start = monotonic_seconds();
+    for (int repeat = 0; repeat < REPEATS; repeat++)
+        for (int candidate = 0; candidate < CANDIDATES; candidate++) {
+            if (coli_v4_kv_decode_row(
+                    COLI_V4_KV_TURBO3, COLI_V4_KV_INDEX, decoded,
+                    turbo_encoded + (size_t)candidate * turbo_row,
+                    DIMENSION, 0)) {
+                failed = 1;
+                goto cleanup;
+            }
+            float score = 0.0f;
+            for (int head = 0; head < HEADS; head++) {
+                const float *query = queries + (size_t)head * DIMENSION;
+                float dot = 0.0f;
+                for (int i = 0; i < DIMENSION; i++)
+                    dot += query[i] * decoded[i];
+                score += fmaxf(dot, 0.0f) * weights[head];
+            }
+            checksum += score;
+        }
+    double turbo = monotonic_seconds() - start;
+    printf("128k indexer scan/layer: f32 %.3f ms, native %.3f ms, "
+           "turbo3 %.3f ms; native/f32 %.2fx, turbo3/f32 %.2fx "
            "(checksum=%g)\n",
            f32 * 1000.0 / REPEATS, native * 1000.0 / REPEATS,
-           native / f32, checksum);
+           turbo * 1000.0 / REPEATS, native / f32, turbo / f32, checksum);
 cleanup:
-    free(weights); free(queries); free(encoded); free(values);
+    free(weights); free(queries); free(turbo_encoded); free(encoded); free(values);
     return failed;
 }
 
 int main(int argc, char **argv) {
     if (test_random_cases() || test_edge_cases() || test_compressed_bounds() ||
-        test_switch() || test_native_codec_equivalence()) {
+        test_switch() || test_native_codec_equivalence() ||
+        test_turbo_codec_equivalence()) {
         fprintf(stderr, "test_v4_flash_attention: FAIL\n");
         return 1;
     }

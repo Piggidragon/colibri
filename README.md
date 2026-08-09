@@ -625,4 +625,5 @@ these is used or reimplemented in the tree today:
 
 ## License
 
-Apache 2.0. GLM-5.2 weights are released by Z.ai under MIT.
+Apache 2.0. GLM-5.2 weights are released by Z.ai under MIT. Third-party code
+notices are collected in [THIRD_PARTY_NOTICES](THIRD_PARTY_NOTICES).

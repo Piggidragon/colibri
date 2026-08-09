@@ -4,7 +4,8 @@ Voraussetzung: [00-reference.md](00-reference.md), [03-kv-codec.md](03-kv-codec.
 
 *Commits:*
 1. `feat: TurboQuant 2/3/4-bit KV codec`
-2. `perf: keep V4 attention in the WHT domain, one inverse per head` (optional)
+2. ~~`perf: keep V4 attention in the WHT domain, one inverse per head`~~
+   (in dieser Phase verworfen; kein `V4_KV_ROTATED`)
 
 ## Ergebnis
 
@@ -28,21 +29,35 @@ Der deterministische Test über 32 Zeilen à 512 kontinuierliche Zufallswerte un
 | turbo3 | 0,9833 | 0,9832 | 1,0000 |
 | turbo4 | 0,9954 | 0,9954 | 1,0000 |
 
-Die Vorquantisierung verursacht damit keinen sichtbaren zusätzlichen Einbruch.
-Beim turbo3-Vorgitter liegen die getrennten Cosines für NoPE und RoPE bei 0,9832
-und 0,9834; der gleichförmige Codec bleibt deshalb die einzige Variante.
-`V4_KV_ROPE_BF16` wurde nicht eingeführt. Turbo3 liegt damit unter dem im Plan
-grob als „≈ 1,0“ übernommenen Fork-Wert; die gemessene 0,9832 ist die belastbare
-Schranke dieses Ports. Die 128k-Planerrechnung mit Paper-Geometrie ergibt
+Die Vorquantisierung verursacht bei **gleicher** Varianz keinen sichtbaren
+zusätzlichen Einbruch. Dieser Fall genügt aber nicht für eine Entscheidung über
+den RoPE-Schwanz: bei skalierten RoPE-Dimensionen misst turbo3:
+
+| RoPE-Skala | Gesamt | NoPE | RoPE |
+|---:|---:|---:|---:|
+| 1 | 0,9832 | 0,9832 | 0,9834 |
+| 1/4 | 0,9832 | 0,9842 | 0,8850 |
+| 1/16 | 0,9832 | 0,9839 | 0,5072 |
+| 16 | 0,9836 | 0,8380 | 0,9888 |
+
+Der größere Anteil maskiert den kleineren im Gesamt-Cosine. Der gleichförmige
+Codec ist daher nur die derzeit implementierte Variante, keine aus diesen
+Zufallsdaten abgeleitete Qualitätsentscheidung gegen `V4_KV_ROPE_BF16`. Eine
+solche Entscheidung braucht Statistiken oder Qualitätsmessungen am vollständigen
+Checkpoint. Turbo3 liegt außerdem unter dem im Plan grob als „≈ 1,0“ übernommenen
+Fork-Wert; 0,9832 ist die belastbare Schranke dieses Ports für den gleich
+skalierten Test. Die 128k-Planerrechnung mit Paper-Geometrie ergibt
 **1,690 GiB f32 → 0,431 GiB native → 0,165 GiB turbo3**, also 10,24× gegenüber
 f32 und 2,61× gegenüber dem vollständigen nativen KV-Kontext einschließlich des
 kleineren Indexerformats.
 
-Der optionale zweite Commit (`V4_KV_ROTATED`) wurde nicht umgesetzt. Er würde
+Der zweite Commit (`V4_KV_ROTATED`) wurde verworfen. Er würde
 einen zweiten Attention-Kernel einführen, während Phase 05 denselben Spezialpfad
 auf CUDA baut; der generische Decode-zurück-in-den-Originalraum-Pfad bleibt das
-Testorakel dafür. Entsprechend sind die beiden nicht implementierten Variablen
-aus der Referenztabelle entfernt worden. Ein Full-Checkpoint-Durchsatz- und
+Testorakel dafür. Phase 05 setzt den rotierten Modus deshalb nicht voraus und
+beginnt mit direkter Turbo-Dequantisierung im Originalraum. Entsprechend sind
+die beiden nicht implementierten Variablen aus der Referenztabelle entfernt
+worden. Ein Full-Checkpoint-Durchsatz- und
 Tokenqualitätstest steht aus, weil der 167-GB-Checkpoint in der
 Entwicklungsumgebung nicht vorhanden ist. `make test` und `make check` sind
 grün. Das vorhandene Tiny-Fixture besteht Oracle und Prefix-Reuse mit Defaults
@@ -53,6 +68,14 @@ zurück. Das Fixture wurde anschließend mit `torch==2.13.0+cpu`,
 `.venv-v4-tiny` erzwungen neu erzeugt. Der vollständige
 `deepseek-v4-tiny-check` besteht Target-Oracle, Session-/Serve-Protokoll und
 Prefix-Reuse token-identisch; der generierte Modellbestand bleibt unter 1 MiB.
+
+Ein 128-Dim-Turbo3-Fall im Flash-Attention-Test läuft dagegen ohne Fallback durch
+den zeilenweise kodierten Cache und vergleicht dessen Output bitgleich mit den
+vorab dekodierten f32-Zeilen. Der optionale synthetische 128k-Benchmark auf dem
+i5-13400F (`-O3 -march=native`) misst in vier Läufen für turbo3/f32 Bereiche von
+0,95–1,09× (CSA), 1,01–1,09× (HCA) und 1,10–1,30× (Indexer); die Mediane liegen
+bei etwa 1,05×, 1,05× und 1,14×. Das ist der CPU-Preis des generischen
+Decode-Pfads in diesem Harness, keine Full-Checkpoint-Tokenrate.
 
 ## Ziel
 
@@ -99,7 +122,8 @@ Hauptzeilen aus.
 
 `reference/llama-cpp-turboquant/ggml/src/ggml-turbo-quant.c` (1030 Zeilen, MIT).
 Zu portieren sind ~200 davon. Neuer Header `c/turbo_quant.h` mit Attribution im
-Kopfkommentar (arXiv 2504.19874, llama.cpp-Fork, MIT → Apache-2.0).
+Kopfkommentar (arXiv 2504.19874, llama.cpp-Fork, MIT → Apache-2.0); der
+vollständige MIT-Text liegt in `THIRD_PARTY_NOTICES`.
 
 **`reference/` wird nicht committet.** Vor dem ersten Commit prüfen, dass es in
 `.gitignore` steht oder nie gestaget wird.
@@ -234,15 +258,15 @@ Die mittlere Zeile stimmt nur, wenn man Dims 384–447 mitquantisiert — 448 te
 sich nicht in 128er-Gruppen. Sauber ist entweder die erste (alles turbo) oder die
 dritte (turbo für 0–383, `native`-fp8 für 384–447, bf16 für 448–511).
 
-**Erst die gleichförmige Variante bauen und messen**, dann entscheiden. Wenn der
-Qualitätsunterschied klein ist, gewinnt sie durch Einfachheit; wenn nicht, ist die
-dritte Variante die richtige und `V4_KV_ROPE_BF16=1` schaltet sie.
+Die gleichförmige Variante ist gebaut. Der Test muss mehrere NoPE-/RoPE-
+Varianzverhältnisse getrennt ausweisen; sein Gesamt-Cosine allein reicht wegen
+der 448:64-Gewichtung nicht. Die gemessene Empfindlichkeit hält die dritte
+Variante als möglichen `V4_KV_ROPE_BF16`-Follow-up offen, entschieden wird sie
+erst mit Statistiken oder Qualitätsmessungen am vollständigen Checkpoint.
 
-Nicht vorab entscheiden — die Zahl entscheidet.
+## Verworfener CPU-Follow-up: rotierter Score-Raum
 
-## Optional: rotierter Score-Raum
-
-*Zweiter Commit, hinter `V4_KV_ROTATED=1`.*
+*Nicht implementiert; kein `V4_KV_ROTATED`-Knopf.*
 
 Die WHT ist orthogonal, also `<Rq, Rk> = <q, k>`. Statt jede gelesene Zeile
 zurückzudrehen:
