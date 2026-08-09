@@ -667,6 +667,9 @@ cuda-test: backend_cuda.cu backend_cuda.h backend_gpu_compat.h tests/test_backen
 	"$(GPUCC)" $(GPUFLAGS) backend_cuda.cu tests/test_ragged_attention.cu -o ragged_attention_test$(EXE)
 	./ragged_attention_test$(EXE)
 
+v4-cuda-compile v4-cuda-test:
+	$(MAKE) -f Makefile.deepseek-v4 CUDA=1 ARCH=$(ARCH) CUDA_ARCH=$(CUDA_ARCH) $@
+
 # convenience alias: kernel correctness on AMD (same test, hipcc toolchain)
 hip-test:
 	$(MAKE) cuda-test HIP=1

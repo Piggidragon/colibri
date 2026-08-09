@@ -1,5 +1,7 @@
 # ambienti python / cache
 c/mio_env/
+.venv-v4-tiny/
+.venv-v4-oracle/
 __pycache__/
 **/__pycache__/
 *.pyc
@@ -23,6 +25,10 @@ c/iobench
 c/iobench.exe
 c/tok_test
 c/backend_cuda.o
+c/backend_cuda_v4.o
+c/COLI_V4_*.o
+c/deepseek_v4
+c/deepseek_v4_tiny/.coli_usage
 c/backend_cuda_test
 c/backend_loader.o
 c/coli_cuda.dll

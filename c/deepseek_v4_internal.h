@@ -128,6 +128,24 @@ int coli_v4_swiglu(float *output, const float *gate, const float *up,
 #endif
 /* ==== end deepseek_v4_math.h ==== */
 
+/* Flash attention opt-out (V4_FLASH=0). Shared by every unit that carries a
+ * copy of the attention source, so it lives here rather than in one unit. */
+#include <stdlib.h>
+#include <string.h>
+
+static inline int v4_flash_enabled(void) {
+    const char *setting = getenv("V4_FLASH");
+    if (!setting || strcmp(setting, "1") == 0) return 1;
+    if (strcmp(setting, "0") == 0) return 0;
+    return 1;
+}
+
+#ifdef COLI_V4_CUDA
+/* Defined once in COLI_V4_UNIT_MATH; latches the CPU-fallback warning so it is
+ * printed once per process rather than once per attention unit. */
+extern int coli_v4_attention_cuda_warned;
+#endif
+
 /* ==== begin deepseek_v4_layer.h ==== */
 
 #include <stddef.h>
@@ -669,6 +687,7 @@ typedef struct {
     uint64_t dspark_reserve_bytes;
     ColiV4KVCodec kv_codec;
     ColiV4KVCodec index_codec;
+    int vram_enabled;
 } ColiDeepSeekV4RuntimeOptions;
 
 enum { COLI_V4_RESIDENT_MAX_LAYERS = 128 };

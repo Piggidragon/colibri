@@ -1,0 +1,319 @@
+#include "../backend_cuda_v4.h"
+#include "../native_quant.h"
+#include "../v4_kv_codec.h"
+
+#include <math.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <time.h>
+
+extern "C" int coli_v4_flash_attention_codec_ref(
+    float *output, const float *queries,
+    const void *window_kv, int window_size,
+    const void *compressed_kv, int compressed_count,
+    const int *window_indices,
+    const int *compressed_indices, int compressed_selected,
+    ColiV4KVCodec codec, int rope_dimension,
+    const float *sinks, int heads, int head_dimension, float softmax_scale);
+
+static uint32_t rng_state = UINT32_C(0x31415926);
+
+static double monotonic_seconds(void) {
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    return (double)now.tv_sec + (double)now.tv_nsec * 1e-9;
+}
+
+static float random_signed(void) {
+    rng_state = rng_state * UINT32_C(1664525) + UINT32_C(1013904223);
+    return ((float)((rng_state >> 8) & 0xffffu) / 32768.0f - 1.0f) * 0.75f;
+}
+
+static int make_native_row(float *row, int row_id, int rope_dim) {
+    float qdq[512];
+    uint8_t scales[8];
+    int nope = 512 - rope_dim;
+    for (int i = 0; i < 512; i++)
+        row[i] = random_signed() + 0.01f * sinf((float)(row_id + i));
+    if (coli_fp8_activation_qdq_ref(qdq, scales, row, (size_t)nope, 64))
+        return -1;
+    memcpy(row, qdq, (size_t)nope * sizeof(*row));
+    coli_bf16_round_array(row, (size_t)nope);
+    coli_bf16_round_array(row + nope, (size_t)rope_dim);
+    return 0;
+}
+
+static int make_model_row(float *row, int row_id) {
+    return make_native_row(row, row_id, 64);
+}
+
+static int close_enough(const float *reference, const float *actual,
+                        size_t count, float *cosine) {
+    double dot = 0.0, ref2 = 0.0, got2 = 0.0;
+    for (size_t i = 0; i < count; i++) {
+        float limit = 1e-3f + 8e-3f * fmaxf(fabsf(reference[i]),
+                                             fabsf(actual[i]));
+        if (fabsf(reference[i] - actual[i]) > limit) {
+            fprintf(stderr,
+                    "component %zu differs: cpu=%g cuda=%g limit=%g\n",
+                    i, reference[i], actual[i], limit);
+            return -1;
+        }
+        dot += (double)reference[i] * actual[i];
+        ref2 += (double)reference[i] * reference[i];
+        got2 += (double)actual[i] * actual[i];
+    }
+    *cosine = ref2 > 0.0 && got2 > 0.0
+        ? (float)(dot / sqrt(ref2 * got2)) : 1.0f;
+    return *cosine > 0.9999f ? 0 : -1;
+}
+
+static int run_case(ColiV4KVCodec codec, int heads,
+                    int compressed_selected, int report_timing) {
+    enum { HEAD_DIM = 512, ROPE_DIM = 64, WINDOW = 8 };
+    int compressed_count = compressed_selected > 0 ? compressed_selected : 0;
+    size_t row_bytes = coli_v4_kv_row_bytes(
+        codec, COLI_V4_KV_MAIN, HEAD_DIM, ROPE_DIM);
+    size_t host_rows = (size_t)WINDOW + compressed_count;
+    float *rows = (float *)malloc(host_rows * HEAD_DIM * sizeof(float));
+    unsigned char *window = (unsigned char *)malloc((size_t)WINDOW * row_bytes);
+    unsigned char *compressed = compressed_count
+        ? (unsigned char *)malloc((size_t)compressed_count * row_bytes) : NULL;
+    float *queries = (float *)malloc((size_t)heads * HEAD_DIM * sizeof(float));
+    float *cpu = (float *)malloc((size_t)heads * HEAD_DIM * sizeof(float));
+    float *gpu = (float *)malloc((size_t)heads * HEAD_DIM * sizeof(float));
+    float *sinks = (float *)malloc((size_t)heads * sizeof(float));
+    int window_indices[WINDOW];
+    int *compressed_indices = compressed_count
+        ? (int *)malloc((size_t)compressed_count * sizeof(int)) : NULL;
+    if (!row_bytes || !rows || !window || (compressed_count && !compressed) ||
+        !queries || !cpu || !gpu || !sinks ||
+        (compressed_count && !compressed_indices))
+        return -1;
+
+    for (size_t row = 0; row < host_rows; row++) {
+        float *source = rows + row * HEAD_DIM;
+        if (make_model_row(source, (int)row) || coli_v4_kv_encode_row(
+                codec, COLI_V4_KV_MAIN,
+                row < WINDOW ? window + row * row_bytes
+                             : compressed + (row - WINDOW) * row_bytes,
+                source, HEAD_DIM, ROPE_DIM))
+            return -1;
+    }
+    for (int i = 0; i < WINDOW; i++)
+        window_indices[i] = !report_timing && i == 3 ? -1 : i;
+    for (int i = 0; i < compressed_count; i++)
+        compressed_indices[i] = !report_timing && i && i % 257 == 0 ? -1 : i;
+    for (int head = 0; head < heads; head++) {
+        sinks[head] = heads == 1 && compressed_selected == 7
+            ? 80.0f : (float)(head % 7 - 3) * 0.125f;
+        for (int column = 0; column < HEAD_DIM; column++)
+            queries[(size_t)head * HEAD_DIM + column] = random_signed();
+    }
+
+    void *device_window = v4_cuda_kv_alloc((size_t)WINDOW * row_bytes);
+    void *device_compressed = compressed_count
+        ? v4_cuda_kv_alloc((size_t)compressed_count * row_bytes) : NULL;
+    if (!device_window || (compressed_count && !device_compressed)) return -1;
+    for (int row = 0; row < WINDOW; row++)
+        if (v4_cuda_kv_write_row(
+                device_window, row, window + (size_t)row * row_bytes,
+                row_bytes)) return -1;
+    for (int row = 0; row < compressed_count; row++)
+        if (v4_cuda_kv_write_row(
+                device_compressed, row,
+                compressed + (size_t)row * row_bytes, row_bytes)) return -1;
+
+    float scale = 1.0f / sqrtf((float)HEAD_DIM);
+    const int *selected_indices = heads == 8 && compressed_selected == 64
+        ? NULL : compressed_indices;
+    double cpu_started = monotonic_seconds();
+    int result = coli_v4_flash_attention_codec_ref(
+        cpu, queries, window, WINDOW, compressed, compressed_count,
+        window_indices, selected_indices, compressed_selected,
+        codec, ROPE_DIM, sinks, heads, HEAD_DIM, scale);
+    double cpu_seconds = monotonic_seconds() - cpu_started;
+    double cuda_started = monotonic_seconds();
+    if (!result) result = v4_cuda_flash_attention(
+        gpu, queries, device_window, WINDOW, window_indices,
+        device_compressed, compressed_count, selected_indices,
+        compressed_selected, sinks, codec, heads, HEAD_DIM, ROPE_DIM,
+        row_bytes, scale);
+    double cuda_seconds = monotonic_seconds() - cuda_started;
+    if (!result && report_timing) {
+        const int iterations = 5;
+        cpu_started = monotonic_seconds();
+        for (int iteration = 0; !result && iteration < iterations; iteration++)
+            result = coli_v4_flash_attention_codec_ref(
+                cpu, queries, window, WINDOW, compressed, compressed_count,
+                window_indices, selected_indices, compressed_selected,
+                codec, ROPE_DIM, sinks, heads, HEAD_DIM, scale);
+        cpu_seconds = (monotonic_seconds() - cpu_started) / iterations;
+        cuda_started = monotonic_seconds();
+        for (int iteration = 0; !result && iteration < iterations; iteration++)
+            result = v4_cuda_flash_attention(
+                gpu, queries, device_window, WINDOW, window_indices,
+                device_compressed, compressed_count, selected_indices,
+                compressed_selected, sinks, codec, heads, HEAD_DIM,
+                ROPE_DIM, row_bytes, scale);
+        cuda_seconds = (monotonic_seconds() - cuda_started) / iterations;
+    }
+    float cosine = 0.0f;
+    if (!result) result = close_enough(
+        cpu, gpu, (size_t)heads * HEAD_DIM, &cosine);
+    if (result)
+        fprintf(stderr, "failed codec=%s heads=%d selected=%d cosine=%g\n",
+                coli_v4_kv_codec_name(codec), heads,
+                compressed_selected, cosine);
+    else if (report_timing)
+        printf("v4_cuda_bench codec=%s heads=%d rows=%d cpu=%.3fms "
+               "cuda=%.3fms speedup=%.2fx cosine=%.7f\n",
+               coli_v4_kv_codec_name(codec), heads,
+               WINDOW + compressed_selected, cpu_seconds * 1e3,
+               cuda_seconds * 1e3, cpu_seconds / cuda_seconds, cosine);
+
+    v4_cuda_kv_free(device_compressed);
+    v4_cuda_kv_free(device_window);
+    free(compressed_indices); free(sinks); free(gpu); free(cpu); free(queries);
+    free(compressed); free(window); free(rows);
+    return result;
+}
+
+static int test_rejections_before_tables(void) {
+    float row[512] = {0}, query[512] = {0}, output[512], sink = 0.0f;
+    int index = 0;
+    void *device = v4_cuda_kv_alloc(sizeof(row));
+    if (!device || v4_cuda_kv_write_row(device, 0, row, sizeof(row))) return -1;
+    int result = v4_cuda_flash_attention(
+        output, query, device, 1, &index, NULL, 0, NULL, 0,
+        &sink, COLI_V4_KV_F32, 1, 512, 0, sizeof(row),
+        1.0f / sqrtf(512.0f));
+    v4_cuda_kv_free(device);
+    return result == -1 ? 0 : -1;
+}
+
+static int test_invalid_compressed_index(void) {
+    float row[512] = {0}, query[512] = {0}, output[512], sink = 0.0f;
+    int window_index = 0, compressed_index = 1;
+    void *window = v4_cuda_kv_alloc(sizeof(row));
+    void *compressed = v4_cuda_kv_alloc(sizeof(row));
+    if (!window || !compressed ||
+        v4_cuda_kv_write_row(window, 0, row, sizeof(row)) ||
+        v4_cuda_kv_write_row(compressed, 0, row, sizeof(row))) return -1;
+    int result = v4_cuda_flash_attention(
+        output, query, window, 1, &window_index, compressed, 1,
+        &compressed_index, 1, &sink, COLI_V4_KV_F32, 1, 512,
+        0, sizeof(row), 1.0f / sqrtf(512.0f));
+    v4_cuda_kv_free(compressed);
+    v4_cuda_kv_free(window);
+    return result == -1 ? 0 : -1;
+}
+
+static int test_native_rope_dimension(void) {
+    enum { HEAD_DIM = 512, ROPE_DIM = 63 };
+    float source[HEAD_DIM], query[HEAD_DIM], cpu[HEAD_DIM], gpu[HEAD_DIM];
+    float sink = -0.25f, cosine = 0.0f;
+    int index = 0;
+    size_t row_bytes = coli_v4_kv_row_bytes(
+        COLI_V4_KV_NATIVE, COLI_V4_KV_MAIN, HEAD_DIM, ROPE_DIM);
+    unsigned char *row = (unsigned char *)malloc(row_bytes);
+    if (!row) return -1;
+    if (make_native_row(source, 17, ROPE_DIM)) {
+        free(row);
+        return -1;
+    }
+    for (int column = 0; column < HEAD_DIM; column++) {
+        query[column] = random_signed();
+    }
+    int result = coli_v4_kv_encode_row(
+        COLI_V4_KV_NATIVE, COLI_V4_KV_MAIN, row, source,
+        HEAD_DIM, ROPE_DIM);
+    void *device = !result ? v4_cuda_kv_alloc(row_bytes) : NULL;
+    if (!device || v4_cuda_kv_write_row(device, 0, row, row_bytes)) result = -1;
+    if (!result) result = coli_v4_flash_attention_codec_ref(
+        cpu, query, row, 1, NULL, 0, &index, NULL, 0,
+        COLI_V4_KV_NATIVE, ROPE_DIM, &sink, 1, HEAD_DIM,
+        1.0f / sqrtf((float)HEAD_DIM));
+    if (!result) result = v4_cuda_flash_attention(
+        gpu, query, device, 1, &index, NULL, 0, NULL, 0, &sink,
+        COLI_V4_KV_NATIVE, 1, HEAD_DIM, ROPE_DIM, row_bytes,
+        1.0f / sqrtf((float)HEAD_DIM));
+    if (!result) result = close_enough(cpu, gpu, HEAD_DIM, &cosine);
+    v4_cuda_kv_free(device);
+    free(row);
+    return result;
+}
+
+static int test_nonfinite_turbo_norm(void) {
+    enum { HEAD_DIM = 512, ROPE_DIM = 64 };
+    float source[HEAD_DIM], query[HEAD_DIM] = {0}, output[HEAD_DIM];
+    float sink = 0.0f;
+    int index = 0;
+    size_t row_bytes = coli_v4_kv_row_bytes(
+        COLI_V4_KV_TURBO2, COLI_V4_KV_MAIN, HEAD_DIM, ROPE_DIM);
+    unsigned char *row = (unsigned char *)malloc(row_bytes);
+    if (!row) return -1;
+    for (int column = 0; column < HEAD_DIM; column++)
+        source[column] = random_signed();
+    int result = coli_v4_kv_encode_row(
+        COLI_V4_KV_TURBO2, COLI_V4_KV_MAIN, row, source,
+        HEAD_DIM, ROPE_DIM);
+    row[0] = 0x00;
+    row[1] = 0x7c;
+    void *device = !result ? v4_cuda_kv_alloc(row_bytes) : NULL;
+    if (!device || v4_cuda_kv_write_row(device, 0, row, row_bytes)) result = -1;
+    if (!result) {
+        result = v4_cuda_flash_attention(
+            output, query, device, 1, &index, NULL, 0, NULL, 0, &sink,
+            COLI_V4_KV_TURBO2, 1, HEAD_DIM, ROPE_DIM, row_bytes,
+            1.0f / sqrtf((float)HEAD_DIM));
+        result = result == -1 ? 0 : -1;
+    }
+    v4_cuda_kv_free(device);
+    free(row);
+    return result;
+}
+
+int main(void) {
+    if (v4_cuda_init(0)) {
+        puts("test_v4_attention_cuda: skipped (no CUDA device)");
+        return 77;
+    }
+    if (test_rejections_before_tables() || v4_cuda_publish_tables() ||
+        test_invalid_compressed_index() || test_native_rope_dimension() ||
+        test_nonfinite_turbo_norm())
+        return 1;
+    if (v4_cuda_kv_alloc(SIZE_MAX / 2) != NULL) {
+        fprintf(stderr, "absurd allocation unexpectedly succeeded\n");
+        return 1;
+    }
+
+    const ColiV4KVCodec codecs[] = {
+        COLI_V4_KV_F32, COLI_V4_KV_NATIVE, COLI_V4_KV_TURBO4,
+        COLI_V4_KV_TURBO3, COLI_V4_KV_TURBO2,
+    };
+    const int head_counts[] = {1, 8, 64};
+    const int selections[] = {1, 7, 64, 2048};
+    for (size_t codec = 0; codec < sizeof(codecs) / sizeof(codecs[0]); codec++)
+        for (size_t heads = 0;
+             heads < sizeof(head_counts) / sizeof(head_counts[0]); heads++)
+            for (size_t selected = 0;
+                 selected < sizeof(selections) / sizeof(selections[0]); selected++)
+                if (run_case(codecs[codec], head_counts[heads],
+                             selections[selected], 0))
+                    return 1;
+    if (getenv("V4_CUDA_BENCH")) {
+        const int benchmark_selections[] = {632, 1144, 7932};
+        for (size_t selected = 0;
+             selected < sizeof(benchmark_selections) /
+                        sizeof(benchmark_selections[0]); selected++)
+            if (run_case(COLI_V4_KV_NATIVE, 64,
+                         benchmark_selections[selected], 1))
+                return 1;
+    }
+    v4_cuda_shutdown();
+    puts("test_v4_attention_cuda: ok");
+    return 0;
+}

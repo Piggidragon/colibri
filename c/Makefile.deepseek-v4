@@ -47,6 +47,31 @@ LDFLAGS = -lm -fopenmp -pthread
 V4_BINARY := deepseek_v4
 endif
 
+CUDA ?= 0
+ifeq ($(CUDA),1)
+ifneq ($(UNAME_S),Linux)
+$(error CUDA=1 for the V4 engine is supported only on Linux)
+endif
+CUDA_HOME ?= /usr/local/cuda
+NVCC ?= $(CUDA_HOME)/bin/nvcc
+CUDA_ARCH ?= native
+ifeq ($(CUDA_ARCH),portable)
+CUDA_GENCODE = -gencode arch=compute_80,code=sm_80 \
+               -gencode arch=compute_86,code=sm_86 \
+               -gencode arch=compute_89,code=sm_89 \
+               -gencode arch=compute_90,code=sm_90 \
+               -gencode arch=compute_120,code=sm_120 \
+               -gencode arch=compute_120,code=compute_120
+else
+CUDA_GENCODE = -arch=$(CUDA_ARCH)
+endif
+NVCCFLAGS ?= -O3 -std=c++17 $(CUDA_GENCODE) -Xcompiler=-Wall,-Wextra,-fPIE
+# GCC LTO cannot consume nvcc's host objects.  Keep the CPU default unchanged.
+override LTO := 0
+CFLAGS += -DCOLI_V4_CUDA
+LDFLAGS += -L$(CUDA_HOME)/lib64 -Wl,-rpath,$(CUDA_HOME)/lib64 -lcudart -lstdc++
+endif
+
 LTO ?= 1
 ifeq ($(LTO),1)
 CFLAGS += -flto
@@ -57,7 +82,21 @@ include Makefile.deepseek-v4.units
 
 TARGET_OBJS = $(addsuffix .o,$(V4_TARGET_UNITS))
 TEST_UNIT_OBJS = $(addsuffix .o,$(V4_TEST_UNITS))
+V4_CUDA_TEST_DIR = build/v4-cuda-test
 V4_OBJS = $(TARGET_OBJS)
+ifeq ($(CUDA),1)
+V4_OBJS += $(V4_CUDA_TEST_DIR)/backend_cuda.o backend_cuda_v4.o
+endif
+
+# This makefile is invoked through a sub-make, so sharing c/Makefile's
+# .build-config would make the two parsers rewrite each other's stamp on every
+# invocation.  A V4-local stamp preserves the same stale-object protection.
+V4_BUILD_CONFIG := $(CC)|$(CFLAGS)|$(LDFLAGS)|CUDA=$(CUDA)|CUDA_HOME=$(CUDA_HOME)|NVCC=$(NVCC)|NVCCFLAGS=$(NVCCFLAGS)|ARCH=$(ARCH)|CUDA_ARCH=$(CUDA_ARCH)
+V4_BUILD_CONFIG_OLD := $(shell cat .deepseek-v4-build-config 2>/dev/null)
+ifneq "$(V4_BUILD_CONFIG)" "$(V4_BUILD_CONFIG_OLD)"
+$(file >.deepseek-v4-build-config,$(V4_BUILD_CONFIG))
+endif
+.deepseek-v4-build-config: ;
 
 .PHONY: deepseek-v4 deepseek-v4-clean deepseek-v4-test-objs
 deepseek-v4: $(V4_BINARY)
@@ -68,10 +107,57 @@ $(V4_BINARY): $(V4_OBJS)
 $(TARGET_OBJS) $(TEST_UNIT_OBJS): %.o: deepseek_v4.c deepseek_v4.h \
 	deepseek_v4_internal.h deepseek_v4_dspark.inc st.h json.h compat.h tensor.h quant.h \
 	native_quant.h native_quant_batch.h native_quant_dual.h \
-	native_quant_fp4_rows16.h v4_kv_codec.h turbo_quant.h
+	native_quant_fp4_rows16.h v4_kv_codec.h turbo_quant.h \
+	.deepseek-v4-build-config
 	$(CC) $(CFLAGS) -D$* -c deepseek_v4.c -o $@
+
+$(V4_CUDA_TEST_DIR)/backend_cuda.o: backend_cuda.cu backend_cuda.h \
+		backend_gpu_compat.h .deepseek-v4-build-config | $(V4_CUDA_TEST_DIR)
+	@command -v "$(NVCC)" >/dev/null 2>&1 || { echo "nvcc not found: set CUDA_HOME or NVCC" >&2; exit 1; }
+	"$(NVCC)" $(NVCCFLAGS) -c backend_cuda.cu -o $@
+
+backend_cuda_v4.o: backend_cuda_v4.cu backend_cuda_v4.h backend_cuda.h \
+		v4_kv_codec.h turbo_quant.h .deepseek-v4-build-config
+	@command -v "$(NVCC)" >/dev/null 2>&1 || { echo "nvcc not found: set CUDA_HOME or NVCC" >&2; exit 1; }
+	"$(NVCC)" $(NVCCFLAGS) -c backend_cuda_v4.cu -o $@
+
+V4_CUDA_TEST_CFLAGS = $(filter-out -flto,$(CFLAGS))
+V4_CUDA_TEST_OBJS = \
+	$(V4_CUDA_TEST_DIR)/sparse_attention.o \
+	$(V4_CUDA_TEST_DIR)/kv_codec.o \
+	$(V4_CUDA_TEST_DIR)/native_quant.o
+
+$(V4_CUDA_TEST_DIR):
+	mkdir -p $@
+
+$(V4_CUDA_TEST_DIR)/sparse_attention.o: deepseek_v4.c deepseek_v4_internal.h \
+		v4_kv_codec.h native_quant.h | $(V4_CUDA_TEST_DIR)
+	$(CC) $(V4_CUDA_TEST_CFLAGS) -DCOLI_V4_UNIT_SPARSE_ATTENTION \
+		-c deepseek_v4.c -o $@
+
+$(V4_CUDA_TEST_DIR)/kv_codec.o: deepseek_v4.c v4_kv_codec.h \
+		native_quant.h turbo_quant.h | $(V4_CUDA_TEST_DIR)
+	$(CC) $(V4_CUDA_TEST_CFLAGS) -DCOLI_V4_UNIT_KV_CODEC \
+		-c deepseek_v4.c -o $@
+
+$(V4_CUDA_TEST_DIR)/native_quant.o: deepseek_v4.c native_quant.h \
+		quant.h | $(V4_CUDA_TEST_DIR)
+	$(CC) $(V4_CUDA_TEST_CFLAGS) -DCOLI_V4_UNIT_NATIVE_QUANT \
+		-c deepseek_v4.c -o $@
+
+.PHONY: v4-cuda-compile v4-cuda-test
+v4-cuda-compile: $(V4_CUDA_TEST_DIR)/backend_cuda.o backend_cuda_v4.o $(V4_CUDA_TEST_OBJS)
+	"$(NVCC)" $(NVCCFLAGS) -Xcompiler=-fopenmp \
+		tests/test_v4_attention_cuda.cu $(V4_CUDA_TEST_DIR)/backend_cuda.o backend_cuda_v4.o \
+		$(V4_CUDA_TEST_OBJS) -lgomp -lm -o $(V4_CUDA_TEST_DIR)/test_v4_attention_cuda
+
+v4-cuda-test: v4-cuda-compile
+	$(V4_CUDA_TEST_DIR)/test_v4_attention_cuda; status=$$?; \
+		test $$status -eq 0 -o $$status -eq 77
 
 deepseek-v4-test-objs: $(TEST_UNIT_OBJS)
 
 deepseek-v4-clean:
-	rm -f $(V4_BINARY) $(V4_OBJS) $(TEST_UNIT_OBJS)
+	rm -f $(V4_BINARY) $(V4_OBJS) $(TEST_UNIT_OBJS) $(V4_CUDA_TEST_OBJS) \
+		$(V4_CUDA_TEST_DIR)/backend_cuda.o backend_cuda_v4.o \
+		$(V4_CUDA_TEST_DIR)/test_v4_attention_cuda

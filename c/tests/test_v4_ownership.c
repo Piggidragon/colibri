@@ -242,6 +242,29 @@ static int test_session_lifetime_accounting(void) {
     return 0;
 }
 
+static int test_vram_request_falls_back_without_cuda(void) {
+    char directory[128], error[256];
+    if (make_fixture(directory, sizeof(directory))) return 1;
+
+    setenv("V4_VRAM", "1", 1);
+    coli_v4_test_skip_expert_store_open = 1;
+    ColiV4Engine *engine = NULL;
+    ColiV4EngineOpenOptions options = {.target_model_dir = directory};
+    int result = coli_v4_engine_open(&engine, &options, error, sizeof(error));
+    unsetenv("V4_VRAM");
+    coli_v4_test_skip_expert_store_open = 0;
+    if (result || !engine || engine->runtime.vram_enabled) {
+        fprintf(stderr, "V4_VRAM did not fall back in a CPU-only build\n");
+        coli_v4_engine_destroy(engine);
+        cleanup_fixture(directory);
+        return 1;
+    }
+    coli_v4_engine_destroy(engine);
+    cleanup_fixture(directory);
+    puts("ownership: V4_VRAM CPU fallback: ok");
+    return 0;
+}
+
 static int test_session_tokenizer_freed(void) {
     char directory[128];
     if (make_fixture(directory, sizeof(directory))) return 1;
@@ -288,6 +311,7 @@ int main(void) {
     if (test_index_closed_on_expert_fail()) return 1;
     if (test_engine_owns_model_path()) return 1;
     if (test_session_lifetime_accounting()) return 1;
+    if (test_vram_request_falls_back_without_cuda()) return 1;
     if (test_session_tokenizer_freed()) return 1;
     puts("DeepSeek-V4 ownership tests: ok");
     return 0;

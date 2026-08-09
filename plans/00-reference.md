@@ -116,16 +116,19 @@ sind ~0.32 GiB, die keiner Phase gehören und in keiner Phase verschwinden. Eine
 frühere Fassung dieser Bilanz ließ sie ganz weg.
 
 Die Gewinne aus der Phasenübersicht unten summieren sich **nicht** einfach über
-Tierwechsel hinweg. Phase 03 und Phase 05 greifen außerdem auf **dieselbe**
-KV-Zeile: Phase 03 senkt sie von 1.68 auf 0.43 GiB (**+1.25 GiB**), Phase 05
-verschiebt nur noch den Rest (**+0.43 GiB**).
+Tierwechsel hinweg. Phase 03 senkt den gesamten KV von 1.68 auf 0.43 GiB
+(**+1.25 GiB**). Phase 05 spiegelt davon nur den Attention-KV auf das Gerät und
+behält den Host-Fallback; der RAM-Gewinn entsteht erst mit exklusiver
+Device-Eigentümerschaft in Phase 08 und beträgt 0.388 GiB. Der native
+Lightning-Indexer (0.044 GiB bei 128k) bleibt auf der CPU.
 
-Eine Gegenprobe für den theoretischen Endzustand, nachdem KV, Dense, Head und
-DSpark aus dem RAM verschoben sind, zeigt den verbleibenden Kontextpreis:
+Eine Gegenprobe für den theoretischen Endzustand, nachdem Attention-KV, Dense,
+Head und DSpark aus dem RAM verschoben sind, zeigt den verbleibenden Kontextpreis.
+Der CPU-seitige Indexer-KV bleibt dabei abzuziehen:
 
 ```
-CTX=32k:  28.0 − 0.32 Layer − 4.00 State − 0.125 Scratch = 23.55 GiB
-CTX=128k: 28.0 − 0.32 Layer − 16.0 State − 0.125 Scratch = 11.55 GiB
+CTX=32k:  28.0 − 0.32 Layer − 4.00 State − 0.125 Scratch − 0.011 Index = 23.54 GiB
+CTX=128k: 28.0 − 0.32 Layer − 16.0 State − 0.125 Scratch − 0.044 Index = 11.51 GiB
 ```
 
 Das sind Obergrenzen vor Slot-Rundung, keine Messwerte. 128k kostet im aktuellen
@@ -133,10 +136,10 @@ Full-Prefill-Pfad also rund 12 GiB Expert-Cache gegenüber 32k, auch wenn der KV
 später vollständig im VRAM liegt. Eine spätere Chunk-/Streaming-Prefill-
 Optimierung könnte diesen Posten ändern; keiner der bestehenden Pläne tut das.
 
-Phase 04 (TurboQuant) taucht in dieser Summe **nicht** auf, und das ist kein
-Versehen: die +0.27 GiB aus der Phasenübersicht entstehen nur, solange der KV im
-RAM liegt. Nach Phase 05 liegt er im VRAM, und 04 zahlt dort ein statt hier
-(siehe VRAM-Budget unten, wo es beim 1M-Profil den Ausschlag gibt).
+Phase 04 (TurboQuant) zahlt nach exklusiver Attention-KV-Residenz fast vollständig
+im VRAM ein (siehe Budget unten, wo es beim 1M-Profil den Ausschlag gibt). Im RAM
+bleibt nur die getrennte Indexer-Ersparnis: bei 128k 0.044 GiB `native` gegenüber
+0.032 GiB `turbo3`, sofern die semantische Änderung opt-in akzeptiert wird.
 
 `per_slot = num_hidden_layers × expert_record_bytes = 43 × 13.37 MB ≈ 575 MB`
 (0.535 GiB), daher die Slot-Zahlen. `expert_record_bytes` summiert die `nbytes`
@@ -179,20 +182,22 @@ Fixkosten          8.12 GiB   → ~2.6 GiB bleiben für den KV
    für den Head, **nicht** für die 6.27 GiB Dense — die sind echte GiB
    (nachgerechnet über `coli_v4_layer_plan`).
 
-Der KV entscheidet damit die erreichbare Kontextlänge:
+Der **Attention-KV auf dem Gerät** entscheidet damit die erreichbare
+Kontextlänge. Die bislang hier geführten Gesamt-KV-Zahlen enthielten fälschlich
+auch den Lightning-Indexer, obwohl Phase 05 ihn auf der CPU auswertet und nicht
+hochlädt:
 
 | Kontext | KV f32 | KV `native` | KV turbo3 | passt mit |
 |---|---|---|---|---|
-| 128k | 1.68 | **0.43** | 0.16 | native (~2.15 GiB übrig) |
-| 256k | 3.4 | **0.86** | 0.33 | native (~1.72 GiB übrig) |
-| 512k | 6.7 | **1.7** | 0.65 | native (~0.88 GiB übrig) |
-| 1M | 13.4 | 3.4 ✗ | **1.3** | **nur turbo3** (~1.28 GiB übrig) |
+| 128k | 1.36 | **0.388** | 0.133 | native (~2.19 GiB übrig) |
+| 256k | 2.71 | **0.772** | 0.265 | native (~1.81 GiB übrig) |
+| 512k | 5.42 | **1.54** | 0.529 | native (~1.04 GiB übrig) |
+| 1M | 10.82 | 3.08 ✗ | **1.06** | **nur turbo3** (~1.52 GiB übrig) |
 
 **Damit ist Phase 4 für das 1M-Profil Pflicht, sonst optional.** `native` braucht
-bei 1M 3.4 GiB und bekommt 2.6 — es passt nicht, und zwar nicht knapp, sondern um
-0.8 GiB. Bis einschließlich 512k reicht `native` mit Luft. Das kehrt die Aussage
-einer früheren Fassung um („bei jeder Kontextlänge optional"); die Ursache war die
-fehlende Planner-Reserve, nicht ein Rechenfehler in den KV-Zeilen.
+bei 1M 3.08 GiB und bekommt rund 2.58 — es fehlt etwa 0.50 GiB. Bis einschließlich
+512k reicht `native` mit Luft. Der getrennte native Indexer belegt bei 1M weitere
+0.349 GiB RAM, aber kein VRAM.
 
 Vor dem 1M-Profil trotzdem mit `V4_VRAM_LIMIT_MB` (Plan 08) durchspielen, statt
 diese Tabelle zu glauben — sie rechnet mit einer nominellen Kartengröße, und der
@@ -720,26 +725,27 @@ daraus automatisch Gates. Keine zentrale Liste, kein Merge-Konflikt.
 | 01 | [Messen und RAM-Budget](01-measure-and-ram-budget.md) | Ist-Zahlen, `--memory-gb`/`RAM_GB`, `V4_SCRATCH_MB` | +2.6 GiB Systemreserve +0.375 GiB Scratch, vor Tierwechsel | — |
 | 02 | [Flash Attention](02-flash-attention.md) | Online-Softmax, `all_kv` weg, Source-Sync-Test | — | — |
 | 03 | [KV-Codec](03-kv-codec.md) | **natives fp8+bf16/fp4, bit-exakt**, `context_bytes` folgt | **+1.25 GiB** | — |
-| 04 | [TurboQuant](04-turboquant.md) | turbo2/3/4 als verlustbehafteter Tier | +0.27 GiB³ | −2.1 bei 1M |
-| 05 | [CUDA-Attention](05-cuda-attention.md) | `backend_cuda_v4`, Flash-Kernel, KV in VRAM | +0.43 GiB¹ | −0.43 |
+| 04 | [TurboQuant](04-turboquant.md) | turbo2/3/4 als verlustbehafteter Tier | +0.27 GiB vor 08; +0.012 danach³ | −2.0 bei 1M |
+| 05 | [CUDA-Attention](05-cuda-attention.md) | `backend_cuda_v4`, Flash-Kernel, Attention-KV-Spiegel | 0 (Host-Shadow) | −0.39 |
 | 06 | [Dense in VRAM](06-dense-vram.md) | fp8-Residenz + Matmuls auf GPU | +6.3 GiB | −6.3 |
 | 07 | [Head und DSpark in VRAM](07-head-dspark-vram.md) | Head-Matvec + Drafter auf GPU | +2.16 GiB | −1.55² |
-| 08 | [VRAM-Planner](08-vram-planner.md) | Stufenplanung, 4070-Profil | — | — |
+| 08 | [VRAM-Planner](08-vram-planner.md) | Stufenplanung, exklusive KV-Eigentümerschaft, 4070-Profil | +0.39 GiB¹ | — |
 | 09 | [Arch / CachyOS](09-arch-cachyos.md) | `omp_tune.h`, THP, CUDA-Pfade | — | — |
 | 10 | [Dual-Streaming](10-dual-streaming.md) | Mirror-Maschinerie nach V4, gewichtete Stripes | — | — |
 | 11 | [Rückbau auf V4](11-strip-to-v4.md) | andere Motoren + Windows raus | — | — |
 | 12 | [Expert-Cache-Politik](12-expert-cache-policy.md) | Pin-Deckel, Indexer (Scan + Select), Prefill | — | — |
 | 13 | [Frontend V4-only](13-frontend-v4.md) | WebUI, CLI, Serve auf V4 | — | — |
 
-¹ 03 hat die KV-Zeile bereits von 1.68 auf 0.43 GiB (128k) gesenkt; 05 verschiebt
-nur noch den Rest nach VRAM, nicht das volle f32-Delta — siehe RAM-Bilanz oben.
+¹ 03 hat den gesamten KV bereits von 1.68 auf 0.43 GiB (128k) gesenkt. 05 spiegelt
+den 0.388-GiB-Attention-Anteil, 08 entfernt erst dessen Host-Shadow; 0.044 GiB
+nativer Indexer-KV bleiben im RAM.
 ² 0.99 GiB Head + ~0.56 GiB DSpark-Tensoren gehen tatsächlich auf die GPU (siehe
 VRAM-Budget oben); die restlichen ~0.61 GiB der DSpark-RAM-Reserve waren Marge für
 Head/Scratch, kein eigener VRAM-Posten.
-³ Der RAM-Gewinn gilt nur, solange der KV im RAM liegt — nach 05 liegt er im VRAM
-und 04 zahlt dort ein. Die VRAM-Spalte ist deshalb die relevante: bei 1M ist 04
-**Pflicht**, weil `native` (3.4 GiB) das Budget von ~2.6 GiB sprengt und turbo3
-(1.3 GiB) nicht. Bis 512k ist 04 optional.
+³ Vor 08 komprimiert 04 auch den Host-Shadow. Danach bleibt als RAM-Gewinn nur
+der Indexer (0.044 → 0.032 GiB bei 128k); Attention-KV zahlt im VRAM ein. Bei 1M
+ist 04 **Pflicht**, weil `native` (3.08 GiB) das Budget von ~2.58 GiB sprengt und
+turbo3 (1.06 GiB) nicht. Bis 512k ist 04 optional.
 
 Referenzdokumente ohne Nummer: [paper-deepseek-v4.md](paper-deepseek-v4.md) (das
 Paper), [llamacpp-deepseek-v4.md](llamacpp-deepseek-v4.md) (die

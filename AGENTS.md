@@ -54,7 +54,7 @@ und nicht wiederholen.
 | 02 | [Flash Attention](plans/02-flash-attention.md) | fertig (#3) |
 | 03 | [KV-Codec](plans/03-kv-codec.md) | fertig (#5) |
 | 04 | [TurboQuant](plans/04-turboquant.md) | fertig (#6) |
-| 05 | [CUDA-Attention](plans/05-cuda-attention.md) | offen |
+| 05 | [CUDA-Attention](plans/05-cuda-attention.md) | fertig (#7) |
 | 06 | [Dense in VRAM](plans/06-dense-vram.md) | offen |
 | 07 | [Head und DSpark in VRAM](plans/07-head-dspark-vram.md) | offen |
 | 08 | [VRAM-Planner](plans/08-vram-planner.md) | offen |

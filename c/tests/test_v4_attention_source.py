@@ -75,6 +75,14 @@ class DeepSeekV4AmalgamSourceTest(unittest.TestCase):
             self.assertEqual(
                 caller.count("coli_v4_attention_two_source_codec_ref("), 1
             )
+            self.assertEqual(caller.count("v4_cuda_flash_attention("), 1)
+            self.assertIn(
+                "if (v4_flash_enabled() && state->kv_device &&", caller
+            )
+            self.assertIn(
+                "heads, head_dim, state->rope_dim, state->row_bytes,", caller
+            )
+            self.assertEqual(caller.count("v4_attention_cuda_write("), 2)
             self.assertEqual(
                 caller.count("window_indices[i] = i <= position ? i : -1;"), 1
             )
@@ -105,6 +113,20 @@ class DeepSeekV4AmalgamSourceTest(unittest.TestCase):
         self.assertIn(
             "item_compressed_indices, selected, state->codec, state->rope_dim,",
             batch,
+        )
+
+    def test_attention_snapshot_cuda_restore_is_bulk(self):
+        restore = definitions(
+            ENGINE, "int coli_v4_attention_snapshot_restore("
+        )
+        self.assertEqual(len(restore), 1)
+        self.assertEqual(restore[0].count("v4_cuda_kv_write_row("), 2)
+        self.assertNotIn("for (int slot", restore[0])
+        self.assertIn(
+            "(size_t)state->window_size * state->row_bytes", restore[0]
+        )
+        self.assertIn(
+            "(size_t)state->compressed_count * state->row_bytes", restore[0]
         )
 
     def test_attention_encode_failures_set_an_error(self):
