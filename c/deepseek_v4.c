@@ -1850,7 +1850,24 @@ static int attention_token_impl(float *output,
                 for (int i = 0; i < state->window_size; i++)
                     window_indices[i] = (oldest + i) % state->window_size;
             }
-            result = coli_v4_attention_two_source_codec_ref(
+            int cuda_attention = 0;
+#ifdef COLI_V4_CUDA
+            if (state->kv_device &&
+                (!compressed_selected || state->compressed_device)) {
+                if (!v4_cuda_flash_attention(
+                        attended, q, state->kv_device, state->window_size,
+                        window_indices, state->compressed_device,
+                        state->compressed_count,
+                        state->indexer ? compressed_indices : NULL,
+                        compressed_selected, sinks, state->codec,
+                        heads, head_dim, state->row_bytes,
+                        1.0f / sqrtf((float)head_dim)))
+                    cuda_attention = 1;
+                else
+                    v4_attention_cuda_disable(state, "attention-kernel-failed");
+            }
+#endif
+            if (!cuda_attention) result = coli_v4_attention_two_source_codec_ref(
                 attended, q, state->kv, state->window_size, state->compressed,
                 state->compressed_count, window_indices,
                 state->indexer ? compressed_indices : NULL,
@@ -2352,7 +2369,24 @@ static int attention_token_impl(float *output,
                 for (int i = 0; i < state->window_size; i++)
                     window_indices[i] = (oldest + i) % state->window_size;
             }
-            result = coli_v4_attention_two_source_codec_ref(
+            int cuda_attention = 0;
+#ifdef COLI_V4_CUDA
+            if (state->kv_device &&
+                (!compressed_selected || state->compressed_device)) {
+                if (!v4_cuda_flash_attention(
+                        attended, q, state->kv_device, state->window_size,
+                        window_indices, state->compressed_device,
+                        state->compressed_count,
+                        state->indexer ? compressed_indices : NULL,
+                        compressed_selected, sinks, state->codec,
+                        heads, head_dim, state->row_bytes,
+                        1.0f / sqrtf((float)head_dim)))
+                    cuda_attention = 1;
+                else
+                    v4_attention_cuda_disable(state, "attention-kernel-failed");
+            }
+#endif
+            if (!cuda_attention) result = coli_v4_attention_two_source_codec_ref(
                 attended, q, state->kv, state->window_size, state->compressed,
                 state->compressed_count, window_indices,
                 state->indexer ? compressed_indices : NULL,
@@ -2617,7 +2651,22 @@ int coli_v4_attention_window_batch_ref(
             }
             const int *item_compressed_indices = state->indexer
                 ? compressed_indices + (size_t)item * config->index_topk : NULL;
-            result = coli_v4_attention_two_source_codec_ref(
+            int cuda_attention = 0;
+#ifdef COLI_V4_CUDA
+            if (state->kv_device && (!selected || state->compressed_device)) {
+                if (!v4_cuda_flash_attention(
+                        item_attended, item_q, state->kv_device,
+                        state->window_size, window_indices,
+                        state->compressed_device, compressed_counts[item],
+                        item_compressed_indices, selected, sinks, state->codec,
+                        heads, head_dim, state->row_bytes,
+                        1.0f / sqrtf((float)head_dim)))
+                    cuda_attention = 1;
+                else
+                    v4_attention_cuda_disable(state, "attention-kernel-failed");
+            }
+#endif
+            if (!cuda_attention) result = coli_v4_attention_two_source_codec_ref(
                 item_attended, item_q, state->kv, state->window_size,
                 state->compressed, compressed_counts[item], window_indices,
                 item_compressed_indices, selected, state->codec, state->rope_dim,
@@ -5592,7 +5641,24 @@ static int attention_token_impl(float *output,
                 for (int i = 0; i < state->window_size; i++)
                     window_indices[i] = (oldest + i) % state->window_size;
             }
-            result = coli_v4_attention_two_source_codec_ref(
+            int cuda_attention = 0;
+#ifdef COLI_V4_CUDA
+            if (state->kv_device &&
+                (!compressed_selected || state->compressed_device)) {
+                if (!v4_cuda_flash_attention(
+                        attended, q, state->kv_device, state->window_size,
+                        window_indices, state->compressed_device,
+                        state->compressed_count,
+                        state->indexer ? compressed_indices : NULL,
+                        compressed_selected, sinks, state->codec,
+                        heads, head_dim, state->row_bytes,
+                        1.0f / sqrtf((float)head_dim)))
+                    cuda_attention = 1;
+                else
+                    v4_attention_cuda_disable(state, "attention-kernel-failed");
+            }
+#endif
+            if (!cuda_attention) result = coli_v4_attention_two_source_codec_ref(
                 attended, q, state->kv, state->window_size, state->compressed,
                 state->compressed_count, window_indices,
                 state->indexer ? compressed_indices : NULL,
@@ -7353,10 +7419,12 @@ int coli_v4_engine_open(ColiV4Engine **output,
         0, COLI_V4_KV_NATIVE);
 #ifdef COLI_V4_CUDA
     if (v4_vram_requested()) {
-        if (!v4_cuda_init(0)) {
+        int initialized = !v4_cuda_init(0);
+        if (initialized && !v4_cuda_publish_tables()) {
             engine->runtime.vram_enabled = 1;
             fprintf(stderr, "v4_cuda mode=kv-attention device=0\n");
         } else {
+            if (initialized) v4_cuda_shutdown();
             fprintf(stderr,
                     "v4_cuda warning=initialization-failed; continuing-on-cpu\n");
         }

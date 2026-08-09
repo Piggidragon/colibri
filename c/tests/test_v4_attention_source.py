@@ -75,6 +75,8 @@ class DeepSeekV4AmalgamSourceTest(unittest.TestCase):
             self.assertEqual(
                 caller.count("coli_v4_attention_two_source_codec_ref("), 1
             )
+            self.assertEqual(caller.count("v4_cuda_flash_attention("), 1)
+            self.assertEqual(caller.count("v4_attention_cuda_write("), 2)
             self.assertEqual(
                 caller.count("window_indices[i] = i <= position ? i : -1;"), 1
             )

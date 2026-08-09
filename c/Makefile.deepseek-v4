@@ -96,7 +96,8 @@ $(V4_BINARY): $(V4_OBJS)
 $(TARGET_OBJS) $(TEST_UNIT_OBJS): %.o: deepseek_v4.c deepseek_v4.h \
 	deepseek_v4_internal.h deepseek_v4_dspark.inc st.h json.h compat.h tensor.h quant.h \
 	native_quant.h native_quant_batch.h native_quant_dual.h \
-	native_quant_fp4_rows16.h v4_kv_codec.h turbo_quant.h
+	native_quant_fp4_rows16.h v4_kv_codec.h turbo_quant.h \
+	.deepseek-v4-build-config
 	$(CC) $(CFLAGS) -D$* -c deepseek_v4.c -o $@
 
 backend_cuda.o: backend_cuda.cu backend_cuda.h backend_gpu_compat.h .deepseek-v4-build-config
@@ -108,7 +109,43 @@ backend_cuda_v4.o: backend_cuda_v4.cu backend_cuda_v4.h backend_cuda.h \
 	@command -v "$(NVCC)" >/dev/null 2>&1 || { echo "nvcc not found: set CUDA_HOME or NVCC" >&2; exit 1; }
 	"$(NVCC)" $(NVCCFLAGS) -c backend_cuda_v4.cu -o $@
 
+V4_CUDA_TEST_DIR = build/v4-cuda-test
+V4_CUDA_TEST_CFLAGS = $(filter-out -flto,$(CFLAGS))
+V4_CUDA_TEST_OBJS = \
+	$(V4_CUDA_TEST_DIR)/sparse_attention.o \
+	$(V4_CUDA_TEST_DIR)/kv_codec.o \
+	$(V4_CUDA_TEST_DIR)/native_quant.o
+
+$(V4_CUDA_TEST_DIR):
+	mkdir -p $@
+
+$(V4_CUDA_TEST_DIR)/sparse_attention.o: deepseek_v4.c deepseek_v4_internal.h \
+		v4_kv_codec.h native_quant.h | $(V4_CUDA_TEST_DIR)
+	$(CC) $(V4_CUDA_TEST_CFLAGS) -DCOLI_V4_UNIT_SPARSE_ATTENTION \
+		-c deepseek_v4.c -o $@
+
+$(V4_CUDA_TEST_DIR)/kv_codec.o: deepseek_v4.c v4_kv_codec.h \
+		native_quant.h turbo_quant.h | $(V4_CUDA_TEST_DIR)
+	$(CC) $(V4_CUDA_TEST_CFLAGS) -DCOLI_V4_UNIT_KV_CODEC \
+		-c deepseek_v4.c -o $@
+
+$(V4_CUDA_TEST_DIR)/native_quant.o: deepseek_v4.c native_quant.h \
+		quant.h | $(V4_CUDA_TEST_DIR)
+	$(CC) $(V4_CUDA_TEST_CFLAGS) -DCOLI_V4_UNIT_NATIVE_QUANT \
+		-c deepseek_v4.c -o $@
+
+.PHONY: v4-cuda-compile v4-cuda-test
+v4-cuda-compile: backend_cuda.o backend_cuda_v4.o $(V4_CUDA_TEST_OBJS)
+	"$(NVCC)" $(NVCCFLAGS) -Xcompiler=-fopenmp \
+		tests/test_v4_attention_cuda.cu backend_cuda.o backend_cuda_v4.o \
+		$(V4_CUDA_TEST_OBJS) -lgomp -lm -o $(V4_CUDA_TEST_DIR)/test_v4_attention_cuda
+
+v4-cuda-test: v4-cuda-compile
+	$(V4_CUDA_TEST_DIR)/test_v4_attention_cuda; status=$$?; \
+		test $$status -eq 0 -o $$status -eq 77
+
 deepseek-v4-test-objs: $(TEST_UNIT_OBJS)
 
 deepseek-v4-clean:
-	rm -f $(V4_BINARY) $(V4_OBJS) $(TEST_UNIT_OBJS) backend_cuda_v4.o
+	rm -f $(V4_BINARY) $(V4_OBJS) $(TEST_UNIT_OBJS) \
+		backend_cuda.o backend_cuda_v4.o

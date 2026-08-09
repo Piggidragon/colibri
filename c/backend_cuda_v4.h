@@ -18,6 +18,18 @@ void v4_cuda_kv_free(void *base);
 int v4_cuda_kv_write_row(void *base, int slot, const void *row,
                          size_t row_bytes);
 
+/* Publish TurboQuant tables from turbo_quant.h.  Attention calls are refused
+ * until this succeeds, so a device never decodes against zeroed constants. */
+int v4_cuda_publish_tables(void);
+
+int v4_cuda_flash_attention(
+    float *ctx, const float *q,
+    const void *window_kv, int window_size, const int *window_indices,
+    const void *compressed_kv, int compressed_count,
+    const int *compressed_indices, int compressed_selected,
+    const float *sinks, int codec, int heads, int head_dim,
+    size_t row_bytes, float scale);
+
 #ifdef __cplusplus
 }
 #endif

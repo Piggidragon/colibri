@@ -247,7 +247,8 @@ Ein Fehler im Kernel-Aufruf fällt für diesen Token auf CPU zurück und loggt e
 - Sinks: extreme Werte, wie im CPU-Test.
 - `-1`-Padding im Fenster-Index.
 - Ein komprimierter Index `>= compressed_count` wird ohne Device-OOB abgelehnt.
-- Rotierter vs. unrotierter Modus gegeneinander.
+- Turbo2/3/4 jeweils gegen den vollständigen CPU-Decoder im Originalraum; ein
+  rotierter Modus ist, wie oben abgegrenzt, nicht Teil dieser Phase.
 - Tabellen-Publikation: Kernel ohne `v4_cuda_publish_tables` muss **ablehnen**,
   nicht gegen Nullen rechnen (das ist die Lehre aus `g_fp8_lut_ready`,
   [c/backend_cuda.cu:1059](../c/backend_cuda.cu)).
