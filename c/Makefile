@@ -991,6 +991,11 @@ tests/test_v4_rows8_skip$(EXE): tests/test_v4_rows8_skip.c \
 		$(V4_ROWS8_DIR)/native_quant.o
 	$(CC) $(V4_ROWS8_CFLAGS) $^ -o $@ -pthread $(LDFLAGS)
 
+tests/test_v4_dense_tier$(EXE): tests/test_v4_dense_tier.c deepseek_v4.c \
+		deepseek_v4_internal.h
+	$(MAKE) -f Makefile.deepseek-v4 ARCH=$(ARCH) COLI_V4_UNIT_RESOURCE_PLAN.o
+	$(CC) $(CFLAGS) $< COLI_V4_UNIT_RESOURCE_PLAN.o -o $@ $(LDFLAGS)
+
 endif
 
 tests/test_route_trace$(EXE): tests/test_route_trace.c route_trace.h

@@ -478,6 +478,10 @@ void coli_v4_layer_free(ColiV4Engine *engine,
                         ColiDeepSeekV4LayerWeights *weights) {
     (void)engine;
     if (!weights) return;
+#ifdef COLI_V4_CUDA
+    for (size_t i = 0; i < weights->plan.tensor_count; i++)
+        coli_cuda_tensor_free(weights->device[i]);
+#endif
     for (size_t i = 0; i < weights->plan.tensor_count; i++) free(weights->data[i]);
     memset(weights, 0, sizeof(*weights));
 }
@@ -515,6 +519,59 @@ static int v4_fp8_maybe_pack_rows8(unsigned char *data,
     return gpu_resident ? 0
                         : v4_fp8_pack_rows8_inplace(data, rows, columns);
 }
+
+#ifdef COLI_V4_CUDA
+static int v4_layer_cuda_upload(ColiDeepSeekV4LayerWeights *weights) {
+    for (size_t i = 0; i < weights->plan.tensor_count; i++) {
+        ColiDeepSeekV4TensorSpec *weight = &weights->plan.tensors[i];
+        if (weight->dtype != COLI_ST_F8_E4M3 || weight->rank != 2) continue;
+        if (i + 1 >= weights->plan.tensor_count ||
+            weights->plan.tensors[i + 1].dtype != COLI_ST_F8_E8M0 ||
+            !weights->data[i] || !weights->data[i + 1] ||
+            !coli_cuda_tensor_upload(
+                &weights->device[i], weights->data[i], weights->data[i + 1],
+                8, (int)weight->shape[1], (int)weight->shape[0], 0)) {
+            for (size_t j = 0; j < weights->plan.tensor_count; j++) {
+                coli_cuda_tensor_free(weights->device[j]);
+                weights->device[j] = NULL;
+            }
+            return -1;
+        }
+        weights->device_bytes += coli_cuda_tensor_bytes(weights->device[i]);
+    }
+    uint64_t released = 0;
+    for (size_t i = 0; i < weights->plan.tensor_count; i++) {
+        ColiDeepSeekV4TensorSpec *spec = &weights->plan.tensors[i];
+        if (spec->dtype != COLI_ST_F8_E4M3 &&
+            spec->dtype != COLI_ST_F8_E8M0) continue;
+        const ColiSafetensorsTensor *tensor =
+            coli_st_find(weights->source_index, spec->name);
+        if (tensor) released += tensor->dtype == COLI_ST_F8_E8M0
+            ? (uint64_t)tensor->numel * sizeof(float)
+            : (uint64_t)tensor->nbytes;
+        free(weights->data[i]);
+        weights->data[i] = NULL;
+    }
+    weights->host_bytes = weights->stats.total_bytes - released;
+    return 0;
+}
+
+static int v4_layer_restore_cpu_layout(ColiDeepSeekV4LayerWeights *weights) {
+    for (size_t i = 0; i < weights->plan.tensor_count; i++) {
+        ColiDeepSeekV4TensorSpec *spec = &weights->plan.tensors[i];
+        if (spec->dtype != COLI_ST_F8_E4M3 || spec->rank != 2) continue;
+        int packed = v4_fp8_pack_rows8_inplace(
+            weights->data[i], spec->shape[0], spec->shape[1]);
+        if (packed < 0) return -1;
+        spec->packed_rows8 = packed > 0;
+    }
+    weights->gpu_resident = 0;
+    weights->source_index = NULL;
+    weights->host_bytes = weights->stats.total_bytes;
+    weights->device_bytes = 0;
+    return 0;
+}
+#endif
 
 #ifdef COLI_V4_TEST_HOOKS
 int coli_v4_test_fp8_maybe_pack_rows8(unsigned char *data,
@@ -569,6 +626,20 @@ int coli_v4_layer_load(ColiV4Engine *engine,
             weights->plan.tensors[i].packed_rows8 = packed > 0;
         }
     }
+#ifdef COLI_V4_CUDA
+    weights->host_bytes = weights->stats.total_bytes;
+    weights->source_index = index;
+    if (weights->gpu_resident && v4_layer_cuda_upload(weights)) {
+        if (v4_layer_restore_cpu_layout(weights)) {
+            coli_v4_layer_free(NULL, weights);
+            return set_error(error, error_size,
+                             "out of memory restoring CPU FP8 layer %d", layer);
+        }
+        fprintf(stderr,
+                "v4_dense warning=upload-failed layer=%d; continuing-on-cpu\n",
+                layer);
+    }
+#endif
     return 0;
 }
 
@@ -609,7 +680,8 @@ int coli_v4_layer_load(ColiV4Engine *engine,
         layer >= effective_config->num_hidden_layers ||
         layer >= COLI_V4_RESIDENT_MAX_LAYERS_V2) return -1;
     if (!resident_enabled_v2(engine)) {
-        weights->gpu_resident = engine && engine->runtime.vram_enabled;
+        weights->gpu_resident = engine &&
+            engine->runtime.dense_location == COLI_V4_DENSE_VRAM;
         return coli_v4_layer_resident_reference_load(
             NULL, weights, effective_config, index, layer, error, error_size);
     }
@@ -621,18 +693,40 @@ int coli_v4_layer_load(ColiV4Engine *engine,
     }
     engine->dense_resident.index = index;
     if (!engine->dense_resident.ready[layer]) {
-        engine->dense_resident.layers[layer].gpu_resident =
-            engine->runtime.vram_enabled;
+        ColiDeepSeekV4LayerWeights loaded = {0};
+        loaded.gpu_resident =
+            engine->runtime.dense_location == COLI_V4_DENSE_VRAM;
         if (coli_v4_layer_resident_reference_load(
-                NULL, &engine->dense_resident.layers[layer], effective_config, index,
+                NULL, &loaded, effective_config, index,
                 layer, error, error_size)) return -1;
+        if (engine->runtime.dense_location == COLI_V4_DENSE_VRAM &&
+            !loaded.gpu_resident) {
+            engine->runtime.dense_location = COLI_V4_DENSE_STREAMED;
+            engine->runtime.dense_resident = 0;
+            fprintf(stderr,
+                    "v4_dense warning=vram-fallback layer=%d; "
+                    "disabling-resident-cache\n",
+                    layer);
+            *weights = loaded;
+            return 0;
+        }
+        engine->dense_resident.layers[layer] = loaded;
         engine->dense_resident.ready[layer] = 1;
-        engine->dense_resident.total_bytes +=
+#ifdef COLI_V4_CUDA
+        engine->dense_resident.host_bytes +=
+            engine->dense_resident.layers[layer].host_bytes;
+        engine->dense_resident.device_bytes +=
+            engine->dense_resident.layers[layer].device_bytes;
+#else
+        engine->dense_resident.host_bytes +=
             engine->dense_resident.layers[layer].stats.total_bytes;
+#endif
         if (layer == effective_config->num_hidden_layers - 1)
-            fprintf(stderr, "v4_dense_resident layers=%d bytes=%.3fGiB\n",
+            fprintf(stderr,
+                    "v4_dense_resident layers=%d host=%.3fGiB device=%.3fGiB\n",
                     effective_config->num_hidden_layers,
-                    engine->dense_resident.total_bytes / 1073741824.0);
+                    engine->dense_resident.host_bytes / 1073741824.0,
+                    engine->dense_resident.device_bytes / 1073741824.0);
     }
     *weights = engine->dense_resident.layers[layer]; return 0;
 }
@@ -830,7 +924,8 @@ int coli_v4_resident_tier_plan(
     const ColiDeepSeekV4ResidentTierInputs *inputs,
     char *error, size_t error_size) {
     if (!plan || !inputs || !inputs->available_bytes ||
-        !inputs->dense_bytes || !inputs->minimum_expert_bytes)
+        !inputs->dense_bytes || !inputs->minimum_expert_bytes ||
+        inputs->dense_device_bytes > inputs->dense_bytes)
         return plan_error(error, error_size,
                           "invalid V4 resident-tier inputs");
     memset(plan, 0, sizeof(*plan));
@@ -840,9 +935,21 @@ int coli_v4_resident_tier_plan(
         return plan_error(error, error_size,
                           "resident V4 tiers leave too little target cache");
 
+    uint64_t device_host_bytes = inputs->dense_bytes - inputs->dense_device_bytes;
+    if (inputs->vram_enabled && inputs->dense_device_bytes &&
+        inputs->dense_device_bytes <= inputs->vram_available_bytes &&
+        resident_tiers_fit(inputs->available_bytes, inputs->fixed_bytes,
+                           device_host_bytes, inputs->minimum_expert_bytes)) {
+        plan->dense_location = COLI_V4_DENSE_VRAM;
+        plan->dense_resident = 1;
+        plan->dense_bytes = device_host_bytes;
+        plan->dense_device_bytes = inputs->dense_device_bytes;
+        return 0;
+    }
     if (resident_tiers_fit(inputs->available_bytes, inputs->fixed_bytes,
                            inputs->dense_bytes,
                            inputs->minimum_expert_bytes)) {
+        plan->dense_location = COLI_V4_DENSE_RAM;
         plan->dense_resident = 1;
         plan->dense_bytes = inputs->dense_bytes;
     }
@@ -944,6 +1051,9 @@ int coli_st_read_at_engine(ColiV4Engine *engine,
 /* ######## deepseek_v4_expert_store_auto.c ######## */
 /* ---- begin inlined deepseek_v4_expert_store_auto_v5.c ---- */
 #include "deepseek_v4_internal.h"
+#ifdef COLI_V4_CUDA
+#include "backend_cuda_v4.h"
+#endif
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -1051,12 +1161,12 @@ static int build_runtime_plan(ColiV4Engine *engine,
 }
 
 static int v5_dense_inventory(const char *model_dir,
-                              uint64_t *bytes,
+                              ColiDeepSeekV4LayerStats *inventory,
                               char *error, size_t error_size) {
     ColiDeepSeekV4Config config; ColiSafetensorsIndex *index = NULL;
     if (coli_v4_config_load(&config, model_dir, error, error_size) ||
         coli_st_index_open(&index, model_dir, error, error_size)) return -1;
-    uint64_t total = 0;
+    ColiDeepSeekV4LayerStats total = {0};
     for (int layer = 0; layer < config.num_hidden_layers; layer++) {
         ColiDeepSeekV4LayerPlan layer_plan; ColiDeepSeekV4LayerStats stats;
         if (coli_v4_layer_plan(&layer_plan, &config, layer,
@@ -1065,9 +1175,15 @@ static int v5_dense_inventory(const char *model_dir,
                                    error, error_size)) {
             coli_st_index_close(index); return -1;
         }
-        total += stats.total_bytes;
+        total.tensor_count += stats.tensor_count;
+        total.total_bytes += stats.total_bytes;
+        total.bf16_bytes += stats.bf16_bytes;
+        total.f32_bytes += stats.f32_bytes;
+        total.fp8_weight_bytes += stats.fp8_weight_bytes;
+        total.fp8_scale_bytes += stats.fp8_scale_bytes;
+        total.i64_bytes += stats.i64_bytes;
     }
-    coli_st_index_close(index); *bytes = total; return 0;
+    coli_st_index_close(index); *inventory = total; return 0;
 }
 
 int coli_v4_expert_store_open_planned(
@@ -1080,22 +1196,32 @@ int coli_v4_expert_store_open_planned(
     if (build_runtime_plan(engine, options, &plan, error, error_size)) return -1;
     uint64_t per_slot = plan.expert_cache_bytes /
                         (uint64_t)plan.slots_per_layer;
-    uint64_t head_bytes = 0, dense_bytes = 0;
+    uint64_t head_bytes = 0;
+    ColiDeepSeekV4LayerStats dense = {0};
     if (coli_v4_head_cache_probe(options->model_dir, &head_bytes,
                                  error, error_size) ||
-        v5_dense_inventory(options->model_dir, &dense_bytes,
+        v5_dense_inventory(options->model_dir, &dense,
                            error, error_size)) return -1;
 
     uint64_t fixed = plan.system_reserve_bytes + plan.runtime_reserve_bytes;
     ColiDeepSeekV4ResidentTierPlan tiers;
-    ColiDeepSeekV4ResidentTierInputs tier_inputs = {
-        plan.planner_available_bytes, fixed, dense_bytes,
-        plan.minimum_expert_bytes,
-    };
+    ColiDeepSeekV4ResidentTierInputs tier_inputs = {0};
+    tier_inputs.available_bytes = plan.planner_available_bytes;
+    tier_inputs.fixed_bytes = fixed;
+    tier_inputs.dense_bytes = dense.total_bytes;
+    tier_inputs.dense_device_bytes =
+        dense.fp8_weight_bytes + dense.fp8_scale_bytes;
+    tier_inputs.minimum_expert_bytes = plan.minimum_expert_bytes;
+#ifdef COLI_V4_CUDA
+    tier_inputs.vram_enabled = runtime->vram_enabled;
+    tier_inputs.vram_available_bytes = runtime->vram_enabled
+        ? v4_cuda_free_bytes() : 0;
+#endif
     if (coli_v4_resident_tier_plan(&tiers, &tier_inputs,
                                    error, error_size)) return -1;
-    dense_bytes = tiers.dense_bytes;
+    uint64_t dense_bytes = tiers.dense_bytes;
     runtime->dense_resident = tiers.dense_resident;
+    runtime->dense_location = tiers.dense_location;
     if (dense_bytes > plan.planner_available_bytes - fixed) {
         snprintf(error, error_size, "resident V4 tiers exceed available RAM");
         return -1;
@@ -1126,11 +1252,13 @@ int coli_v4_expert_store_open_planned(
     if (resident_head && coli_v4_head_cache_load(
             engine, options->model_dir, error, error_size)) return -1;
     fprintf(stderr,
-        "ram_tiers available=%.2fGiB dense=%s(%.2fGiB) "
+        "ram_tiers available=%.2fGiB dense=%s(host=%.2fGiB device=%.2fGiB) "
         "target_slots=%d target_cache=%.2fGiB head=%s projected=%.2fGiB\n",
         plan.planner_available_bytes / (double)GIB,
-        tiers.dense_resident ? "resident" : "streamed",
+        tiers.dense_location == COLI_V4_DENSE_VRAM ? "vram" :
+        tiers.dense_location == COLI_V4_DENSE_RAM ? "ram" : "streamed",
         dense_bytes / (double)GIB,
+        tiers.dense_device_bytes / (double)GIB,
         slots,
         plan.expert_cache_bytes / (double)GIB,
         resident_head ? "resident-bf16" : "streamed-bf16",
@@ -1150,7 +1278,140 @@ int coli_v4_expert_store_open_planned(
 #include "deepseek_v4_internal.h"
 
 #include <math.h>
+#include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
+
+#include "native_quant.h"
+#ifdef COLI_V4_CUDA
+#include "backend_cuda.h"
+#endif
+
+static int dense_tensor_indices(
+    const ColiDeepSeekV4LayerWeights *weights, const char *prefix,
+    size_t *weight_index, size_t *scale_index) {
+    char weight_name[COLI_V4_MAX_TENSOR_NAME];
+    char scale_name[COLI_V4_MAX_TENSOR_NAME];
+    if (!weights || !prefix || snprintf(
+            weight_name, sizeof(weight_name), "layers.%d.%s.weight",
+            weights->plan.layer, prefix) >= (int)sizeof(weight_name) ||
+        snprintf(scale_name, sizeof(scale_name), "layers.%d.%s.scale",
+                 weights->plan.layer, prefix) >= (int)sizeof(scale_name))
+        return -1;
+    *weight_index = *scale_index = SIZE_MAX;
+    for (size_t i = 0; i < weights->plan.tensor_count; i++) {
+        if (!strcmp(weights->plan.tensors[i].name, weight_name)) *weight_index = i;
+        if (!strcmp(weights->plan.tensors[i].name, scale_name)) *scale_index = i;
+    }
+    return *weight_index == SIZE_MAX || *scale_index == SIZE_MAX ? -1 : 0;
+}
+
+int coli_v4_dense_matmul(float *output,
+                         const ColiDeepSeekV4LayerWeights *weights,
+                         const char *prefix, const float *input, int batch,
+                         int row_start, int rows) {
+    size_t wi, si;
+    if (!output || !input || batch < 1 || batch > 64 || row_start < 0 ||
+        dense_tensor_indices(weights, prefix, &wi, &si)) return -1;
+    const ColiDeepSeekV4TensorSpec *ws = &weights->plan.tensors[wi];
+    const ColiDeepSeekV4TensorSpec *ss = &weights->plan.tensors[si];
+    int total_rows = (int)ws->shape[0];
+    int columns = (int)ws->shape[1];
+    if (!rows) rows = total_rows - row_start;
+    if (ws->dtype != COLI_ST_F8_E4M3 || ss->dtype != COLI_ST_F8_E8M0 ||
+        ws->rank != 2 || ss->rank != 2 || columns < 1 || columns % 128 ||
+        rows < 1 || row_start % 128 || row_start > total_rows ||
+        rows > total_rows - row_start)
+        return -1;
+#ifdef COLI_V4_CUDA
+    if (weights->gpu_resident && weights->device[wi]) {
+        size_t count = (size_t)batch * columns;
+        float *qdq = malloc(count * sizeof(*qdq));
+        uint8_t *scales = malloc((size_t)batch * (size_t)columns / 128);
+        int failed = !qdq || !scales;
+        for (int item = 0; !failed && item < batch; item++)
+            failed = coli_fp8_activation_qdq_ref(
+                qdq + (size_t)item * columns,
+                scales + (size_t)item * columns / 128,
+                input + (size_t)item * columns, (size_t)columns, 128);
+        int computed = !failed && coli_cuda_fp8_matmul_rows(
+            weights->device[wi], output, qdq, batch, row_start, rows);
+        free(scales);
+        free(qdq);
+        if (computed) return 0;
+    }
+#endif
+    ColiOwnedTensor loaded = {0};
+    ColiTensorView view;
+    if (weights->data[wi] && weights->data[si]) {
+        view = (ColiTensorView){
+            COLI_TENSOR_FP8_E4M3_BLOCK, COLI_SCALE_F32,
+            weights->data[wi], weights->data[si],
+            (size_t)total_rows * columns,
+            (size_t)ss->shape[0] * (size_t)ss->shape[1] * sizeof(float),
+            total_rows, columns, ws->packed_rows8 ? 8 : 128, 128};
+    } else {
+#ifdef COLI_V4_CUDA
+        char full_prefix[COLI_V4_MAX_TENSOR_NAME];
+        if (!weights->source_index || snprintf(
+                full_prefix, sizeof(full_prefix), "layers.%d.%s",
+                weights->plan.layer, prefix) >= (int)sizeof(full_prefix) ||
+            coli_tensor_load_fp8(&loaded, weights->source_index, full_prefix,
+                                 NULL, 0))
+            return -1;
+        view = loaded.view;
+#else
+        return -1;
+#endif
+    }
+    int scale_columns = (columns + 127) / 128;
+    view.data = (const unsigned char *)view.data + (size_t)row_start * columns;
+    view.scales = (const float *)view.scales +
+                  (size_t)(row_start / 128) * scale_columns;
+    view.data_bytes = (size_t)rows * columns;
+    view.scale_bytes =
+        (size_t)((rows + 127) / 128) * scale_columns * sizeof(float);
+    view.rows = rows;
+    int result = batch == 1
+        ? coli_fp8_matvec_ref(output, &view, input)
+        : coli_fp8_matmul_batch_ref(output, &view, input, batch);
+    coli_owned_tensor_free(&loaded);
+    return result;
+}
+
+int coli_v4_dense_shared_expert(
+    float *output, const ColiDeepSeekV4LayerWeights *weights,
+    const float *input, float swiglu_limit) {
+    size_t wi, si;
+    if (dense_tensor_indices(weights, "ffn.shared_experts.w1", &wi, &si))
+        return -1;
+    int intermediate = (int)weights->plan.tensors[wi].shape[0];
+    int hidden = (int)weights->plan.tensors[wi].shape[1];
+    float *gate = malloc((size_t)intermediate * sizeof(*gate));
+    float *up = malloc((size_t)intermediate * sizeof(*up));
+    float *activated = malloc((size_t)intermediate * sizeof(*activated));
+    if (!gate || !up || !activated) {
+        free(activated); free(up); free(gate); return -1;
+    }
+    int result = coli_v4_dense_matmul(
+        gate, weights, "ffn.shared_experts.w1", input, 1, 0, 0);
+    if (!result) result = coli_v4_dense_matmul(
+        up, weights, "ffn.shared_experts.w3", input, 1, 0, 0);
+    if (!result) {
+        coli_bf16_round_array(gate, (size_t)intermediate);
+        coli_bf16_round_array(up, (size_t)intermediate);
+        result = coli_v4_swiglu(
+            activated, gate, up, intermediate, swiglu_limit);
+    }
+    if (!result) {
+        coli_bf16_round_array(activated, (size_t)intermediate);
+        result = coli_v4_dense_matmul(
+            output, weights, "ffn.shared_experts.w2", activated, 1, 0, 0);
+    }
+    if (!result) coli_bf16_round_array(output, (size_t)hidden);
+    free(activated); free(up); free(gate);
+    return result;
+}
 
 static float sigmoidf_stable(float value) {
     if (value >= 0.0f) {
@@ -1735,14 +1996,6 @@ static int attention_token_impl(float *output,
         rope_dim > head_dim || q_rank < 1 || groups < 1 || heads % groups)
         return set_error(error, error_size, "unsupported attention dimensions");
 
-    ColiTensorView wq_a, wq_b, wkv, wo_a, wo_b;
-    if (fp8_view(&wq_a, weights, "attn.wq_a") ||
-        fp8_view(&wq_b, weights, "attn.wq_b") ||
-        fp8_view(&wkv, weights, "attn.wkv") ||
-        fp8_view(&wo_a, weights, "attn.wo_a") ||
-        fp8_view(&wo_b, weights, "attn.wo_b"))
-        return set_error(error, error_size, "missing native FP8 attention tensor");
-
     float *qa = calloc((size_t)q_rank, sizeof(*qa));
     float *q = calloc((size_t)heads * head_dim, sizeof(*q));
     float *kv = calloc((size_t)head_dim, sizeof(*kv));
@@ -1760,7 +2013,8 @@ static int attention_token_impl(float *output,
         return set_error(error, error_size, "out of memory in attention");
     }
 
-    int result = coli_fp8_matvec_ref(qa, &wq_a, input);
+    int result = coli_v4_dense_matmul(
+        qa, weights, "attn.wq_a", input, 1, 0, 0);
     coli_bf16_round_array(qa, (size_t)q_rank);
     const void *q_norm = layer_data(weights, "attn.q_norm.weight", NULL);
     if (!result && (!q_norm || decode_bf16(norm_weight, q_norm, (size_t)q_rank) ||
@@ -1798,7 +2052,8 @@ static int attention_token_impl(float *output,
             if (compressed_selected < 0) result = -1;
         }
     }
-    if (!result) result = coli_fp8_matvec_ref(q, &wq_b, qa);
+    if (!result) result = coli_v4_dense_matmul(
+        q, weights, "attn.wq_b", qa, 1, 0, 0);
     if (!result) coli_bf16_round_array(q, (size_t)heads * head_dim);
     for (int head = 0; !result && head < heads; head++) {
         float *values = q + (size_t)head * head_dim;
@@ -1808,7 +2063,8 @@ static int attention_token_impl(float *output,
         for (int i = 0; i < head_dim; i++) values[i] = coli_bf16_round(values[i] * scale);
     }
 
-    if (!result) result = coli_fp8_matvec_ref(kv, &wkv, input);
+    if (!result) result = coli_v4_dense_matmul(
+        kv, weights, "attn.wkv", input, 1, 0, 0);
     if (!result) coli_bf16_round_array(kv, (size_t)head_dim);
     const void *kv_norm = layer_data(weights, "attn.kv_norm.weight", NULL);
     if (!result && (!kv_norm || decode_bf16(norm_weight, kv_norm, (size_t)head_dim) ||
@@ -1925,24 +2181,15 @@ static int attention_token_impl(float *output,
 
     int heads_per_group = heads / groups;
     int group_width = heads_per_group * head_dim;
-    int scale_columns = (group_width + 127) / 128;
-    int scale_rows_per_group = (o_rank + 127) / 128;
     for (int group = 0; !result && group < groups; group++) {
-        ColiTensorView group_view = wo_a;
-        group_view.rows = o_rank;
-        group_view.columns = group_width;
-        group_view.data = (const uint8_t *)wo_a.data +
-            (size_t)group * o_rank * group_width;
-        group_view.scales = (const uint8_t *)wo_a.scales +
-            (size_t)group * scale_rows_per_group * scale_columns * sizeof(float);
-        group_view.data_bytes = (size_t)o_rank * group_width;
-        group_view.scale_bytes =
-            (size_t)scale_rows_per_group * scale_columns * sizeof(float);
-        result = coli_fp8_matvec_ref(oa + (size_t)group * o_rank, &group_view,
-                                     attended + (size_t)group * group_width);
+        result = coli_v4_dense_matmul(
+            oa + (size_t)group * o_rank, weights, "attn.wo_a",
+            attended + (size_t)group * group_width, 1,
+            group * o_rank, o_rank);
     }
     if (!result) coli_bf16_round_array(oa, (size_t)groups * o_rank);
-    if (!result) result = coli_fp8_matvec_ref(output, &wo_b, oa);
+    if (!result) result = coli_v4_dense_matmul(
+        output, weights, "attn.wo_b", oa, 1, 0, 0);
     if (!result) coli_bf16_round_array(output, (size_t)hidden);
 
     free(compressed_indices);
@@ -2256,14 +2503,6 @@ static int attention_token_impl(float *output,
         rope_dim > head_dim || q_rank < 1 || groups < 1 || heads % groups)
         return set_error(error, error_size, "unsupported attention dimensions");
 
-    ColiTensorView wq_a, wq_b, wkv, wo_a, wo_b;
-    if (fp8_view(&wq_a, weights, "attn.wq_a") ||
-        fp8_view(&wq_b, weights, "attn.wq_b") ||
-        fp8_view(&wkv, weights, "attn.wkv") ||
-        fp8_view(&wo_a, weights, "attn.wo_a") ||
-        fp8_view(&wo_b, weights, "attn.wo_b"))
-        return set_error(error, error_size, "missing native FP8 attention tensor");
-
     float *qa = calloc((size_t)q_rank, sizeof(*qa));
     float *q = calloc((size_t)heads * head_dim, sizeof(*q));
     float *kv = calloc((size_t)head_dim, sizeof(*kv));
@@ -2281,7 +2520,8 @@ static int attention_token_impl(float *output,
         return set_error(error, error_size, "out of memory in attention");
     }
 
-    int result = coli_fp8_matvec_ref(qa, &wq_a, input);
+    int result = coli_v4_dense_matmul(
+        qa, weights, "attn.wq_a", input, 1, 0, 0);
     coli_bf16_round_array(qa, (size_t)q_rank);
     const void *q_norm = layer_data(weights, "attn.q_norm.weight", NULL);
     if (!result && (!q_norm || decode_bf16(norm_weight, q_norm, (size_t)q_rank) ||
@@ -2319,7 +2559,8 @@ static int attention_token_impl(float *output,
             if (compressed_selected < 0) result = -1;
         }
     }
-    if (!result) result = coli_fp8_matvec_ref(q, &wq_b, qa);
+    if (!result) result = coli_v4_dense_matmul(
+        q, weights, "attn.wq_b", qa, 1, 0, 0);
     if (!result) coli_bf16_round_array(q, (size_t)heads * head_dim);
     for (int head = 0; !result && head < heads; head++) {
         float *values = q + (size_t)head * head_dim;
@@ -2329,7 +2570,8 @@ static int attention_token_impl(float *output,
         for (int i = 0; i < head_dim; i++) values[i] = coli_bf16_round(values[i] * scale);
     }
 
-    if (!result) result = coli_fp8_matvec_ref(kv, &wkv, input);
+    if (!result) result = coli_v4_dense_matmul(
+        kv, weights, "attn.wkv", input, 1, 0, 0);
     if (!result) coli_bf16_round_array(kv, (size_t)head_dim);
     const void *kv_norm = layer_data(weights, "attn.kv_norm.weight", NULL);
     if (!result && (!kv_norm || decode_bf16(norm_weight, kv_norm, (size_t)head_dim) ||
@@ -2446,24 +2688,15 @@ static int attention_token_impl(float *output,
 
     int heads_per_group = heads / groups;
     int group_width = heads_per_group * head_dim;
-    int scale_columns = (group_width + 127) / 128;
-    int scale_rows_per_group = (o_rank + 127) / 128;
     for (int group = 0; !result && group < groups; group++) {
-        ColiTensorView group_view = wo_a;
-        group_view.rows = o_rank;
-        group_view.columns = group_width;
-        group_view.data = (const uint8_t *)wo_a.data +
-            (size_t)group * o_rank * group_width;
-        group_view.scales = (const uint8_t *)wo_a.scales +
-            (size_t)group * scale_rows_per_group * scale_columns * sizeof(float);
-        group_view.data_bytes = (size_t)o_rank * group_width;
-        group_view.scale_bytes =
-            (size_t)scale_rows_per_group * scale_columns * sizeof(float);
-        result = coli_fp8_matvec_ref(oa + (size_t)group * o_rank, &group_view,
-                                     attended + (size_t)group * group_width);
+        result = coli_v4_dense_matmul(
+            oa + (size_t)group * o_rank, weights, "attn.wo_a",
+            attended + (size_t)group * group_width, 1,
+            group * o_rank, o_rank);
     }
     if (!result) coli_bf16_round_array(oa, (size_t)groups * o_rank);
-    if (!result) result = coli_fp8_matvec_ref(output, &wo_b, oa);
+    if (!result) result = coli_v4_dense_matmul(
+        output, weights, "attn.wo_b", oa, 1, 0, 0);
     if (!result) coli_bf16_round_array(output, (size_t)hidden);
 
     free(compressed_indices);
@@ -2516,14 +2749,6 @@ int coli_v4_attention_window_batch_ref(
     size_t q_width = (size_t)heads * head_dim;
     size_t oa_width = (size_t)groups * o_rank;
 
-    ColiTensorView wq_a, wq_b, wkv, wo_a, wo_b;
-    if (fp8_view(&wq_a, weights, "attn.wq_a") ||
-        fp8_view(&wq_b, weights, "attn.wq_b") ||
-        fp8_view(&wkv, weights, "attn.wkv") ||
-        fp8_view(&wo_a, weights, "attn.wo_a") ||
-        fp8_view(&wo_b, weights, "attn.wo_b"))
-        return set_error(error, error_size, "missing batched attention tensor");
-
     float *qa = calloc((size_t)batch * q_rank, sizeof(*qa));
     float *q = calloc((size_t)batch * q_width, sizeof(*q));
     float *kv = calloc((size_t)batch * head_dim, sizeof(*kv));
@@ -2547,7 +2772,8 @@ int coli_v4_attention_window_batch_ref(
         return set_error(error, error_size, "out of memory in batched attention");
     }
 
-    int result = coli_fp8_matmul_batch_ref(qa, &wq_a, inputs, batch);
+    int result = coli_v4_dense_matmul(
+        qa, weights, "attn.wq_a", inputs, batch, 0, 0);
     if (!result) coli_bf16_round_array(qa, (size_t)batch * q_rank);
     const void *raw_q_norm = layer_data(weights, "attn.q_norm.weight", NULL);
     if (!result && (!raw_q_norm || decode_bf16(norm, raw_q_norm, q_rank))) result = -1;
@@ -2597,7 +2823,8 @@ int coli_v4_attention_window_batch_ref(
         }
     }
 
-    if (!result) result = coli_fp8_matmul_batch_ref(q, &wq_b, qa, batch);
+    if (!result) result = coli_v4_dense_matmul(
+        q, weights, "attn.wq_b", qa, batch, 0, 0);
     if (!result) coli_bf16_round_array(q, (size_t)batch * q_width);
     for (int item = 0; !result && item < batch; item++)
         for (int head = 0; head < heads; head++) {
@@ -2609,7 +2836,8 @@ int coli_v4_attention_window_batch_ref(
                 values[i] = coli_bf16_round(values[i] * scale);
         }
 
-    if (!result) result = coli_fp8_matmul_batch_ref(kv, &wkv, inputs, batch);
+    if (!result) result = coli_v4_dense_matmul(
+        kv, weights, "attn.wkv", inputs, batch, 0, 0);
     if (!result) coli_bf16_round_array(kv, (size_t)batch * head_dim);
     const void *raw_kv_norm = layer_data(weights, "attn.kv_norm.weight", NULL);
     if (!result && (!raw_kv_norm || decode_bf16(norm, raw_kv_norm, head_dim))) result = -1;
@@ -2719,8 +2947,6 @@ int coli_v4_attention_window_batch_ref(
 
     int heads_per_group = heads / groups;
     int group_width = heads_per_group * head_dim;
-    int scale_columns = (group_width + 127) / 128;
-    int scale_rows = (o_rank + 127) / 128;
     float *group_inputs = malloc((size_t)batch * group_width * sizeof(*group_inputs));
     float *group_outputs = malloc((size_t)batch * o_rank * sizeof(*group_outputs));
     if (!group_inputs || !group_outputs) result = -1;
@@ -2729,25 +2955,17 @@ int coli_v4_attention_window_batch_ref(
             memcpy(group_inputs + (size_t)item * group_width,
                    attended + (size_t)item * q_width + (size_t)group * group_width,
                    (size_t)group_width * sizeof(*group_inputs));
-        ColiTensorView group_view = wo_a;
-        group_view.rows = o_rank;
-        group_view.columns = group_width;
-        group_view.data = (const uint8_t *)wo_a.data +
-                          (size_t)group * o_rank * group_width;
-        group_view.scales = (const uint8_t *)wo_a.scales +
-                            (size_t)group * scale_rows * scale_columns * sizeof(float);
-        group_view.data_bytes = (size_t)o_rank * group_width;
-        group_view.scale_bytes =
-            (size_t)scale_rows * scale_columns * sizeof(float);
-        result = coli_fp8_matmul_batch_ref(
-            group_outputs, &group_view, group_inputs, batch);
+        result = coli_v4_dense_matmul(
+            group_outputs, weights, "attn.wo_a", group_inputs, batch,
+            group * o_rank, o_rank);
         for (int item = 0; !result && item < batch; item++)
             memcpy(oa + (size_t)item * oa_width + (size_t)group * o_rank,
                    group_outputs + (size_t)item * o_rank,
                    (size_t)o_rank * sizeof(*oa));
     }
     if (!result) coli_bf16_round_array(oa, (size_t)batch * oa_width);
-    if (!result) result = coli_fp8_matmul_batch_ref(outputs, &wo_b, oa, batch);
+    if (!result) result = coli_v4_dense_matmul(
+        outputs, weights, "attn.wo_b", oa, batch, 0, 0);
     if (!result) coli_bf16_round_array(outputs, (size_t)batch * hidden);
 
     free(group_outputs); free(group_inputs); free(sines); free(cosines);
@@ -3220,9 +3438,6 @@ int coli_v4_indexer_step(ColiDeepSeekV4Indexer *state, int *indices,
     }
     if (!state->count) return 0;
 
-    ColiTensorView wq;
-    if (fp8_view(&wq, state->weights, "attn.indexer.wq_b"))
-        return set_error(error, error_size, "missing indexer query weight");
     float *queries = malloc((size_t)heads * dimension * sizeof(*queries));
     float *head_weights = malloc((size_t)heads * sizeof(*head_weights));
     IndexScore *scores = malloc((size_t)state->count * sizeof(*scores));
@@ -3234,7 +3449,8 @@ int coli_v4_indexer_step(ColiDeepSeekV4Indexer *state, int *indices,
         free(qdq); free(scales); free(scores); free(head_weights); free(queries);
         return set_error(error, error_size, "out of memory scoring indexer");
     }
-    int result = coli_fp8_matvec_ref(queries, &wq, query_rank);
+    int result = coli_v4_dense_matmul(
+        queries, state->weights, "attn.indexer.wq_b", query_rank, 1, 0, 0);
     if (!result) coli_bf16_round_array(queries, (size_t)heads * dimension);
     if (!result) result = apply_position_rope(queries, state->config, position);
     for (int head = 0; !result && head < heads; head++) {
@@ -3762,12 +3978,8 @@ static int moe_token(float *output,
         weights->plan.uses_hash_router ? indices : NULL,
         n, d, topk, config->routed_scaling_factor);
 
-    ColiTensorView w1, w2, w3;
-    if (!result && (fp8_view(&w1, weights, "ffn.shared_experts.w1") ||
-                    fp8_view(&w2, weights, "ffn.shared_experts.w2") ||
-                    fp8_view(&w3, weights, "ffn.shared_experts.w3"))) result = -1;
-    if (!result) result = coli_v4_shared_expert_forward_ref(
-        shared_output, &w1, &w2, &w3, input, config->swiglu_limit);
+    if (!result) result = coli_v4_dense_shared_expert(
+        shared_output, weights, input, config->swiglu_limit);
     if (!result) memset(output, 0, (size_t)d * sizeof(*output));
     for (int expert_id = 0; !result && expert_id < n; expert_id++) {
         int rank = -1;
@@ -4312,12 +4524,8 @@ static int moe_token_pipeline(float *output,
     }
 #endif
 
-    ColiTensorView w1, w2, w3;
-    if (!result && (fp8_view(&w1, weights, "ffn.shared_experts.w1") ||
-                    fp8_view(&w2, weights, "ffn.shared_experts.w2") ||
-                    fp8_view(&w3, weights, "ffn.shared_experts.w3"))) result = -1;
-    if (!result) result = coli_v4_shared_expert_forward_ref(
-        shared_output, &w1, &w2, &w3, input, config->swiglu_limit);
+    if (!result) result = coli_v4_dense_shared_expert(
+        shared_output, weights, input, config->swiglu_limit);
     if (!result) memset(output, 0, (size_t)d * sizeof(*output));
 
 #ifdef COLI_V4_EXPERIMENTAL_DUAL_EXPERT_LOADER
@@ -5075,9 +5283,6 @@ int coli_v4_indexer_step(ColiDeepSeekV4Indexer *state, int *indices,
     }
     if (!state->count) return 0;
 
-    ColiTensorView wq;
-    if (fp8_view(&wq, state->weights, "attn.indexer.wq_b"))
-        return set_error(error, error_size, "missing indexer query weight");
     float *queries = malloc((size_t)heads * dimension * sizeof(*queries));
     float *head_weights = malloc((size_t)heads * sizeof(*head_weights));
     IndexScore *scores = malloc((size_t)state->count * sizeof(*scores));
@@ -5089,7 +5294,8 @@ int coli_v4_indexer_step(ColiDeepSeekV4Indexer *state, int *indices,
         free(qdq); free(scales); free(scores); free(head_weights); free(queries);
         return set_error(error, error_size, "out of memory scoring indexer");
     }
-    int result = coli_fp8_matvec_ref(queries, &wq, query_rank);
+    int result = coli_v4_dense_matmul(
+        queries, state->weights, "attn.indexer.wq_b", query_rank, 1, 0, 0);
     if (!result) coli_bf16_round_array(queries, (size_t)heads * dimension);
     if (!result) result = apply_position_rope(queries, state->config, position);
     for (int head = 0; !result && head < heads; head++) {
@@ -5524,14 +5730,6 @@ static int attention_token_impl(float *output,
         rope_dim > head_dim || q_rank < 1 || groups < 1 || heads % groups)
         return set_error(error, error_size, "unsupported attention dimensions");
 
-    ColiTensorView wq_a, wq_b, wkv, wo_a, wo_b;
-    if (fp8_view(&wq_a, weights, "attn.wq_a") ||
-        fp8_view(&wq_b, weights, "attn.wq_b") ||
-        fp8_view(&wkv, weights, "attn.wkv") ||
-        fp8_view(&wo_a, weights, "attn.wo_a") ||
-        fp8_view(&wo_b, weights, "attn.wo_b"))
-        return set_error(error, error_size, "missing native FP8 attention tensor");
-
     float *qa = calloc((size_t)q_rank, sizeof(*qa));
     float *q = calloc((size_t)heads * head_dim, sizeof(*q));
     float *kv = calloc((size_t)head_dim, sizeof(*kv));
@@ -5549,7 +5747,8 @@ static int attention_token_impl(float *output,
         return set_error(error, error_size, "out of memory in attention");
     }
 
-    int result = coli_fp8_matvec_ref(qa, &wq_a, input);
+    int result = coli_v4_dense_matmul(
+        qa, weights, "attn.wq_a", input, 1, 0, 0);
     coli_bf16_round_array(qa, (size_t)q_rank);
     const void *q_norm = layer_data(weights, "attn.q_norm.weight", NULL);
     if (!result && (!q_norm || decode_bf16(norm_weight, q_norm, (size_t)q_rank) ||
@@ -5587,7 +5786,8 @@ static int attention_token_impl(float *output,
             if (compressed_selected < 0) result = -1;
         }
     }
-    if (!result) result = coli_fp8_matvec_ref(q, &wq_b, qa);
+    if (!result) result = coli_v4_dense_matmul(
+        q, weights, "attn.wq_b", qa, 1, 0, 0);
     if (!result) coli_bf16_round_array(q, (size_t)heads * head_dim);
     for (int head = 0; !result && head < heads; head++) {
         float *values = q + (size_t)head * head_dim;
@@ -5597,7 +5797,8 @@ static int attention_token_impl(float *output,
         for (int i = 0; i < head_dim; i++) values[i] = coli_bf16_round(values[i] * scale);
     }
 
-    if (!result) result = coli_fp8_matvec_ref(kv, &wkv, input);
+    if (!result) result = coli_v4_dense_matmul(
+        kv, weights, "attn.wkv", input, 1, 0, 0);
     if (!result) coli_bf16_round_array(kv, (size_t)head_dim);
     const void *kv_norm = layer_data(weights, "attn.kv_norm.weight", NULL);
     if (!result && (!kv_norm || decode_bf16(norm_weight, kv_norm, (size_t)head_dim) ||
@@ -5714,24 +5915,15 @@ static int attention_token_impl(float *output,
 
     int heads_per_group = heads / groups;
     int group_width = heads_per_group * head_dim;
-    int scale_columns = (group_width + 127) / 128;
-    int scale_rows_per_group = (o_rank + 127) / 128;
     for (int group = 0; !result && group < groups; group++) {
-        ColiTensorView group_view = wo_a;
-        group_view.rows = o_rank;
-        group_view.columns = group_width;
-        group_view.data = (const uint8_t *)wo_a.data +
-            (size_t)group * o_rank * group_width;
-        group_view.scales = (const uint8_t *)wo_a.scales +
-            (size_t)group * scale_rows_per_group * scale_columns * sizeof(float);
-        group_view.data_bytes = (size_t)o_rank * group_width;
-        group_view.scale_bytes =
-            (size_t)scale_rows_per_group * scale_columns * sizeof(float);
-        result = coli_fp8_matvec_ref(oa + (size_t)group * o_rank, &group_view,
-                                     attended + (size_t)group * group_width);
+        result = coli_v4_dense_matmul(
+            oa + (size_t)group * o_rank, weights, "attn.wo_a",
+            attended + (size_t)group * group_width, 1,
+            group * o_rank, o_rank);
     }
     if (!result) coli_bf16_round_array(oa, (size_t)groups * o_rank);
-    if (!result) result = coli_fp8_matvec_ref(output, &wo_b, oa);
+    if (!result) result = coli_v4_dense_matmul(
+        output, weights, "attn.wo_b", oa, 1, 0, 0);
     if (!result) coli_bf16_round_array(output, (size_t)hidden);
 
     free(compressed_indices);
@@ -7177,6 +7369,7 @@ int coli_v4_route_bf16(float *weights, int *indices, const float *hidden,
 
 #ifdef COLI_V4_CUDA
 #include "backend_cuda_v4.h"
+#include "quant.h"
 #endif
 
 /* Provided by LAYER_RESIDENT. */
@@ -7373,7 +7566,8 @@ void coli_v4_engine_destroy(ColiV4Engine *engine) {
         engine->dense_resident.ready[layer] = 0;
     }
     engine->dense_resident.index = NULL;
-    engine->dense_resident.total_bytes = 0;
+    engine->dense_resident.host_bytes = 0;
+    engine->dense_resident.device_bytes = 0;
 
     free(engine->dspark.markov_w2);
     free(engine->dspark.markov_w1);
@@ -7461,7 +7655,8 @@ int coli_v4_engine_open(ColiV4Engine **output,
     if (v4_vram_requested()) {
         /* TODO(plan 08): make device selection part of the VRAM planner. */
         int initialized = !v4_cuda_init(0);
-        if (initialized && !v4_cuda_publish_tables()) {
+        if (initialized && !v4_cuda_publish_tables() &&
+            coli_cuda_fp8_set_lut(E4M3_LUT)) {
             engine->runtime.vram_enabled = 1;
             fprintf(stderr, "v4_cuda mode=kv-attention device=0\n");
         } else {
@@ -10655,6 +10850,10 @@ void coli_v4_layer_free(ColiV4Engine *engine,
                         ColiDeepSeekV4LayerWeights *weights) {
     (void)engine;
     if (!weights) return;
+#ifdef COLI_V4_CUDA
+    for (size_t i = 0; i < weights->plan.tensor_count; i++)
+        coli_cuda_tensor_free(weights->device[i]);
+#endif
     for (size_t i = 0; i < weights->plan.tensor_count; i++) free(weights->data[i]);
     memset(weights, 0, sizeof(*weights));
 }

@@ -1316,6 +1316,36 @@ extern "C" int coli_cuda_matmul(ColiCudaTensor **tensor,
     return 1;
 }
 
+extern "C" int coli_cuda_fp8_matmul_rows(
+        ColiCudaTensor *tensor, float *y, const float *x,
+        int S, int row_start, int rows) {
+    if (fault_injected() || !tensor || !y || !x || tensor->fmt != 8 ||
+        S < 1 || row_start < 0 || rows < 1 || row_start % 128 ||
+        row_start > tensor->O || rows > tensor->O - row_start)
+        return 0;
+    DeviceContext *ctx = find_ctx(tensor->device);
+    if (!select_ctx(ctx)) return 0;
+    size_t row_bytes = tensor->weight_bytes / (size_t)tensor->O;
+    size_t xb = (size_t)S * tensor->I * sizeof(float);
+    size_t yb = (size_t)S * rows * sizeof(float);
+    if (!reserve(&ctx->x, &ctx->x_cap, xb) ||
+        !reserve(&ctx->y, &ctx->y_cap, yb) ||
+        !cuda_ok(cudaMemcpy(ctx->x, x, xb, cudaMemcpyHostToDevice),
+                 "FP8 row-range input upload"))
+        return 0;
+    const unsigned char *weights =
+        static_cast<const unsigned char *>(tensor->weights) +
+        (size_t)row_start * row_bytes;
+    const float *scales = tensor->scales +
+        (size_t)(row_start / 128) * tensor->ng;
+    quant_matmul<<<dim3((unsigned)rows, (unsigned)S), 256>>>(
+        ctx->y, ctx->x, weights, scales, 8, S, tensor->I, rows,
+        row_bytes, 0, tensor->ng);
+    return cuda_ok(cudaGetLastError(), "FP8 row-range matmul launch") &&
+           cuda_ok(cudaMemcpy(y, ctx->y, yb, cudaMemcpyDeviceToHost),
+                   "FP8 row-range output download");
+}
+
 extern "C" int coli_cuda_expert_mlp(ColiCudaTensor *gate, ColiCudaTensor *up,
                                       ColiCudaTensor *down, float *y,
                                       const float *x, int S) {
@@ -1893,17 +1923,17 @@ extern "C" void coli_cuda_tensor_free(ColiCudaTensor *tensor) {
     DeviceContext *ctx = find_ctx(tensor->device);
     if (ctx) select_ctx(ctx);
     if (tensor->tracked && ctx) {
-        int ng = tensor->ng > 0 ? tensor->ng : 1;
         /* Must mirror the upload's accounting exactly: fmt=6 never charged for a
-         * scale buffer, and over-subtracting here trips the >= guard below, which
-         * silently leaves the tensor's bytes on the device counter forever. */
+         * scale buffer. scale_count also matters for fmt=8, whose scales cover
+         * 128 output rows rather than every output row. */
         size_t storage_bytes =
 #ifdef COLI_ANS
             tensor->compressed ? tensor->archive_bytes :
 #endif
             tensor->weight_bytes;
         size_t bytes = storage_bytes +
-            ((tensor->fmt && tensor->fmt != 6) ? (size_t)tensor->O * ng * sizeof(float) : 0);
+            ((tensor->fmt && tensor->fmt != 6)
+                ? tensor->scale_count * sizeof(float) : 0);
         if (ctx->tensor_count) ctx->tensor_count--;
         if (ctx->tensor_bytes >= bytes) ctx->tensor_bytes -= bytes;
     }
@@ -1915,13 +1945,13 @@ extern "C" void coli_cuda_tensor_free(ColiCudaTensor *tensor) {
 
 extern "C" size_t coli_cuda_tensor_bytes(const ColiCudaTensor *tensor) {
     if (!tensor) return 0;
-    int ng = tensor->ng > 0 ? tensor->ng : 1;
     size_t storage_bytes =
 #ifdef COLI_ANS
         tensor->compressed ? tensor->archive_bytes :
 #endif
         tensor->weight_bytes;
-    return storage_bytes + (tensor->fmt ? (size_t)tensor->O * ng * sizeof(float) : 0);
+    return storage_bytes + ((tensor->fmt && tensor->fmt != 6)
+        ? tensor->scale_count * sizeof(float) : 0);
 }
 
 extern "C" int coli_cuda_tensor_device(const ColiCudaTensor *tensor) {
