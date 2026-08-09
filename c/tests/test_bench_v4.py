@@ -49,6 +49,19 @@ timing time_to_first_token=10.000s after_first=4.000s
         self.assertAlmostEqual(result["disk_gb_per_token"], 1.2e9 / 504 / 1e9)
         self.assertIsNone(result["dspark"])
 
+    def test_parse_engine_output_accepts_current_vram_report(self) -> None:
+        stderr = """
+ram_tiers available=28.00GiB vram=11.46GiB(reserve=1.32GiB) dense=vram(host=0.81GiB device=5.46GiB) target_slots=40 target_cache=21.42GiB head=vram-bf16 dspark=vram-lazy projected=27.95GiB
+v4_dspark attempts=2 drafted=4 accepted=1 acceptance=25.0% adaptive_disabled=1
+v4_tokens prompt=1 generated=24 total=25 expert_requests=7740 hits=5450 misses=2290 hit_rate=70.413 bytes=30615797760 target_only=0
+timing time_to_first_token=3.205s after_first=46.833s
+"""
+        result = bench_v4.parse_engine_output(stderr, self.config, 32)
+        self.assertEqual(result["dense_state"], "vram")
+        self.assertAlmostEqual(result["dense_gib"], 0.81)
+        self.assertFalse(result["target_only"])
+        self.assertEqual(result["dspark"]["accepted"], 1)
+
     def test_dspark_flag_enables_full_mtp_defaults(self) -> None:
         environment = {"V4_MTP": "0", "V4_DRAFT": "0"}
         bench_v4.configure_dspark_environment(environment, True, [])

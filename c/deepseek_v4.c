@@ -1299,6 +1299,62 @@ static int v5_dense_inventory(const char *model_dir,
     coli_st_index_close(index); *inventory = total; return 0;
 }
 
+#ifdef COLI_V4_CUDA
+/* The lazy upload uses exactly these FP8 tensors.  Account their device
+ * storage before admitting dense or head tiers, rather than spending the
+ * attention/workspace reserve when the first draft arrives. */
+static uint64_t v4_dspark_fp8_device_bytes(int64_t rows, int64_t columns) {
+    if (rows < 1 || columns < 1) return UINT64_MAX;
+    uint64_t urows = (uint64_t)rows, ucolumns = (uint64_t)columns;
+    if (urows > UINT64_MAX / ucolumns ||
+        urows > UINT64_MAX - 127 || ucolumns > UINT64_MAX - 127)
+        return UINT64_MAX;
+    uint64_t weights = urows * ucolumns;
+    uint64_t scale_rows = (urows + 127) / 128;
+    uint64_t scale_columns = (ucolumns + 127) / 128;
+    if (scale_rows > UINT64_MAX / scale_columns) return UINT64_MAX;
+    uint64_t scales = scale_rows * scale_columns;
+    if (scales > UINT64_MAX / sizeof(float)) return UINT64_MAX;
+    scales *= sizeof(float);
+    return weights > UINT64_MAX - scales ? UINT64_MAX : weights + scales;
+}
+
+static uint64_t v4_dspark_device_backbone_bytes(
+    const ColiDeepSeekV4Config *config) {
+    if (!config || config->hidden_size < 1 || config->q_lora_rank < 1 ||
+        config->head_dim < 1 || config->num_attention_heads < 1 ||
+        config->o_groups < 1 || config->o_lora_rank < 1 ||
+        config->moe_intermediate_size < 1)
+        return UINT64_MAX;
+    int64_t hidden = config->hidden_size;
+    int64_t q_rank = config->q_lora_rank;
+    int64_t heads = config->num_attention_heads;
+    int64_t head_dim = config->head_dim;
+    int64_t o_width = (int64_t)config->o_groups * config->o_lora_rank;
+    int64_t intermediate = config->moe_intermediate_size;
+    if (hidden > INT64_MAX / 3 || heads > INT64_MAX / head_dim || o_width < 1)
+        return UINT64_MAX;
+    const int64_t dimensions[][2] = {
+        {hidden, hidden * 3},
+        {q_rank, hidden}, {heads * head_dim, q_rank}, {head_dim, hidden},
+        {hidden, o_width}, {intermediate, hidden}, {hidden, intermediate},
+        {intermediate, hidden},
+    };
+    uint64_t total = 0;
+    for (size_t i = 0; i < sizeof(dimensions) / sizeof(dimensions[0]); i++) {
+        uint64_t bytes = v4_dspark_fp8_device_bytes(
+            dimensions[i][0], dimensions[i][1]);
+        /* The first matrix is shared; the remaining seven occur in all three
+         * DSpark stages. */
+        if (i && bytes <= UINT64_MAX / 3) bytes *= 3;
+        else if (i) return UINT64_MAX;
+        if (total > UINT64_MAX - bytes) return UINT64_MAX;
+        total += bytes;
+    }
+    return total;
+}
+#endif
+
 int coli_v4_expert_store_open_planned(
     ColiV4Engine *engine,
     const ColiDeepSeekV4ExpertStoreOptions *options, ColiExpertStore **output,
@@ -1326,11 +1382,18 @@ int coli_v4_expert_store_open_planned(
         dense.fp8_weight_bytes + dense.fp8_scale_bytes;
     tier_inputs.minimum_expert_bytes = plan.minimum_expert_bytes;
 #ifdef COLI_V4_CUDA
+    uint64_t dspark_device_bytes = coli_v4_full_dspark_wanted &&
+        runtime->vram_enabled
+        ? v4_dspark_device_backbone_bytes(&engine->config) : 0;
     tier_inputs.vram_enabled = runtime->vram_enabled;
     tier_inputs.vram_available_bytes = runtime->vram_enabled
         ? v4_cuda_free_bytes() : 0;
     tier_inputs.vram_reserve_bytes = runtime->vram_enabled
         ? v4_cuda_reserve_bytes(tier_inputs.vram_available_bytes) : 0;
+    if (tier_inputs.vram_reserve_bytes > UINT64_MAX - dspark_device_bytes)
+        tier_inputs.vram_reserve_bytes = UINT64_MAX;
+    else
+        tier_inputs.vram_reserve_bytes += dspark_device_bytes;
 #endif
     if (coli_v4_resident_tier_plan(&tiers, &tier_inputs,
                                    error, error_size)) return -1;
@@ -1347,7 +1410,8 @@ int coli_v4_expert_store_open_planned(
     int head_device = 0;
 #ifdef COLI_V4_CUDA
     /* Dense has not been uploaded yet.  Admit the head only if its allocation
-     * leaves the already-approved dense tier and the Phase-06 reserve intact. */
+     * leaves the already-approved dense tier, lazy DSpark backbone, and
+     * Phase-06 reserve intact. */
     uint64_t device_claim = tiers.dense_device_bytes;
     if (runtime->vram_enabled && device_claim <= tier_inputs.vram_available_bytes &&
         tier_inputs.vram_reserve_bytes <=
@@ -7493,10 +7557,12 @@ static int v4_dspark_full_wanted(
 
 static uint64_t v4_dspark_full_reserve_bytes(int gpu_resident) {
     double cache = coli_v4_dspark_cache_gb() * 1e9;
-    /* CUDA keeps the ~0.56 GiB FP8 MTP backbone with the head.  The host still
-     * needs the bounded expert slabs plus a small tap/Markov margin; without
-     * CUDA retain the historical, conservative full-core reservation. */
-    double total = cache + (gpu_resident ? 256.0 : 768.0) * 1024.0 * 1024.0;
+    /* Upload is transactional: until every FP8 tensor is on the device, the
+     * host holds the complete backbone as well as the permanent Markov/tap
+     * tensors.  Keep the historical 768 MiB allowance in both modes so the
+     * lazy first draft cannot borrow its upload peak from the target cache. */
+    (void)gpu_resident;
+    double total = cache + 768.0 * 1024.0 * 1024.0;
     return total >= (double)UINT64_MAX ? UINT64_MAX : (uint64_t)total;
 }
 
@@ -8015,6 +8081,19 @@ static float head_bf16_dot(const uint16_t *weight, const float *hidden,
     return sum;
 }
 
+#ifdef COLI_V4_CUDA
+static int coli_v4_head_cuda_disabled;
+
+static void v4_head_cuda_disable(void) {
+    if (!coli_v4_head_cuda_disabled) {
+        fprintf(stderr,
+                "v4_head warning=cuda-argmax-failed; resident-head-unusable "
+                "(re-run with V4_VRAM=0)\n");
+        coli_v4_head_cuda_disabled = 1;
+    }
+}
+#endif
+
 static int head_argmax(ColiV4Engine *engine, const float *hidden,
                        const ColiSafetensorsIndex *index,
                        const ColiDeepSeekV4Config *config,
@@ -8028,9 +8107,14 @@ static int head_argmax(ColiV4Engine *engine, const float *hidden,
 #ifdef COLI_V4_CUDA
     const void *device = coli_v4_head_cache_device(
         engine, shard, (uint64_t)head->off, resident_bytes);
-    if (device && !v4_cuda_head_argmax(best_logit, best_token, device, hidden,
-                                        vocab, d))
-        return 0;
+    if (device) {
+        if (!coli_v4_head_cuda_disabled &&
+            !v4_cuda_head_argmax(best_logit, best_token, device, hidden,
+                                  vocab, d))
+            return 0;
+        v4_head_cuda_disable();
+        return -1;
+    }
 #endif
     const uint16_t *resident = coli_v4_head_cache_data(
         engine, shard, (uint64_t)head->off, resident_bytes);
@@ -9940,8 +10024,9 @@ int main(int argc, char **argv) {
         fprintf(stderr, "cannot build DeepSeek V4 prompt\n");
         goto cleanup;
     }
-    int target_only = !engine->dspark.enabled || cli.no_dspark;
-    if (cli.no_dspark && engine->dspark.enabled)
+    int target_only = (!engine->dspark.enabled && !coli_v4_full_dspark_wanted) ||
+                      cli.no_dspark;
+    if (cli.no_dspark && (engine->dspark.enabled || coli_v4_full_dspark_wanted))
         fprintf(stderr, "note: speculative drafting disabled by CLI\n");
     fprintf(stderr, "v4_cli mode=%s memory=%s target_only=%d\n",
             cli.prompt_mode == COLI_V4_PROMPT_RAW ? "raw" :
@@ -9975,6 +10060,11 @@ int main(int argc, char **argv) {
     }
     free(prompt);
     prompt = NULL;
+
+    /* A full DSpark engine is lazy.  Report whether this generation actually
+     * used speculative proposals, not whether its optional Markov fallback
+     * happened to be resident while the CLI line was printed. */
+    target_only = gen_stats.speculative_drafted == 0;
 
     char out_text[65536];
     size_t out_len = 0;

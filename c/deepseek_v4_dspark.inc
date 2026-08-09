@@ -416,9 +416,65 @@ static int v4_ds_stage_load(const ColiSafetensorsIndex *index,
     return 1;
 }
 
+static void v4_ds_stage_release(V4DSparkStage *stage) {
+    if (!stage) return;
+#ifdef COLI_V4_CUDA
+    coli_cuda_tensor_free(stage->wq_a_dev); coli_cuda_tensor_free(stage->wq_b_dev);
+    coli_cuda_tensor_free(stage->wkv_dev);  coli_cuda_tensor_free(stage->wo_b_dev);
+    coli_cuda_tensor_free(stage->sh1_dev);  coli_cuda_tensor_free(stage->sh2_dev);
+    coli_cuda_tensor_free(stage->sh3_dev);
+#endif
+    free(stage->wq_a_w); free(stage->wq_b_w); free(stage->wkv_w);
+    free(stage->wo_a_w); free(stage->wo_b_w); free(stage->sh1_w);
+    free(stage->sh2_w); free(stage->sh3_w);
+    free(stage->wq_a_s); free(stage->wq_b_s); free(stage->wkv_s);
+    free(stage->wo_a_s); free(stage->wo_b_s); free(stage->sh1_s);
+    free(stage->sh2_s); free(stage->sh3_s);
+    coli_float_tensor_free(&stage->q_norm);
+    coli_float_tensor_free(&stage->kv_norm);
+    coli_float_tensor_free(&stage->attn_norm);
+    coli_float_tensor_free(&stage->ffn_norm);
+    coli_float_tensor_free(&stage->attn_sink);
+    coli_float_tensor_free(&stage->hc_attn_fn);
+    coli_float_tensor_free(&stage->hc_attn_base);
+    coli_float_tensor_free(&stage->hc_attn_scale);
+    coli_float_tensor_free(&stage->hc_ffn_fn);
+    coli_float_tensor_free(&stage->hc_ffn_base);
+    coli_float_tensor_free(&stage->hc_ffn_scale);
+    coli_float_tensor_free(&stage->gate_w);
+    coli_float_tensor_free(&stage->gate_b);
+    if (stage->slots)
+        for (int i = 0; i < stage->cap_slots; i++) free(stage->slots[i].slab);
+    free(stage->slots);
+    free(stage->kv);
+    memset(stage, 0, sizeof(*stage));
+}
+
+static void v4_ds_release_all(void) {
+#ifdef COLI_V4_CUDA
+    coli_cuda_tensor_free(g_v4ds_core.main_proj_dev);
+#endif
+    free(g_v4ds_core.main_proj_w);
+    free(g_v4ds_core.main_proj_s);
+    coli_float_tensor_free(&g_v4ds_core.main_norm);
+    coli_float_tensor_free(&g_v4ds_core.head_fn);
+    coli_float_tensor_free(&g_v4ds_core.head_base);
+    coli_float_tensor_free(&g_v4ds_core.head_scale);
+    coli_float_tensor_free(&g_v4ds_core.norm);
+    coli_float_tensor_free(&g_v4ds_core.confidence_proj);
+    free(g_v4ds_core.markov_w1);
+    free(g_v4ds_core.markov_w2);
+    free(g_v4ds_core.main_x);
+    memset(&g_v4ds_core, 0, sizeof(g_v4ds_core));
+    for (int i = 0; i < V4_DSPARK_STAGES; i++) v4_ds_stage_release(&g_v4ds[i]);
+    g_v4ds_gpu_active = 0;
+    g_v4ds_gpu_prepare = 0;
+    g_v4ds_gpu_failed = 0;
+}
+
 /* Turn the row-major checkpoint buffers into persistent CUDA tensors as one
- * transaction.  If any allocation fails, discard every partial tensor and
- * restore the CPU rows8 layout; drafting then remains correct on the CPU. */
+ * transaction.  A failed upload cannot retain a CPU fallback: RAM planning
+ * has already handed this backbone's host budget to the target cache. */
 #ifdef COLI_V4_CUDA
 #define V4_DS_UPLOAD(owner, field, rows, columns) \
     do { if (!coli_cuda_tensor_upload_g(&(owner)->field##_dev, \
@@ -427,9 +483,6 @@ static int v4_ds_stage_load(const ColiSafetensorsIndex *index,
 #define V4_DS_RELEASE(owner, field) \
     do { free((owner)->field##_w); free((owner)->field##_s); \
          (owner)->field##_w = NULL; (owner)->field##_s = NULL; } while (0)
-#define V4_DS_DROP(owner, field) \
-    do { coli_cuda_tensor_free((owner)->field##_dev); \
-         (owner)->field##_dev = NULL; } while (0)
 
 /* Dimensions vary by stage but are identical across its eight matrices. */
 static int v4_ds_gpu_upload(const ColiDeepSeekV4Config *config) {
@@ -461,49 +514,15 @@ static int v4_ds_gpu_upload(const ColiDeepSeekV4Config *config) {
     g_v4ds_gpu_active = 1;
     return 1;
 gpu_fail:
-    V4_DS_DROP(&g_v4ds_core, main_proj);
-    for (int i = 0; i < V4_DSPARK_STAGES; i++) {
-        V4DSparkStage *s = &g_v4ds[i];
-        V4_DS_DROP(s, wq_a); V4_DS_DROP(s, wq_b); V4_DS_DROP(s, wkv);
-        V4_DS_DROP(s, wo_b); V4_DS_DROP(s, sh1); V4_DS_DROP(s, sh2);
-        V4_DS_DROP(s, sh3);
-        v4_ds_pack_rows8(s->wq_a_w, config->q_lora_rank, config->hidden_size);
-        v4_ds_pack_rows8(s->wq_b_w, (int64_t)config->num_attention_heads *
-                          config->head_dim, config->q_lora_rank);
-        v4_ds_pack_rows8(s->wkv_w, config->head_dim, config->hidden_size);
-        v4_ds_pack_rows8(s->wo_b_w, config->hidden_size,
-                          config->o_groups * config->o_lora_rank);
-        v4_ds_pack_rows8(s->sh1_w, config->moe_intermediate_size, config->hidden_size);
-        v4_ds_pack_rows8(s->sh2_w, config->hidden_size, config->moe_intermediate_size);
-        v4_ds_pack_rows8(s->sh3_w, config->moe_intermediate_size, config->hidden_size);
-    }
-    v4_ds_pack_rows8(g_v4ds_core.main_proj_w, g_v4ds_core.main_proj_rows,
-                     g_v4ds_core.main_proj_cols);
-    g_v4ds_gpu_prepare = 0;
+    v4_ds_release_all();
     return 0;
 }
 #undef V4_DS_UPLOAD
 #undef V4_DS_RELEASE
-#undef V4_DS_DROP
 #endif
 
 void coli_v4_dspark_gpu_release(void) {
-#ifdef COLI_V4_CUDA
-    coli_cuda_tensor_free(g_v4ds_core.main_proj_dev);
-    g_v4ds_core.main_proj_dev = NULL;
-    for (int i = 0; i < V4_DSPARK_STAGES; i++) {
-        V4DSparkStage *s = &g_v4ds[i];
-        coli_cuda_tensor_free(s->wq_a_dev); coli_cuda_tensor_free(s->wq_b_dev);
-        coli_cuda_tensor_free(s->wkv_dev);  coli_cuda_tensor_free(s->wo_b_dev);
-        coli_cuda_tensor_free(s->sh1_dev);  coli_cuda_tensor_free(s->sh2_dev);
-        coli_cuda_tensor_free(s->sh3_dev);
-        s->wq_a_dev = s->wq_b_dev = s->wkv_dev = s->wo_b_dev = NULL;
-        s->sh1_dev = s->sh2_dev = s->sh3_dev = NULL;
-    }
-#endif
-    g_v4ds_gpu_active = 0;
-    g_v4ds_gpu_prepare = 0;
-    g_v4ds_gpu_failed = 0;
+    v4_ds_release_all();
 }
 
 static int v4_ds_load_all(ColiV4Engine *engine,
@@ -523,9 +542,10 @@ static int v4_ds_load_all(ColiV4Engine *engine,
 #ifdef COLI_V4_CUDA
     if (g_v4ds_gpu_prepare && !g_v4ds_gpu_active &&
         !v4_ds_gpu_upload(config)) {
-        /* The RAM plan has already released the CUDA-resident backbone.  Do
-         * not revive its host fallback and overcommit the target cache. */
         g_v4ds_gpu_failed = 1;
+        fprintf(stderr,
+                "v4_dspark warning=upload-failed; drafting-disabled "
+                "(re-run with V4_VRAM=0)\n");
         return 0;
     }
 #endif
@@ -948,20 +968,27 @@ static int v4_ds_moe(float *out, V4DSparkStage *stage,
     if (g_v4ds_gpu_active) {
         float *gate = malloc((size_t)intermediate * sizeof(*gate));
         float *up = malloc((size_t)intermediate * sizeof(*up));
-        if (!gate || !up ||
+        float *activated = malloc((size_t)intermediate * sizeof(*activated));
+        if (!gate || !up || !activated ||
             v4_ds_mm(gate, stage->sh1_w, stage->sh1_s, stage->sh1_dev,
                      intermediate, hidden, input) ||
             v4_ds_mm(up, stage->sh3_w, stage->sh3_s, stage->sh3_dev,
                      intermediate, hidden, input)) {
-            free(up); free(gate); return -1;
+            free(activated); free(up); free(gate); return -1;
         }
-        for (int i = 0; i < intermediate; i++) {
-            float value = gate[i];
-            gate[i] = value / (1.0f + expf(-value)) * up[i];
+        /* Keep the CUDA projection path numerically aligned with the shared
+         * expert reference, including its finite clamp and BF16 boundaries. */
+        v4_ds_bf16(gate, (size_t)intermediate);
+        v4_ds_bf16(up, (size_t)intermediate);
+        int failed = coli_v4_swiglu(activated, gate, up, intermediate,
+                                    config->swiglu_limit);
+        if (!failed) {
+            v4_ds_bf16(activated, (size_t)intermediate);
+            failed = v4_ds_mm(out, stage->sh2_w, stage->sh2_s, stage->sh2_dev,
+                              hidden, intermediate, activated);
         }
-        int failed = v4_ds_mm(out, stage->sh2_w, stage->sh2_s, stage->sh2_dev,
-                               hidden, intermediate, gate);
-        free(up); free(gate);
+        if (!failed) v4_ds_bf16(out, (size_t)hidden);
+        free(activated); free(up); free(gate);
         if (failed) return -1;
     } else
 #endif

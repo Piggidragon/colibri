@@ -6,6 +6,34 @@ Voraussetzung: [00-reference.md](00-reference.md), [06-dense-vram.md](06-dense-v
 1. `feat: BF16 output head on GPU for V4`
 2. `feat: DSpark drafter tensors on GPU for V4`
 
+## Messergebnis (PR #9, noch nicht abgenommen)
+
+Gemessen am 2026-08-09 auf der Zielmaschine (i5-13400F, 32 GiB RAM,
+RTX 4070 `sm_89`, Treiber 610.57.04) mit dem vollständigen Checkpoint,
+`CUDA=1 V4_VRAM=1 CTX=32768 V4_SCRATCH_MB=128`, `--memory-gb 28`,
+`OMP_NUM_THREADS=16`, greedy und dem Rohprompt `Hi`. Der CUDA-Build und
+der CUDA-Harness einschließlich `test_v4_head_cuda` sind auf der Karte grün.
+
+| Lauf, jeweils 24 generierte Tokens | Platzierung / Cache | TTFT | Decode | DSpark |
+|---|---|---:|---:|---|
+| Ziel-only | Dense `vram` 5.46 GiB, Head `vram-bf16`, 42 Slots/Lage, 22.49 GiB Target-Cache | 9.269 s | 23 / 36.214 s = **0.635 tok/s** | aus |
+| `V4_MTP=1 V4_DRAFT=3` | Dense und Head wie oben, DSpark `vram-lazy`, 40 Slots/Lage, 21.42 GiB Target-Cache | 9.479 s | 23 / 49.912 s = **0.461 tok/s** | 3 Versuche, 9 Vorschläge, 4 akzeptiert (**44.4 %**) |
+
+Der Head ist also tatsächlich auf der Karte, und der DSpark-Backbone reserviert
+beim Lazy-Upload **330.1 MiB** VRAM: die Planner-Reserve steigt von 1.00 auf
+1.32 GiB. Die drei gerouteten DSpark-Expert-Caches bleiben absichtlich im RAM
+(je 11/256 Slots, 0.15 GB), sie sind nicht Teil des GPU-Backbones. Die
+DSpark-Reserve senkt den Target-Cache damit um 1.07 GiB beziehungsweise zwei
+Slots pro Lage.
+
+Die Akzeptanz- und Tokenfolgen-Abnahme ist **nicht bestanden**. Gegen den
+Ziel-only-Lauf stimmt die gespeicherte 24-Token-Folge nur durch das 13. erzeugte
+Token; der erste Unterschied liegt beim 14. Token. DSpark war in diesem kurzen
+Kaltlauf zudem 27.4 % langsamer und las 27.81 statt 22.85 GB. Diese Messung ist
+kein Beleg für eine semantisch sichere Beschleunigung. Vor dem Merge braucht PR
+#9 eine deterministische Full-Checkpoint-A/B-Untersuchung (CPU und CUDA) und
+einen Durchsatzlauf, der den akzeptierten Vorschlagspfad gegen Ziel-only gewinnt.
+
 ## Ziel
 
 Weitere **2.16 GiB RAM frei** (0.99 Head + ~1.17 DSpark-Reserve) und nebenbei der beste

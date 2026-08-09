@@ -253,10 +253,14 @@ extern "C" int v4_cuda_head_argmax(float *best_logit, int *best_token,
         return -1;
     size_t hidden_bytes = (size_t)dimension * sizeof(*hidden);
     size_t scores_bytes = (size_t)vocab * sizeof(float);
-    float *device_hidden = static_cast<float *>(v4_cuda_kv_alloc(hidden_bytes));
-    float *device_scores = static_cast<float *>(v4_cuda_kv_alloc(scores_bytes));
-    float *device_logit = static_cast<float *>(v4_cuda_kv_alloc(sizeof(float)));
-    int *device_token = static_cast<int *>(v4_cuda_kv_alloc(sizeof(int)));
+    /* Slots 6--9 belong to the V4 head path; attention owns 0--5.  Scratch is
+     * persistent per (device, slot), so decode never synchronizes on a fresh
+     * cudaFree after every generated token. */
+    float *device_hidden = coli_cuda_pipe_scratch(g_v4_cuda_device, 6, hidden_bytes);
+    float *device_scores = coli_cuda_pipe_scratch(g_v4_cuda_device, 7, scores_bytes);
+    float *device_logit = coli_cuda_pipe_scratch(g_v4_cuda_device, 8, sizeof(float));
+    int *device_token = reinterpret_cast<int *>(
+        coli_cuda_pipe_scratch(g_v4_cuda_device, 9, sizeof(int)));
     int result = -1;
     if (device_hidden && device_scores && device_logit && device_token &&
         !v4_cuda_copy_to_device(device_hidden, 0, hidden, hidden_bytes)) {
@@ -272,10 +276,6 @@ extern "C" int v4_cuda_head_argmax(float *best_logit, int *best_token,
                                     sizeof(*best_token)))
             result = *best_token < 0 ? -1 : 0;
     }
-    v4_cuda_kv_free(device_token);
-    v4_cuda_kv_free(device_logit);
-    v4_cuda_kv_free(device_scores);
-    v4_cuda_kv_free(device_hidden);
     return result;
 }
 
