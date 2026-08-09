@@ -14,18 +14,25 @@ int main(void) {
     uint64_t native = coli_v4_kv_context_bytes(
         43, 128, 512, 64, 128, ratios, 131072,
         COLI_V4_KV_NATIVE, COLI_V4_KV_NATIVE);
+    uint64_t turbo3 = coli_v4_kv_context_bytes(
+        43, 128, 512, 64, 128, ratios, 131072,
+        COLI_V4_KV_TURBO3, COLI_V4_KV_TURBO3);
     uint64_t expected_f32 = UINT64_C(43) * 128 * 2048;
     uint64_t expected_native = UINT64_C(43) * 128 * 583;
+    uint64_t expected_turbo3 = UINT64_C(43) * 128 * 200;
     for (int layer = 2; layer < 43; layer++) {
         uint64_t rows = (UINT64_C(131072) + ratios[layer] - 1) / ratios[layer];
         expected_f32 += rows * 2048;
         expected_native += rows * 583;
+        expected_turbo3 += rows * 200;
         if (ratios[layer] == 4) {
             expected_f32 += rows * 512;
             expected_native += rows * 68;
+            expected_turbo3 += rows * 50;
         }
     }
-    if (f32 != expected_f32 || native != expected_native || native >= f32) {
+    if (f32 != expected_f32 || native != expected_native ||
+        turbo3 != expected_turbo3 || turbo3 >= native || native >= f32) {
         fprintf(stderr, "V4 context byte accounting mismatch\n");
         return 1;
     }
@@ -65,8 +72,10 @@ int main(void) {
         fprintf(stderr, "V4 index byte overflow was not rejected\n");
         return 1;
     }
-    printf("V4 KV context 128k: f32=%.3f GiB native=%.3f GiB saved=%.3f GiB\n",
+    printf("V4 KV context 128k: f32=%.3f GiB native=%.3f GiB "
+           "turbo3=%.3f GiB f32/turbo3=%.2fx native/turbo3=%.2fx\n",
            f32 / 1073741824.0, native / 1073741824.0,
-           (f32 - native) / 1073741824.0);
+           turbo3 / 1073741824.0, (double)f32 / (double)turbo3,
+           (double)native / (double)turbo3);
     return 0;
 }

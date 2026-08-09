@@ -6,6 +6,51 @@ Voraussetzung: [00-reference.md](00-reference.md), [03-kv-codec.md](03-kv-codec.
 1. `feat: TurboQuant 2/3/4-bit KV codec`
 2. `perf: keep V4 attention in the WHT domain, one inverse per head` (optional)
 
+## Ergebnis
+
+Implementiert ist der erste Commit als CPU-Referenzpfad: `turbo2`, `turbo3` und
+`turbo4` hängen am Codec-Interface aus Phase 03, verwenden exakt 128 Werte pro
+WHT-Gruppe und belegen 34/50/66 B je Gruppe. Die gespeicherte fp16-Norm ist um
+die Rekonstruktionsenergie korrigiert. Der Decoder dreht jede Gruppe zurück in
+den ursprünglichen Raum, sodass die bestehenden Attention- und Indexer-Pfade
+unverändert bleiben. Beide Turbo-Schalter sind verlustbehaftet und bleiben
+opt-in; insbesondere bleibt `V4_KV_INDEX` getrennt, weil er die Top-k-Auswahl
+ändern kann. Nicht durch 128 teilbare Geometrien warnen und fallen auf den vom
+Aufrufer vorgegebenen sicheren Codec zurück. Das Tiny-Fixture mit Dimension 32
+prüft genau diesen Fallback.
+
+Der deterministische Test über 32 Zeilen à 512 kontinuierliche Zufallswerte und
+32 weitere Zeilen auf dem realen FP8+BF16-Vorgitter misst:
+
+| Codec | kontinuierlich | FP8+BF16-Vorgitter | Normverhältnis |
+|---|---:|---:|---:|
+| turbo2 | 0,9411 | 0,9411 | 1,0000 |
+| turbo3 | 0,9833 | 0,9832 | 1,0000 |
+| turbo4 | 0,9954 | 0,9954 | 1,0000 |
+
+Die Vorquantisierung verursacht damit keinen sichtbaren zusätzlichen Einbruch.
+Beim turbo3-Vorgitter liegen die getrennten Cosines für NoPE und RoPE bei 0,9832
+und 0,9834; der gleichförmige Codec bleibt deshalb die einzige Variante.
+`V4_KV_ROPE_BF16` wurde nicht eingeführt. Turbo3 liegt damit unter dem im Plan
+grob als „≈ 1,0“ übernommenen Fork-Wert; die gemessene 0,9832 ist die belastbare
+Schranke dieses Ports. Die 128k-Planerrechnung mit Paper-Geometrie ergibt
+**1,690 GiB f32 → 0,431 GiB native → 0,165 GiB turbo3**, also 10,24× gegenüber
+f32 und 2,61× gegenüber dem vollständigen nativen KV-Kontext einschließlich des
+kleineren Indexerformats.
+
+Der optionale zweite Commit (`V4_KV_ROTATED`) wurde nicht umgesetzt. Er würde
+einen zweiten Attention-Kernel einführen, während Phase 05 denselben Spezialpfad
+auf CUDA baut; der generische Decode-zurück-in-den-Originalraum-Pfad bleibt das
+Testorakel dafür. Entsprechend sind die beiden nicht implementierten Variablen
+aus der Referenztabelle entfernt worden. Ein Full-Checkpoint-Durchsatz- und
+Tokenqualitätstest steht aus, weil der 167-GB-Checkpoint in der
+Entwicklungsumgebung nicht vorhanden ist. `make test` und `make check` sind
+grün. Das vorhandene Tiny-Fixture besteht Oracle und Prefix-Reuse mit Defaults
+und mit `V4_KV{,_INDEX}=turbo2|turbo3|turbo4`; alle drei Einstellungen warnen
+wie vorgesehen und fallen wegen der 32er-Dimension token-identisch auf `native`
+zurück. Das erzwungene Neuerzeugen des Fixtures war ohne PyTorch und eine
+DeepSeek-V4-fähige Transformers-Version nicht möglich.
+
 ## Ziel
 
 Die drei Turbo-Codecs in das Interface aus Plan 03 einhängen.

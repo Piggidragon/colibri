@@ -529,8 +529,12 @@ Byte-Kommentare dort sind veraltet, die `static_assert`s stimmen.
 Indexer-Zeile (128 Dims): f32 512 B → **native fp4 68 B (7.5×, bit-exakt)** → turbo3 50 B.
 
 `native` = `uint8 q[448]` + `uint8 e8m0[7]` + `uint16 bf16_rope[64]` = 583 B.
-Referenzqualität turbo aus dem Fork: turbo3 Cosine ≈ 1.0, turbo4 ≈ 0.9956 — gemessen
-auf **kontinuierlichen** Daten, nicht auf bereits fp8-quantisierten. Siehe Plan 04.
+Die Fork-Dokumentation nannte turbo3 Cosine ≈ 1,0 und turbo4 ≈ 0,9956 auf
+**kontinuierlichen** Daten. Der fertige CPU-Port aus Phase 04 misst auf denselben
+Zufallsvektoren kontinuierlich / nach dem realen FP8+BF16-Vorgitter stattdessen
+turbo2 **0,9411 / 0,9411**, turbo3 **0,9833 / 0,9832** und turbo4
+**0,9954 / 0,9954**. Diese reproduzierbaren Port-Werte sind die belastbaren
+Schranken; siehe Plan 04.
 
 ### KV-Bilanz mit den echten Zahlen
 
@@ -670,8 +674,6 @@ Neue Knöpfe dieses Branches:
 | `V4_FLASH` | 1 | 02 |
 | `V4_KV` | `native` | 03 |
 | `V4_KV_INDEX` | `native` | 03 |
-| `V4_KV_ROPE_BF16` | 0 | 04 |
-| `V4_KV_ROTATED` | 0 | 04 |
 | `V4_VRAM` | 0 | 05–08 |
 | `V4_VRAM_RESERVE_MB` | `free/8`, geklemmt 256…1024 | 08 |
 | `V4_VRAM_LIMIT_MB` | aus (kappt das gemeldete freie VRAM) | 08 |

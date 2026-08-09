@@ -32,13 +32,18 @@ static int test_row_sizes(void) {
                 COLI_V4_KV_NATIVE, COLI_V4_KV_INDEX, dimension, 0) !=
                 cases[item].index_native)
             return 1;
+        static const size_t block_bytes[] = {66, 50, 34};
         for (ColiV4KVCodec codec = COLI_V4_KV_TURBO4;
-             codec <= COLI_V4_KV_TURBO2; codec++)
+             codec <= COLI_V4_KV_TURBO2; codec++) {
+            size_t expected = dimension % 128 ? 0
+                : (size_t)(dimension / 128) *
+                  block_bytes[codec - COLI_V4_KV_TURBO4];
             if (coli_v4_kv_row_bytes(codec, COLI_V4_KV_MAIN, dimension,
-                                     cases[item].rope_dim) != 0 ||
+                                     cases[item].rope_dim) != expected ||
                 coli_v4_kv_row_bytes(codec, COLI_V4_KV_INDEX,
-                                     dimension, 0) != 0)
+                                     dimension, 0) != expected)
                 return 1;
+        }
     }
     return 0;
 }
@@ -171,7 +176,10 @@ static int test_f32_roundtrip(void) {
 
 static int test_names_and_env(void) {
     if (strcmp(coli_v4_kv_codec_name(COLI_V4_KV_F32), "f32") ||
-        strcmp(coli_v4_kv_codec_name(COLI_V4_KV_NATIVE), "native"))
+        strcmp(coli_v4_kv_codec_name(COLI_V4_KV_NATIVE), "native") ||
+        strcmp(coli_v4_kv_codec_name(COLI_V4_KV_TURBO4), "turbo4") ||
+        strcmp(coli_v4_kv_codec_name(COLI_V4_KV_TURBO3), "turbo3") ||
+        strcmp(coli_v4_kv_codec_name(COLI_V4_KV_TURBO2), "turbo2"))
         return 1;
     setenv("COLI_TEST_V4_KV", "f32", 1);
     if (coli_v4_kv_codec_from_env(
@@ -190,7 +198,16 @@ static int test_names_and_env(void) {
         return 1;
     if (coli_v4_kv_codec_from_env(
             "COLI_TEST_V4_KV", COLI_V4_KV_MAIN, 512, 64,
-            COLI_V4_KV_TURBO3) != COLI_V4_KV_F32)
+            COLI_V4_KV_TURBO3) != COLI_V4_KV_TURBO3)
+        return 1;
+    setenv("COLI_TEST_V4_KV", "turbo3", 1);
+    if (coli_v4_kv_codec_from_env(
+            "COLI_TEST_V4_KV", COLI_V4_KV_MAIN, 512, 64,
+            COLI_V4_KV_NATIVE) != COLI_V4_KV_TURBO3)
+        return 1;
+    if (coli_v4_kv_codec_from_env(
+            "COLI_TEST_V4_KV", COLI_V4_KV_MAIN, 32, 16,
+            COLI_V4_KV_NATIVE) != COLI_V4_KV_NATIVE)
         return 1;
     unsetenv("COLI_TEST_V4_KV");
     return 0;

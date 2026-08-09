@@ -862,11 +862,15 @@ tests/test_v4_flash_attention$(EXE): tests/test_v4_flash_attention.c deepseek_v4
 		-DCOLI_V4_UNIT_KV_CODEC \
 		deepseek_v4.c $< -o $@ $(LDFLAGS)
 
-tests/test_v4_kv_codec$(EXE): tests/test_v4_kv_codec.c deepseek_v4.c v4_kv_codec.h
+tests/test_v4_kv_codec$(EXE): tests/test_v4_kv_codec.c deepseek_v4.c v4_kv_codec.h turbo_quant.h
 	$(CC) $(CFLAGS) -DCOLI_V4_UNIT_KV_CODEC -DCOLI_V4_UNIT_NATIVE_QUANT \
 		deepseek_v4.c $< -o $@ $(LDFLAGS)
 
-tests/test_v4_context_bytes$(EXE): tests/test_v4_context_bytes.c deepseek_v4.c v4_kv_codec.h
+tests/test_v4_context_bytes$(EXE): tests/test_v4_context_bytes.c deepseek_v4.c v4_kv_codec.h turbo_quant.h
+	$(CC) $(CFLAGS) -DCOLI_V4_UNIT_KV_CODEC -DCOLI_V4_UNIT_NATIVE_QUANT \
+		deepseek_v4.c $< -o $@ $(LDFLAGS)
+
+tests/test_v4_turbo_quant$(EXE): tests/test_v4_turbo_quant.c deepseek_v4.c v4_kv_codec.h turbo_quant.h
 	$(CC) $(CFLAGS) -DCOLI_V4_UNIT_KV_CODEC -DCOLI_V4_UNIT_NATIVE_QUANT \
 		deepseek_v4.c $< -o $@ $(LDFLAGS)
 

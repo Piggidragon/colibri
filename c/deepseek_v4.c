@@ -10857,6 +10857,7 @@ int coli_fp8_matvec_ref(float *output, const ColiTensorView *weight,
 #ifdef COLI_V4_UNIT_KV_CODEC
 #include "v4_kv_codec.h"
 #include "native_quant.h"
+#include "turbo_quant.h"
 
 #include <math.h>
 #include <stdint.h>
@@ -10872,11 +10873,18 @@ size_t coli_v4_kv_row_bytes(ColiV4KVCodec codec, ColiV4KVStream stream,
         (stream == COLI_V4_KV_INDEX && rope_dim != 0))
         return 0;
     if (codec == COLI_V4_KV_F32) return (size_t)head_dim * sizeof(float);
-    if (codec != COLI_V4_KV_NATIVE) return 0;
-    if (stream == COLI_V4_KV_INDEX)
-        return ((size_t)head_dim + 1) / 2 + ((size_t)head_dim + 31) / 32;
-    size_t nope = (size_t)(head_dim - rope_dim);
-    return nope + (nope + 63) / 64 + (size_t)rope_dim * sizeof(uint16_t);
+    if (codec == COLI_V4_KV_NATIVE) {
+        if (stream == COLI_V4_KV_INDEX)
+            return ((size_t)head_dim + 1) / 2 + ((size_t)head_dim + 31) / 32;
+        size_t nope = (size_t)(head_dim - rope_dim);
+        return nope + (nope + 63) / 64 + (size_t)rope_dim * sizeof(uint16_t);
+    }
+    if (head_dim % COLI_TQ_GROUP) return 0;
+    int bits = codec == COLI_V4_KV_TURBO2 ? 2
+        : codec == COLI_V4_KV_TURBO3 ? 3
+        : codec == COLI_V4_KV_TURBO4 ? 4 : 0;
+    size_t block_bytes = coli_tq_block_bytes(bits);
+    return block_bytes ? (size_t)(head_dim / COLI_TQ_GROUP) * block_bytes : 0;
 }
 
 static float native_index_value(const unsigned char *row, int index,
@@ -11053,6 +11061,11 @@ int coli_v4_kv_encode_row(ColiV4KVCodec codec, ColiV4KVStream stream,
         memcpy(dst, src, bytes);
         return 0;
     }
+    if (codec != COLI_V4_KV_NATIVE) {
+        int bits = codec == COLI_V4_KV_TURBO2 ? 2
+            : codec == COLI_V4_KV_TURBO3 ? 3 : 4;
+        return coli_tq_encode(dst, src, head_dim, bits);
+    }
     return stream == COLI_V4_KV_INDEX
         ? encode_native_index(dst, src, head_dim)
         : encode_native_main(dst, src, head_dim, rope_dim);
@@ -11066,6 +11079,11 @@ int coli_v4_kv_decode_row(ColiV4KVCodec codec, ColiV4KVStream stream,
     if (codec == COLI_V4_KV_F32) {
         memcpy(dst, src, bytes);
         return 0;
+    }
+    if (codec != COLI_V4_KV_NATIVE) {
+        int bits = codec == COLI_V4_KV_TURBO2 ? 2
+            : codec == COLI_V4_KV_TURBO3 ? 3 : 4;
+        return coli_tq_decode(dst, src, head_dim, bits);
     }
     decode_native_row(dst, src, stream, head_dim, rope_dim);
     return 0;
