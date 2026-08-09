@@ -263,7 +263,13 @@ static inline int coli_tq_encode_group(void *destination, const float *source,
         ? norm / reconstruction_norm : norm;
     if (!isfinite(corrected)) return -1;
     uint16_t encoded_norm = coli_tq_fp16_encode(corrected);
-    if ((encoded_norm & UINT16_C(0x7c00)) == UINT16_C(0x7c00)) return -1;
+    /* The corrected norm is binary16.  Zero is exact; a nonzero norm must
+     * round into the finite nonzero range (2^-24 through 65504).  The fixed
+     * row layout has no per-group fallback, so reject either bound instead of
+     * silently zeroing or saturating one group. */
+    if ((encoded_norm & UINT16_C(0x7c00)) == UINT16_C(0x7c00) ||
+        (corrected > 0.0f && !(encoded_norm & UINT16_C(0x7fff))))
+        return -1;
     if (bits == 2) {
         memcpy(&block2.norm, &encoded_norm, sizeof(encoded_norm));
         memcpy(destination, &block2, sizeof(block2));
@@ -280,12 +286,16 @@ static inline int coli_tq_encode_group(void *destination, const float *source,
 static inline int coli_tq_decode_group(float *destination, const void *source,
                                        int bits) {
     if (!destination || !source || !coli_tq_block_bytes(bits)) return -1;
-    float norm;
+    uint16_t encoded_norm;
+    memcpy(&encoded_norm, source, sizeof(encoded_norm));
+    float norm = coli_tq_fp16_decode(encoded_norm);
+    /* Reject malformed blocks before touching destination; callers discard
+     * failed rows, but must not observe partially decoded NaNs by accident. */
+    if (!isfinite(norm)) return -1;
     if (bits == 2) {
         ColiTurbo2Block stored;
         memcpy(&stored, source, sizeof(stored));
         const ColiTurbo2Block *block = &stored;
-        norm = coli_tq_fp16_decode(block->norm);
         for (int i = 0; i < COLI_TQ_GROUP; i++) {
             int index = (block->qs[i / 4] >> ((i % 4) * 2)) & 3;
             destination[i] = coli_tq_centroids2[index] * norm;
@@ -294,7 +304,6 @@ static inline int coli_tq_decode_group(float *destination, const void *source,
         ColiTurbo3Block stored;
         memcpy(&stored, source, sizeof(stored));
         const ColiTurbo3Block *block = &stored;
-        norm = coli_tq_fp16_decode(block->norm);
         for (int i = 0; i < COLI_TQ_GROUP; i++) {
             int low = (block->qs[i / 4] >> ((i % 4) * 2)) & 3;
             int high = (block->signs[i / 8] >> (i % 8)) & 1;
@@ -304,13 +313,11 @@ static inline int coli_tq_decode_group(float *destination, const void *source,
         ColiTurbo4Block stored;
         memcpy(&stored, source, sizeof(stored));
         const ColiTurbo4Block *block = &stored;
-        norm = coli_tq_fp16_decode(block->norm);
         for (int i = 0; i < COLI_TQ_GROUP; i++) {
             int index = (block->qs[i / 2] >> ((i % 2) * 4)) & 15;
             destination[i] = coli_tq_centroids4[index] * norm;
         }
     }
-    if (!isfinite(norm)) return -1;
     coli_tq_fwht_inverse(destination);
     return 0;
 }

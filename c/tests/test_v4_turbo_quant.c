@@ -14,7 +14,7 @@ static uint64_t random_state = UINT64_C(0x9e3779b97f4a7c15);
 static float uniform_open(void) {
     random_state = random_state * UINT64_C(6364136223846793005) +
                    UINT64_C(1442695040888963407);
-    return ((float)((random_state >> 40) + 1)) / 16777217.0f;
+    return ((float)((random_state >> 40) + 1)) / 16777218.0f;
 }
 
 static float normal_random(void) {
@@ -272,6 +272,11 @@ static int test_rejected_norms_and_alignment(void) {
             fprintf(stderr, "turbo%d accepted an fp16-overflowing norm\n", bits);
             return 1;
         }
+        for (int i = 0; i < COLI_TQ_GROUP; i++) source[i] = 1.0e-10f;
+        if (coli_tq_encode_group(misaligned, source, bits) != -1) {
+            fprintf(stderr, "turbo%d accepted an fp16-underflowing norm\n", bits);
+            return 1;
+        }
         source[0] = NAN;
         if (coli_tq_encode_group(misaligned, source, bits) != -1) {
             fprintf(stderr, "turbo%d accepted a non-finite input\n", bits);
@@ -286,6 +291,32 @@ static int test_rejected_norms_and_alignment(void) {
         }
         for (int i = 0; i < COLI_TQ_GROUP; i++)
             if (!isfinite(decoded[i])) return 1;
+    }
+    return 0;
+}
+
+static int test_rejected_helper_inputs(void) {
+    float source[COLI_TQ_GROUP] = {0};
+    float decoded[COLI_TQ_GROUP];
+    ColiTurbo4Block block = {0};
+    for (int i = 0; i < COLI_TQ_GROUP; i++) decoded[i] = 42.0f;
+    block.norm = UINT16_C(0x7c00);
+    if (coli_tq_decode_group(decoded, &block, 4) != -1) {
+        fprintf(stderr, "TurboQuant accepted a non-finite decoded norm\n");
+        return 1;
+    }
+    for (int i = 0; i < COLI_TQ_GROUP; i++) {
+        if (decoded[i] != 42.0f) {
+            fprintf(stderr, "TurboQuant wrote output for an invalid norm\n");
+            return 1;
+        }
+    }
+    if (coli_tq_encode(&block, source, 0, 4) != -1 ||
+        coli_tq_decode(decoded, &block, 0, 4) != -1 ||
+        coli_tq_encode(&block, source, COLI_TQ_GROUP - 1, 4) != -1 ||
+        coli_tq_decode(decoded, &block, COLI_TQ_GROUP - 1, 4) != -1) {
+        fprintf(stderr, "TurboQuant accepted an invalid array length\n");
+        return 1;
     }
     return 0;
 }
@@ -339,7 +370,8 @@ static int test_zero_rows(void) {
 int main(void) {
     if (test_wht() || test_fp16() || test_turbo3_packing() ||
         test_codec_geometry() || test_zero_rows() ||
-        test_rejected_norms_and_alignment() || test_quality() ||
+        test_rejected_norms_and_alignment() ||
+        test_rejected_helper_inputs() || test_quality() ||
         test_rope_scale_sensitivity())
         return 1;
     puts("V4 TurboQuant tests passed");
