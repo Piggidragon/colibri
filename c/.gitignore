@@ -3,6 +3,7 @@ glm_tiny/
 olmoe_hf/
 olmoe_i4/
 .build-config
+.deepseek-v4-build-config
 tests/test_st_mirror
 tests/test_st_pread
 tools/libiq3.so

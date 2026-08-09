@@ -47,6 +47,21 @@ LDFLAGS = -lm -fopenmp -pthread
 V4_BINARY := deepseek_v4
 endif
 
+CUDA ?= 0
+ifeq ($(CUDA),1)
+ifneq ($(UNAME_S),Linux)
+$(error CUDA=1 for the V4 engine is supported only on Linux)
+endif
+CUDA_HOME ?= /usr/local/cuda
+NVCC ?= $(CUDA_HOME)/bin/nvcc
+CUDA_ARCH ?= native
+NVCCFLAGS ?= -O3 -std=c++17 -arch=$(CUDA_ARCH) -Xcompiler=-Wall,-Wextra,-fPIE
+# GCC LTO cannot consume nvcc's host objects.  Keep the CPU default unchanged.
+override LTO := 0
+CFLAGS += -DCOLI_V4_CUDA
+LDFLAGS += -L$(CUDA_HOME)/lib64 -Wl,-rpath,$(CUDA_HOME)/lib64 -lcudart -lstdc++
+endif
+
 LTO ?= 1
 ifeq ($(LTO),1)
 CFLAGS += -flto
@@ -58,6 +73,19 @@ include Makefile.deepseek-v4.units
 TARGET_OBJS = $(addsuffix .o,$(V4_TARGET_UNITS))
 TEST_UNIT_OBJS = $(addsuffix .o,$(V4_TEST_UNITS))
 V4_OBJS = $(TARGET_OBJS)
+ifeq ($(CUDA),1)
+V4_OBJS += backend_cuda.o backend_cuda_v4.o
+endif
+
+# This makefile is invoked through a sub-make, so sharing c/Makefile's
+# .build-config would make the two parsers rewrite each other's stamp on every
+# invocation.  A V4-local stamp preserves the same stale-object protection.
+V4_BUILD_CONFIG := $(CC)|$(CFLAGS)|$(LDFLAGS)|CUDA=$(CUDA)|CUDA_HOME=$(CUDA_HOME)|NVCC=$(NVCC)|NVCCFLAGS=$(NVCCFLAGS)|ARCH=$(ARCH)|CUDA_ARCH=$(CUDA_ARCH)
+V4_BUILD_CONFIG_OLD := $(shell cat .deepseek-v4-build-config 2>/dev/null)
+ifneq "$(V4_BUILD_CONFIG)" "$(V4_BUILD_CONFIG_OLD)"
+$(file >.deepseek-v4-build-config,$(V4_BUILD_CONFIG))
+endif
+.deepseek-v4-build-config: ;
 
 .PHONY: deepseek-v4 deepseek-v4-clean deepseek-v4-test-objs
 deepseek-v4: $(V4_BINARY)
@@ -71,7 +99,16 @@ $(TARGET_OBJS) $(TEST_UNIT_OBJS): %.o: deepseek_v4.c deepseek_v4.h \
 	native_quant_fp4_rows16.h v4_kv_codec.h turbo_quant.h
 	$(CC) $(CFLAGS) -D$* -c deepseek_v4.c -o $@
 
+backend_cuda.o: backend_cuda.cu backend_cuda.h backend_gpu_compat.h .deepseek-v4-build-config
+	@command -v "$(NVCC)" >/dev/null 2>&1 || { echo "nvcc not found: set CUDA_HOME or NVCC" >&2; exit 1; }
+	"$(NVCC)" $(NVCCFLAGS) -c backend_cuda.cu -o $@
+
+backend_cuda_v4.o: backend_cuda_v4.cu backend_cuda_v4.h backend_cuda.h \
+		v4_kv_codec.h turbo_quant.h .deepseek-v4-build-config
+	@command -v "$(NVCC)" >/dev/null 2>&1 || { echo "nvcc not found: set CUDA_HOME or NVCC" >&2; exit 1; }
+	"$(NVCC)" $(NVCCFLAGS) -c backend_cuda_v4.cu -o $@
+
 deepseek-v4-test-objs: $(TEST_UNIT_OBJS)
 
 deepseek-v4-clean:
-	rm -f $(V4_BINARY) $(V4_OBJS) $(TEST_UNIT_OBJS)
+	rm -f $(V4_BINARY) $(V4_OBJS) $(TEST_UNIT_OBJS) backend_cuda_v4.o
