@@ -34,10 +34,12 @@ typedef enum {
  * requested layout cannot represent this geometry. */
 size_t coli_v4_kv_row_bytes(ColiV4KVCodec codec, ColiV4KVStream stream,
                             int head_dim, int rope_dim);
-/* Native encoding is a lossless repack, not a quantizer: src must already be
- * the QDQ + BF16-rounded state produced by the V4 attention/compressor path.
- * Values that the selected layout cannot reconstruct bit-for-bit are rejected
- * with -1 so a changed producer cannot silently alter model semantics. */
+/* Native encoding is a lossless repack: src must already be the QDQ +
+ * BF16-rounded state produced by the V4 attention/compressor path.  Values it
+ * cannot reconstruct bit-for-bit are rejected.  Turbo codecs deliberately
+ * quantize that state again and are therefore used only when explicitly
+ * selected through V4_KV or V4_KV_INDEX.  Turbo encoding rejects non-finite
+ * inputs and norms that cannot be represented by its fp16 scale. */
 int coli_v4_kv_encode_row(ColiV4KVCodec codec, ColiV4KVStream stream,
                           void *dst, const float *src,
                           int head_dim, int rope_dim);

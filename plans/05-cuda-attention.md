@@ -95,7 +95,7 @@ int v4_cuda_flash_attention(
     const void *compressed_kv, int compressed_count,
     const int *compressed_indices, int compressed_selected,
     const float *sinks, int codec, int heads, int head_dim,
-    size_t row_bytes, float scale, int rotated);
+    size_t row_bytes, float scale);
 ```
 
 Vor Upload und Launch werden Fensterindizes gegen `window_size` und komprimierte
@@ -172,14 +172,13 @@ Staging-Gewinn aus Plan 02 vermischt:
 Loop — ein Kernel pro Codec, wie es die Referenz mit
 `fattn-vec-instance-turbo2_0`/`turbo3_0`/`turbo4_0` macht.
 
-**Rotierter Modus** (`rotated=1`, aus Plan 04): Dequant liefert im WHT-Raum, Q
-kommt bereits rotiert vom Host, und die inverse WHT läuft einmal am Ende auf `ctx`.
-Die Vorzeichentabellen `turbo_cpu_s1/s2` müssen dafür als `__constant__` auf dem
-Device liegen — Muster: `coli_cuda_fp8_set_lut` / `c_e4m3`
-([c/backend_cuda.cu:860](../c/backend_cuda.cu)) publiziert die CPU-Tabelle einmal
-pro Device, damit sie nicht driften kann. Genauso für Zentroide und Signs:
-**eine** Quelle in `c/turbo_quant.h`, per `v4_cuda_publish_tables()` hochgeladen,
-Uploads vorher abgelehnt.
+Der in Plan 04 skizzierte rotierte Modus wurde nicht implementiert und ist keine
+Voraussetzung dieser Phase. Der erste CUDA-Kernel dequantisiert Turbo-Codecs wie
+das CPU-Testorakel vollständig in den Originalraum; es gibt keinen
+`V4_KV_ROTATED`-Knopf. Eine spätere WHT-Direktvariante wäre ein eigener gemessener
+Follow-up. Zentroide und Vorzeichentabellen haben auch für den vollständigen
+Decoder **eine** Quelle in `c/turbo_quant.h` und werden per
+`v4_cuda_publish_tables()` hochgeladen; Aufrufe vor dem Upload werden abgelehnt.
 
 ### Vendor-Referenz beim Kernel-Design
 

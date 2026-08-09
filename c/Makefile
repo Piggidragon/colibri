@@ -857,16 +857,20 @@ tests/test_native_quant$(EXE): tests/test_native_quant.c deepseek_v4.c native_qu
 tests/test_v4_scratch_env$(EXE): tests/test_v4_scratch_env.c deepseek_v4.c deepseek_v4_internal.h
 	$(CC) $(CFLAGS) -DCOLI_V4_UNIT_RESOURCE_PLAN deepseek_v4.c $< -o $@ $(LDFLAGS)
 
-tests/test_v4_flash_attention$(EXE): tests/test_v4_flash_attention.c deepseek_v4.c deepseek_v4_internal.h
+tests/test_v4_flash_attention$(EXE): tests/test_v4_flash_attention.c deepseek_v4.c deepseek_v4_internal.h v4_kv_codec.h native_quant.h turbo_quant.h
 	$(CC) $(CFLAGS) -DCOLI_V4_UNIT_SPARSE_ATTENTION -DCOLI_V4_UNIT_NATIVE_QUANT \
 		-DCOLI_V4_UNIT_KV_CODEC \
 		deepseek_v4.c $< -o $@ $(LDFLAGS)
 
-tests/test_v4_kv_codec$(EXE): tests/test_v4_kv_codec.c deepseek_v4.c v4_kv_codec.h
+tests/test_v4_kv_codec$(EXE): tests/test_v4_kv_codec.c deepseek_v4.c v4_kv_codec.h turbo_quant.h
 	$(CC) $(CFLAGS) -DCOLI_V4_UNIT_KV_CODEC -DCOLI_V4_UNIT_NATIVE_QUANT \
 		deepseek_v4.c $< -o $@ $(LDFLAGS)
 
-tests/test_v4_context_bytes$(EXE): tests/test_v4_context_bytes.c deepseek_v4.c v4_kv_codec.h
+tests/test_v4_context_bytes$(EXE): tests/test_v4_context_bytes.c deepseek_v4.c v4_kv_codec.h turbo_quant.h
+	$(CC) $(CFLAGS) -DCOLI_V4_UNIT_KV_CODEC -DCOLI_V4_UNIT_NATIVE_QUANT \
+		deepseek_v4.c $< -o $@ $(LDFLAGS)
+
+tests/test_v4_turbo_quant$(EXE): tests/test_v4_turbo_quant.c deepseek_v4.c v4_kv_codec.h turbo_quant.h
 	$(CC) $(CFLAGS) -DCOLI_V4_UNIT_KV_CODEC -DCOLI_V4_UNIT_NATIVE_QUANT \
 		deepseek_v4.c $< -o $@ $(LDFLAGS)
 
@@ -893,7 +897,7 @@ $(V4_KV_SNAPSHOT_DIR)/indexer_snapshot.o: deepseek_v4.c deepseek_v4_internal.h v
 	$(CC) $(V4_KV_SNAPSHOT_CFLAGS) -DCOLI_V4_UNIT_INDEXER_SNAPSHOT \
 		-c deepseek_v4.c -o $@
 
-$(V4_KV_SNAPSHOT_DIR)/codec.o: deepseek_v4.c v4_kv_codec.h native_quant.h | $(V4_KV_SNAPSHOT_DIR)
+$(V4_KV_SNAPSHOT_DIR)/codec.o: deepseek_v4.c v4_kv_codec.h native_quant.h turbo_quant.h | $(V4_KV_SNAPSHOT_DIR)
 	$(CC) $(V4_KV_SNAPSHOT_CFLAGS) -DCOLI_V4_UNIT_KV_CODEC \
 		-c deepseek_v4.c -o $@
 
@@ -953,7 +957,7 @@ $(V4_OWN_DIR)/COLI_V4_UNIT_ST.o: deepseek_v4.c deepseek_v4.h deepseek_v4_interna
 $(V4_OWN_DIR)/COLI_V4_UNIT_NATIVE_QUANT.o: deepseek_v4.c deepseek_v4.h deepseek_v4_internal.h quant.h | $(V4_OWN_DIR)
 	$(CC) $(V4_OWN_CFLAGS) -DCOLI_V4_UNIT_NATIVE_QUANT -c deepseek_v4.c -o $@
 
-$(V4_OWN_DIR)/COLI_V4_UNIT_KV_CODEC.o: deepseek_v4.c deepseek_v4.h deepseek_v4_internal.h v4_kv_codec.h | $(V4_OWN_DIR)
+$(V4_OWN_DIR)/COLI_V4_UNIT_KV_CODEC.o: deepseek_v4.c deepseek_v4.h deepseek_v4_internal.h v4_kv_codec.h native_quant.h turbo_quant.h | $(V4_OWN_DIR)
 	$(CC) $(V4_OWN_CFLAGS) -DCOLI_V4_UNIT_KV_CODEC -c deepseek_v4.c -o $@
 
 tests/test_v4_ownership$(EXE): tests/test_v4_ownership.c $(V4_OWNERSHIP_OBJS)

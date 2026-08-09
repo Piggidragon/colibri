@@ -6,7 +6,8 @@ Konventionen; die Phasenpläne `01`–`13` setzen das voraus und wiederholen es 
 - Pläne auf Branch `planning`; jede Phase bekommt einen eigenen Branch und PR
   (Schema und Reihenfolge in [AGENTS.md](../AGENTS.md))
 - Lizenz: Repo ist Apache-2.0, der TurboQuant-Referenz-Fork MIT → Attribution im
-  portierten Header genügt. `reference/` selbst wird **nicht** committet.
+  portierten Header plus vollständiger Lizenztext in `THIRD_PARTY_NOTICES`.
+  `reference/` selbst wird **nicht** committet.
 - In `reference/` liegen ausschließlich **Lesequellen**, kein Build-Input:
   `DeepSpec`, `llama-cpp-turboquant` und `FlashMLA`
   (siehe [FlashMLA](#flashmla--vendor-referenz-nicht-linkbar)).
@@ -529,8 +530,16 @@ Byte-Kommentare dort sind veraltet, die `static_assert`s stimmen.
 Indexer-Zeile (128 Dims): f32 512 B → **native fp4 68 B (7.5×, bit-exakt)** → turbo3 50 B.
 
 `native` = `uint8 q[448]` + `uint8 e8m0[7]` + `uint16 bf16_rope[64]` = 583 B.
-Referenzqualität turbo aus dem Fork: turbo3 Cosine ≈ 1.0, turbo4 ≈ 0.9956 — gemessen
-auf **kontinuierlichen** Daten, nicht auf bereits fp8-quantisierten. Siehe Plan 04.
+Die Fork-Dokumentation nannte turbo3 Cosine ≈ 1,0 und turbo4 ≈ 0,9956 auf
+**kontinuierlichen** Daten. Der fertige CPU-Port aus Phase 04 misst auf denselben
+Zufallsvektoren kontinuierlich / nach dem realen FP8+BF16-Vorgitter stattdessen
+turbo2 **0,9411 / 0,9411**, turbo3 **0,9833 / 0,9832** und turbo4
+**0,9954 / 0,9954**. Diese reproduzierbaren Port-Werte sind die belastbaren
+Schranken für **gleich skalierte** NoPE-/RoPE-Hälften; siehe Plan 04. Bei
+RoPE-Skalen von 1/4, 1/16 und 16 bleibt der Gesamt-Cosine von turbo3 zwar bei
+~0,983, aber der kleinere Anteil fällt bis 0,507 (RoPE bei 1/16) beziehungsweise
+0,838 (NoPE bei 16). Der Gesamtwert allein entscheidet deshalb nicht gegen ein
+getrenntes RoPE-Layout.
 
 ### KV-Bilanz mit den echten Zahlen
 
@@ -670,8 +679,6 @@ Neue Knöpfe dieses Branches:
 | `V4_FLASH` | 1 | 02 |
 | `V4_KV` | `native` | 03 |
 | `V4_KV_INDEX` | `native` | 03 |
-| `V4_KV_ROPE_BF16` | 0 | 04 |
-| `V4_KV_ROTATED` | 0 | 04 |
 | `V4_VRAM` | 0 | 05–08 |
 | `V4_VRAM_RESERVE_MB` | `free/8`, geklemmt 256…1024 | 08 |
 | `V4_VRAM_LIMIT_MB` | aus (kappt das gemeldete freie VRAM) | 08 |
@@ -786,6 +793,21 @@ Das Tiny-Fixture braucht torch+transformers CPU-only
 ([c/tools/requirements-deepseek-v4-tiny.txt](../c/tools/requirements-deepseek-v4-tiny.txt)).
 Es muss in **jeder** Phase mit den Defaults token-identisch bleiben — das ist der
 eigentliche Regressionsbeweis.
+
+Auf der Zielmaschine ist die gitignorierte `.venv-v4-tiny` mit den dort exakt
+gepinnten Versionen eingerichtet. Sie lässt sich ohne CUDA und ohne vollständigen
+Checkpoint reproduzieren:
+
+```bash
+uv venv .venv-v4-tiny --python /usr/bin/python3
+uv pip install --python .venv-v4-tiny/bin/python \
+  -r c/tools/requirements-deepseek-v4-tiny.txt
+make -C c PYTHON="$PWD/.venv-v4-tiny/bin/python" deepseek-v4-tiny-check
+```
+
+Der Generator baut ein deterministisches Drei-Layer-Modell von unter 1 MiB mit
+der offiziellen `DeepseekV4ForCausalLM`-Implementierung. Das deckt das lokale
+Oracle ab, nicht Durchsatz oder Qualität des 167-GB-Checkpoints.
 
 Sobald der Checkpoint da ist (`hf download deepseek-ai/DeepSeek-V4-Flash-0731`,
 ~167 GB) greift zusätzlich:

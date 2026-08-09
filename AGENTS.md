@@ -53,7 +53,7 @@ und nicht wiederholen.
 | 01 | [Messen und RAM-Budget](plans/01-measure-and-ram-budget.md) | fertig (#2) |
 | 02 | [Flash Attention](plans/02-flash-attention.md) | fertig (#3) |
 | 03 | [KV-Codec](plans/03-kv-codec.md) | fertig (#5) |
-| 04 | [TurboQuant](plans/04-turboquant.md) | offen |
+| 04 | [TurboQuant](plans/04-turboquant.md) | fertig (#6) |
 | 05 | [CUDA-Attention](plans/05-cuda-attention.md) | offen |
 | 06 | [Dense in VRAM](plans/06-dense-vram.md) | offen |
 | 07 | [Head und DSpark in VRAM](plans/07-head-dspark-vram.md) | offen |
@@ -198,6 +198,22 @@ make -C c deepseek-v4-tiny-check
 
 Das Tiny-Fixture muss mit den Defaults **token-identisch** bleiben. Kippt es, ist
 das ein Befund und gehört in den PR-Text — nicht weggedrückt.
+
+Für die erzwungene Neugenerierung braucht der Check die exakt gepinnten
+CPU-Pakete aus `c/tools/requirements-deepseek-v4-tiny.txt`. Auf dieser Maschine
+ist dafür `.venv-v4-tiny` eingerichtet; sie braucht weder CUDA noch den
+167-GB-Checkpoint. Reproduzierbar neu anlegen und verwenden:
+
+```bash
+uv venv .venv-v4-tiny --python /usr/bin/python3
+uv pip install --python .venv-v4-tiny/bin/python \
+  -r c/tools/requirements-deepseek-v4-tiny.txt
+make -C c PYTHON="$PWD/.venv-v4-tiny/bin/python" deepseek-v4-tiny-check
+```
+
+Das Fixture ist ein synthetisches, deterministisches Drei-Layer-V4 und kein
+Ausschnitt des großen Modells. Es prüft das Transformers-Orakel und die
+Tokenidentität; Full-Checkpoint-Qualität und -Durchsatz ersetzt es nicht.
 
 ### 5. Messen statt behaupten
 
