@@ -76,6 +76,7 @@ und nicht wiederholen.
 | 11 | [Rückbau auf V4](plans/11-strip-to-v4.md) | offen, **zuletzt** |
 | 12 | [Expert-Cache-Politik](plans/12-expert-cache-policy.md) | offen |
 | 13 | [Frontend V4-only](plans/13-frontend-v4.md) | offen, optional |
+| 14 | [Chunked Prefill + DSpark](plans/14-chunked-prefill-dspark.md) | offen |
 
 Referenzdokumente ohne Nummer:
 [Paper](plans/paper-deepseek-v4.md) ·
@@ -97,18 +98,22 @@ Die Nummern sind Kennungen, keine Reihenfolge. So wird gearbeitet:
 | 7 | **06** | Dense in VRAM — der größte RAM-Einzelposten. |
 | 8 | **07** | Head und DSpark in VRAM. |
 | 9 | **08** | VRAM-Planner, der 05–07 zu einer Entscheidung zusammenfasst. |
-| 10 | **10** | Dual-Streaming. Unabhängig, kann ab Schritt 2 jederzeit dazwischen. Das zweite Laufwerk ist **optional** — Einzellaufwerk bleibt Default und Pflicht-Abnahme. |
-| 11 | **09 Rest** | THP, CUDA-Pfade, Tuning-Doku. |
-| 12 | **04** | TurboQuant — fürs 1M-Profil empfohlen; `native` passt nach der gemessenen Dense-Korrektur nominell mit nur ~0.31 GiB Luft (siehe VRAM-Budget in 00). |
-| 13 | **13** | Frontend. |
-| 14 | **11** | Rückbau. |
+| 10 | **04** | TurboQuant — Pflicht für das 256k-/1M-Langkontextprofil. |
+| 11 | **14** | Macht 256k mit TurboQuant und DSpark ohne Voll-Prefill-Buffer möglich; vor jedem 1M-Versuch. |
+| 12 | **10** | Dual-Streaming. Unabhängig, kann ab Schritt 2 jederzeit dazwischen. Das zweite Laufwerk ist **optional** — Einzellaufwerk bleibt Default und Pflicht-Abnahme. |
+| 13 | **09 Rest** | THP, CUDA-Pfade, Tuning-Doku. |
+| 14 | **13** | Frontend. |
+| 15 | **11** | Rückbau. |
 
 **Harte Abhängigkeiten**, die man nicht umstellen darf:
 
 - **01 vor allem** — ohne Baseline ist keine Behauptung prüfbar
 - **02 vor 05** — der CPU-Flash-Kernel ist Vorlage und Testorakel für den CUDA-Kernel
 - **03 vor 04** — Turbo hängt am Codec-Interface
+- **04 vor 14** — das tägliche 256k-Profil und das 1M-Experiment verwenden Turbo3
 - **05 Commit 1 vor 06/07** — dort entsteht der CUDA-Build für V4
+- **07 und 08 vor 14** — Chunked Prefill muss den verifizierten DSpark-Decode
+  und dessen endgültige VRAM-Planung übernehmen, nicht eine Zwischenform
 - **13 vor 11** — sonst ist der Launcher zwischenzeitlich kaputt
 - **10 vor 11** — 11 löscht den Mirror-Code, den 10 als Vorlage braucht
 - **11 zuletzt**, immer
@@ -141,6 +146,7 @@ phase-10-dual-streaming
 phase-11-strip-to-v4
 phase-12-expert-cache
 phase-13-frontend
+phase-14-chunked-prefill
 ```
 
 - Branch von `main`, außer der Plan hängt an einem anderen — dann von dessen

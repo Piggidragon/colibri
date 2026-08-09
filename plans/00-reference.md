@@ -749,6 +749,7 @@ daraus automatisch Gates. Keine zentrale Liste, kein Merge-Konflikt.
 | 11 | [Rückbau auf V4](11-strip-to-v4.md) | andere Motoren + Windows raus | — | — |
 | 12 | [Expert-Cache-Politik](12-expert-cache-policy.md) | Pin-Deckel, Indexer (Scan + Select), Prefill | — | — |
 | 13 | [Frontend V4-only](13-frontend-v4.md) | WebUI, CLI, Serve auf V4 | — | — |
+| 14 | [Chunked Prefill + DSpark](14-chunked-prefill-dspark.md) | 256k-Aktivierungsfenster und MTP-Handoff | spart bis zu `CTX/chunk`-fachen State | — |
 
 ¹ 03 hat den gesamten KV bereits von 1.68 auf 0.43 GiB (128k) gesenkt. 05 spiegelt
 den 0.388-GiB-Attention-Anteil, 08 entfernt erst dessen Host-Shadow; 0.044 GiB

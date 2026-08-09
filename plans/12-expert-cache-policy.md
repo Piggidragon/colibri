@@ -156,6 +156,11 @@ und ein Fehler dabei sieht aus wie ein Select-Fehler.
 
 ## Commit 3 — Prefill
 
+Dieser Commit misst und stimmt die bestehende V4-Batchgröße, Prefetch- und
+Cache-Politik ab. Er ändert **nicht** die zwei auf `CTX` skalierten
+Session-Aktivierungspuffer; deren Chunk-/DSpark-Übergabe gehört in
+[Plan 14](14-chunked-prefill-dspark.md).
+
 **Zweite Lücke im Planset:** alle Pläne optimieren Decode. Bei 128k Kontext ist
 aber der Prefill der längere Teil, und er hat ein anderes Kostenprofil — jeder
 Token berührt 6 Experten, ein Batch von `B` Tokens berührt bis zu `6B`
