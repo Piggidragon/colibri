@@ -64,6 +64,40 @@ und nicht wiederholen.
 | 12 | [Expert-Cache-Politik](plans/12-expert-cache-policy.md) | offen |
 | 13 | [Frontend V4-only](plans/13-frontend-v4.md) | offen, optional |
 
+## Aktueller Arbeitsstand — Phase 05
+
+Branch: `phase-05-cuda-attention`
+Letzter Commit: `2d2a19d feat: V4 CUDA flash sparse MLA attention kernel`
+
+Phase 05 ist implementiert, aber noch **nicht abgenommen** und deshalb bewusst
+weiter `offen`. Die drei Plan-Commits sind vorhanden:
+
+- `25b1d9c` — opt-in CUDA-Build für den V4-Engine
+- `042e7d2` — residenter quantisierter KV-Cache mit CPU-Fallback
+- `2d2a19d` — CUDA Flash-Sparse-MLA-Attention, alle fünf KV-Codecs
+
+Auf der Entwicklungs-VM sind abgeschlossen:
+
+- `make -C c test && make -C c check` — grün, 356 Python-Tests
+- Tiny-Neugenerierung und Prefix-Reuse — tokenidentisch
+- CUDA 12.0 / GCC 12 / `sm_89` — Backend, CUDA-Test-Harness und V4-Binary kompilieren/linken
+- `V4_VRAM=1` ohne NVIDIA-Gerät — sauberer, tokenidentischer CPU-Fallback
+
+Offen und beim Wechsel auf die Zielmaschine zuerst zu erledigen:
+
+1. `make -C c v4-cuda-test CUDA=1 CUDA_ARCH=sm_89` mit echter RTX 4070 ausführen;
+   der Test muss statt Skip 77 alle Codecs, Head-Zahlen, Sinks und OOB-Gates bestehen.
+2. `V4_VRAM=1` gegen den Full-Checkpoint starten und Tokenidentität gegen CPU prüfen.
+3. Mit `nvidia-smi` den KV-Footprint messen und die Zielwerte aus
+   [Plan 05](plans/05-cuda-attention.md) dokumentieren.
+4. CPU-Head-Outer-vs.-Rank-Outer sowie CUDA-Durchsatz/PCIe-Transfer messen;
+   erst danach Phase 05 auf `fertig (#PR)` setzen und `## Ergebnis` im Plan ergänzen.
+
+Die VM besitzt kein NVIDIA-Gerät; GPU-Laufzeit, Full-Checkpoint-Identität,
+VRAM-Footprint und Performance sind daher nicht behauptet oder simuliert.
+Der kopierfertige PR-Text liegt in
+[`plans/05-cuda-attention-pr.md`](plans/05-cuda-attention-pr.md).
+
 Referenzdokumente ohne Nummer:
 [Paper](plans/paper-deepseek-v4.md) ·
 [llama.cpp](plans/llamacpp-deepseek-v4.md) ·
