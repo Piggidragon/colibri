@@ -35,8 +35,10 @@ that specialized cache layout can be removed.
 
 A typical checkpoint has 43 transformer layers, hidden size 4096, and 256
 routed experts per sparse layer with top-k 6. Dense weights occupy about
-6.27 GiB and a resident BF16 output head about 0.99 GiB (1.06 GB).
-Routed-expert weights are streamed and cached according to the RAM budget.
+6.27 GiB in total: 5.456 GiB of FP8 weights and expanded scales can move to
+VRAM, while 0.810 GiB of BF16/f32/i64 tensors remains on the host. A resident
+BF16 output head occupies about 0.99 GiB (1.06 GB). Routed-expert weights are
+streamed and cached according to the RAM budget.
 
 The planner reserves workspace and a minimum expert working set, then enables
 dense/head residency and grows the expert cache when memory permits. Dense

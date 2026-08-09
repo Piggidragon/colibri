@@ -55,7 +55,7 @@ und nicht wiederholen.
 | 03 | [KV-Codec](plans/03-kv-codec.md) | fertig (#5) |
 | 04 | [TurboQuant](plans/04-turboquant.md) | fertig (#6) |
 | 05 | [CUDA-Attention](plans/05-cuda-attention.md) | fertig (#7) |
-| 06 | [Dense in VRAM](plans/06-dense-vram.md) | offen |
+| 06 | [Dense in VRAM](plans/06-dense-vram.md) | fertig (#8) |
 | 07 | [Head und DSpark in VRAM](plans/07-head-dspark-vram.md) | offen |
 | 08 | [VRAM-Planner](plans/08-vram-planner.md) | offen |
 | 09 | [Arch / CachyOS](plans/09-arch-cachyos.md) | offen |
@@ -86,7 +86,7 @@ Die Nummern sind Kennungen, keine Reihenfolge. So wird gearbeitet:
 | 9 | **08** | VRAM-Planner, der 05–07 zu einer Entscheidung zusammenfasst. |
 | 10 | **10** | Dual-Streaming. Unabhängig, kann ab Schritt 2 jederzeit dazwischen. Das zweite Laufwerk ist **optional** — Einzellaufwerk bleibt Default und Pflicht-Abnahme. |
 | 11 | **09 Rest** | THP, CUDA-Pfade, Tuning-Doku. |
-| 12 | **04** | TurboQuant — **Pflicht für das 1M-Profil**, bis 512k optional (siehe VRAM-Budget in 00). |
+| 12 | **04** | TurboQuant — fürs 1M-Profil empfohlen; `native` passt nach der gemessenen Dense-Korrektur nominell mit nur ~0.31 GiB Luft (siehe VRAM-Budget in 00). |
 | 13 | **13** | Frontend. |
 | 14 | **11** | Rückbau. |
 
@@ -288,8 +288,9 @@ Agent nichts wieder.
   Bandbreite bei langem Kontext (aber nicht gegen den Indexer-Scan oben).
 - **Der Head ist 0.99 GiB beziehungsweise 1.06 GB.** 129280 × 4096 × 2 B =
   1.059 **GB**. Für Zeitrechnungen (÷ GB/s) ist der Dezimalwert richtig, in einer
-  GiB-Bilanz nicht. Für die 6.27 GiB Dense gilt das **nicht** — die sind echte
-  GiB.
+  GiB-Bilanz nicht. Das Dense-Gesamtinventar sind echte 6.267 GiB, davon sind
+  aber nur 5.456 GiB FP8-Gewichte und Scales in Phase 06 verschiebbar; 0.810 GiB
+  BF16/f32/i64 bleiben im RAM.
 - **Die DSpark-Reserve ist 1.17 GiB, nicht 1.25.** Beim Default sind
   `0.45 × 10⁹ + 768 × 2²⁰ = 1 255 306 368 B` genau 1.255 GB, aber 1.169 GiB.
 - **~13 tok/s ist der Bandbreiten-Deckel.** Jeder Token schiebt ~3.4 GB

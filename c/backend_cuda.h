@@ -77,6 +77,11 @@ COLI_CUDA_DLLEXPORT int coli_cuda_matmul(ColiCudaTensor **tensor,
                      float *y, const float *x,
                      const void *weights, const float *scales,
                      int fmt, int S, int I, int O, int device, int gs);
+/* Host-input/output FP8 matmul over a contiguous output-row range of an
+ * already resident tensor. row_start must be 128-row scale-block aligned. */
+COLI_CUDA_DLLEXPORT int coli_cuda_fp8_matmul_rows(
+    ColiCudaTensor *tensor, float *y, const float *x,
+    int S, int row_start, int rows);
 
 /* Fused expert pipeline: y = down(silu(gate(x)) * up(x)).  All three tensors
  * must already be resident on one device.  Activations cross PCIe once in

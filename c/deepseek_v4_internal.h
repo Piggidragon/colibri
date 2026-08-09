@@ -144,6 +144,9 @@ static inline int v4_flash_enabled(void) {
 /* Defined once in COLI_V4_UNIT_MATH; latches the CPU-fallback warning so it is
  * printed once per process rather than once per attention unit. */
 extern int coli_v4_attention_cuda_warned;
+/* Also COLI_V4_UNIT_MATH; latches the resident-dense GPU path off after its
+ * first failure, because the host FP8 buffers are gone by then. */
+extern int coli_v4_dense_cuda_disabled;
 #endif
 
 /* ==== begin deepseek_v4_layer.h ==== */
@@ -152,6 +155,9 @@ extern int coli_v4_attention_cuda_warned;
 #include <stdint.h>
 
 #include "v4_kv_codec.h"
+#ifdef COLI_V4_CUDA
+#include "backend_cuda.h"
+#endif
 
 /* amalgamated: deepseek_v4_config.h */
 
@@ -196,7 +202,18 @@ typedef struct {
 typedef struct {
     ColiDeepSeekV4LayerPlan plan;
     ColiDeepSeekV4LayerStats stats;
+    /* Written by the loader from the engine's dense location: it decides
+     * whether the FP8 stays in checkpoint row-major order for the GPU.  Read it
+     * afterwards to see whether the layer really landed in VRAM -- an upload
+     * that fell back to the CPU clears it again. */
+    int gpu_resident;
     void *data[COLI_V4_MAX_LAYER_TENSORS];
+#ifdef COLI_V4_CUDA
+    ColiCudaTensor *device[COLI_V4_MAX_LAYER_TENSORS];
+    const ColiSafetensorsIndex *source_index;
+    uint64_t host_bytes;
+    uint64_t device_bytes;
+#endif
 } ColiDeepSeekV4LayerWeights;
 
 int coli_v4_layer_plan(ColiDeepSeekV4LayerPlan *plan,
@@ -216,6 +233,18 @@ void coli_v4_layer_free(ColiV4Engine *engine,
 const void *coli_v4_layer_data(const ColiDeepSeekV4LayerWeights *weights,
                                const char *name,
                                const ColiDeepSeekV4TensorSpec **spec);
+int coli_v4_dense_matmul(float *output,
+                         const ColiDeepSeekV4LayerWeights *weights,
+                         const char *prefix, const float *input, int batch,
+                         int row_start, int rows);
+int coli_v4_dense_shared_expert(
+    float *output, const ColiDeepSeekV4LayerWeights *weights,
+    const float *input, float swiglu_limit);
+#ifdef COLI_V4_TEST_HOOKS
+int coli_v4_test_fp8_maybe_pack_rows8(unsigned char *data,
+                                      int64_t rows, int64_t columns,
+                                      int gpu_resident);
+#endif
 
 #ifdef __cplusplus
 }
@@ -635,13 +664,27 @@ typedef struct {
 
 typedef struct {
     uint64_t available_bytes;
+    uint64_t vram_available_bytes;
+    /* Kept clear of the dense tier: the per-session KV mirror and the kernel
+     * scratch are allocated later and have nowhere else to go. */
+    uint64_t vram_reserve_bytes;
     uint64_t fixed_bytes;
     uint64_t dense_bytes;
+    uint64_t dense_device_bytes;
     uint64_t minimum_expert_bytes;
+    int vram_enabled;
 } ColiDeepSeekV4ResidentTierInputs;
 
+typedef enum {
+    COLI_V4_DENSE_STREAMED = 0,
+    COLI_V4_DENSE_RAM = 1,
+    COLI_V4_DENSE_VRAM = 2,
+} ColiDeepSeekV4DenseLocation;
+
 typedef struct {
+    ColiDeepSeekV4DenseLocation dense_location;
     uint64_t dense_bytes;
+    uint64_t dense_device_bytes;
     int dense_resident;
 } ColiDeepSeekV4ResidentTierPlan;
 
@@ -681,6 +724,7 @@ typedef struct {
     uint64_t memory_limit_bytes;
     int context_tokens;
     int dense_resident;
+    ColiDeepSeekV4DenseLocation dense_location;
     uint64_t target_expert_cache_bytes;
     int pin_slots_per_layer;
     uint64_t repin_interval;
@@ -708,7 +752,8 @@ struct ColiV4Engine {
         ColiDeepSeekV4LayerWeights layers[COLI_V4_RESIDENT_MAX_LAYERS];
         unsigned char ready[COLI_V4_RESIDENT_MAX_LAYERS];
         const ColiSafetensorsIndex *index;
-        uint64_t total_bytes;
+        uint64_t host_bytes;
+        uint64_t device_bytes;
     } dense_resident;
     struct {
         uint16_t *markov_w1;

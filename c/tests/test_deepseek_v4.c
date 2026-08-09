@@ -654,15 +654,20 @@ static int test_resource_plan(void) {
 
     ColiDeepSeekV4ResidentTierPlan tiers;
     ColiDeepSeekV4ResidentTierInputs target_only = {
-        40 * GIB, 4 * GIB, 24 * GIB, 12 * GIB,
+        .available_bytes = 40 * GIB,
+        .fixed_bytes = 4 * GIB,
+        .dense_bytes = 24 * GIB,
+        .minimum_expert_bytes = 12 * GIB,
     };
     if (coli_v4_resident_tier_plan(
             &tiers, &target_only, error, sizeof(error)) ||
+        tiers.dense_location != COLI_V4_DENSE_RAM ||
         !tiers.dense_resident || tiers.dense_bytes != 24 * GIB)
         return 1;
     target_only.available_bytes = 39 * GIB;
     if (coli_v4_resident_tier_plan(
             &tiers, &target_only, error, sizeof(error)) ||
+        tiers.dense_location != COLI_V4_DENSE_STREAMED ||
         tiers.dense_resident || tiers.dense_bytes)
         return 1;
     puts("DeepSeek V4 resource plan tests: ok");

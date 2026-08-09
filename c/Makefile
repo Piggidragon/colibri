@@ -966,6 +966,47 @@ $(V4_OWN_DIR)/COLI_V4_UNIT_KV_CODEC.o: deepseek_v4.c deepseek_v4.h deepseek_v4_i
 tests/test_v4_ownership$(EXE): tests/test_v4_ownership.c $(V4_OWNERSHIP_OBJS)
 	$(CC) $(V4_OWN_CFLAGS) $< $(V4_OWNERSHIP_OBJS) -o $@ -pthread $(LDFLAGS)
 
+V4_ROWS8_DIR = build/v4-rows8
+V4_ROWS8_CFLAGS = $(CFLAGS) -DCOLI_V4_TEST_HOOKS
+
+$(V4_ROWS8_DIR):
+	mkdir -p $(V4_ROWS8_DIR)
+
+$(V4_ROWS8_DIR)/layer_resident.o: deepseek_v4.c deepseek_v4.h \
+		deepseek_v4_internal.h st.h | $(V4_ROWS8_DIR)
+	$(CC) $(V4_ROWS8_CFLAGS) -DCOLI_V4_UNIT_LAYER_RESIDENT \
+		-c deepseek_v4.c -o $@
+
+$(V4_ROWS8_DIR)/st.o: deepseek_v4.c deepseek_v4.h \
+		deepseek_v4_internal.h st.h | $(V4_ROWS8_DIR)
+	$(CC) $(V4_ROWS8_CFLAGS) -DCOLI_V4_UNIT_ST -c deepseek_v4.c -o $@
+
+$(V4_ROWS8_DIR)/native_quant.o: deepseek_v4.c deepseek_v4.h \
+		deepseek_v4_internal.h native_quant.h quant.h | $(V4_ROWS8_DIR)
+	$(CC) $(V4_ROWS8_CFLAGS) -DCOLI_V4_UNIT_NATIVE_QUANT \
+		-c deepseek_v4.c -o $@
+
+tests/test_v4_rows8_skip$(EXE): tests/test_v4_rows8_skip.c \
+		$(V4_ROWS8_DIR)/layer_resident.o $(V4_ROWS8_DIR)/st.o \
+		$(V4_ROWS8_DIR)/native_quant.o
+	$(CC) $(V4_ROWS8_CFLAGS) $^ -o $@ -pthread $(LDFLAGS)
+
+# A private object dir, like V4_ROWS8_DIR: sub-making COLI_V4_UNIT_RESOURCE_PLAN.o
+# in the shared directory races tests/test_deepseek_v4's sub-make under make -j,
+# and both would rewrite .deepseek-v4-build-config underneath each other.
+V4_DENSE_TIER_DIR = build/v4-dense-tier
+
+$(V4_DENSE_TIER_DIR):
+	mkdir -p $(V4_DENSE_TIER_DIR)
+
+$(V4_DENSE_TIER_DIR)/resource_plan.o: deepseek_v4.c deepseek_v4.h \
+		deepseek_v4_internal.h | $(V4_DENSE_TIER_DIR)
+	$(CC) $(CFLAGS) -DCOLI_V4_UNIT_RESOURCE_PLAN -c deepseek_v4.c -o $@
+
+tests/test_v4_dense_tier$(EXE): tests/test_v4_dense_tier.c \
+		$(V4_DENSE_TIER_DIR)/resource_plan.o
+	$(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS)
+
 endif
 
 tests/test_route_trace$(EXE): tests/test_route_trace.c route_trace.h
