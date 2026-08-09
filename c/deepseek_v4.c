@@ -14,6 +14,10 @@
 #include <stdlib.h>
 #include <string.h>
 
+#ifdef COLI_V4_CUDA
+#include "backend_cuda_v4.h"
+#endif
+
 static int set_error(char *error, size_t size, const char *format, ...) {
     if (error && size) {
         va_list arguments;
@@ -986,6 +990,10 @@ int coli_v4_resident_tier_plan(
 /* ######## deepseek_v4_head_cache.c ######## */
 #include "deepseek_v4_internal.h"
 
+#ifdef COLI_V4_CUDA
+#include "backend_cuda_v4.h"
+#endif
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -1014,7 +1022,7 @@ int coli_v4_head_cache_probe(const char *model_dir, uint64_t *bytes,
 }
 
 int coli_v4_head_cache_load(ColiV4Engine *engine, const char *model_dir,
-                            char *error, size_t error_size) {
+                            int device, char *error, size_t error_size) {
     if (!engine) {
         snprintf(error, error_size, "head cache requires a V4 engine");
         return -1;
@@ -1022,8 +1030,48 @@ int coli_v4_head_cache_load(ColiV4Engine *engine, const char *model_dir,
     ColiSafetensorsIndex *index;
     const ColiSafetensorsTensor *head;
     if (find_head(model_dir, &index, &head, error, error_size)) return -1;
-    unsigned char *data = malloc((size_t)head->nbytes);
     int shard = coli_st_tensor_shard(index, head);
+    if (shard < 0) {
+        coli_st_index_close(index);
+        snprintf(error, error_size, "cannot locate resident BF16 head.weight");
+        return -1;
+    }
+#ifdef COLI_V4_CUDA
+    if (device) {
+        enum { CHUNK = 32 * 1024 * 1024 };
+        size_t chunk = head->nbytes < CHUNK ? (size_t)head->nbytes : CHUNK;
+        unsigned char *buffer = malloc(chunk);
+        void *resident = buffer ? v4_cuda_kv_alloc((size_t)head->nbytes) : NULL;
+        int failed = !resident;
+        for (uint64_t offset = 0; !failed && offset < (uint64_t)head->nbytes;) {
+            size_t bytes = (uint64_t)head->nbytes - offset < chunk
+                ? (size_t)((uint64_t)head->nbytes - offset) : chunk;
+            if (coli_st_read_at(index, shard, (uint64_t)head->off + offset,
+                                bytes, buffer) ||
+                v4_cuda_copy_to_device(resident, (size_t)offset, buffer, bytes))
+                failed = 1;
+            offset += bytes;
+        }
+        free(buffer);
+        if (failed) {
+            v4_cuda_kv_free(resident);
+            coli_st_index_close(index);
+            return 1;
+        }
+        free(engine->head_cache.data);
+        v4_cuda_kv_free(engine->head_cache.device);
+        engine->head_cache.data = NULL;
+        engine->head_cache.device = resident;
+        engine->head_cache.bytes = head->nbytes;
+        engine->head_cache.offset = (uint64_t)head->off;
+        engine->head_cache.shard = shard;
+        coli_st_index_close(index);
+        return 0;
+    }
+#else
+    (void)device;
+#endif
+    unsigned char *data = malloc((size_t)head->nbytes);
     if (!data || coli_st_read_at(index, shard, (uint64_t)head->off,
                                  (size_t)head->nbytes, data)) {
         free(data); coli_st_index_close(index);
@@ -1031,11 +1079,26 @@ int coli_v4_head_cache_load(ColiV4Engine *engine, const char *model_dir,
         return -1;
     }
     free(engine->head_cache.data);
+    #ifdef COLI_V4_CUDA
+    v4_cuda_kv_free(engine->head_cache.device);
+    #endif
     engine->head_cache.data = data;
+    engine->head_cache.device = NULL;
     engine->head_cache.bytes = head->nbytes;
     engine->head_cache.offset = (uint64_t)head->off;
     engine->head_cache.shard = shard;
     coli_st_index_close(index); return 0;
+}
+
+const void *coli_v4_head_cache_device(const ColiV4Engine *engine,
+                                      int shard, uint64_t offset, size_t length) {
+    if (!engine || !engine->head_cache.device || shard != engine->head_cache.shard ||
+        offset < engine->head_cache.offset ||
+        offset - engine->head_cache.offset > engine->head_cache.bytes ||
+        length > engine->head_cache.bytes - (offset - engine->head_cache.offset))
+        return NULL;
+    return (const unsigned char *)engine->head_cache.device +
+           (size_t)(offset - engine->head_cache.offset);
 }
 
 uint64_t coli_v4_head_cache_bytes(const ColiV4Engine *engine) {
@@ -1088,6 +1151,8 @@ int coli_st_read_at_engine(ColiV4Engine *engine,
 
 #define MIB UINT64_C(1048576)
 #define GIB UINT64_C(1073741824)
+
+extern int coli_v4_full_dspark_wanted;
 
 static uint64_t expert_record_bytes(const ColiSafetensorsIndex *index) {
     static const char *parts[] = {
@@ -1279,14 +1344,27 @@ int coli_v4_expert_store_open_planned(
     uint64_t safe_payload = plan.planner_available_bytes - fixed -
                             dense_bytes;
     int requested_head = -1;
-    int resident_head = safe_payload >= plan.minimum_expert_bytes +
-                                      head_bytes + 256 * MIB;
+    int head_device = 0;
+#ifdef COLI_V4_CUDA
+    /* Dense has not been uploaded yet.  Admit the head only if its allocation
+     * leaves the already-approved dense tier and the Phase-06 reserve intact. */
+    uint64_t device_claim = tiers.dense_device_bytes;
+    if (runtime->vram_enabled && device_claim <= tier_inputs.vram_available_bytes &&
+        tier_inputs.vram_reserve_bytes <=
+            tier_inputs.vram_available_bytes - device_claim &&
+        head_bytes <= tier_inputs.vram_available_bytes - device_claim -
+                      tier_inputs.vram_reserve_bytes)
+        head_device = 1;
+#endif
+    int resident_head = head_device ||
+        safe_payload >= plan.minimum_expert_bytes + head_bytes + 256 * MIB;
     if (requested_head == 0) resident_head = 0;
     if (requested_head == 1 && !resident_head) {
         snprintf(error, error_size, "resident BF16 head does not fit RAM plan");
         return -1;
     }
-    uint64_t cache_limit = safe_payload - (resident_head ? head_bytes : 0);
+    uint64_t cache_limit = safe_payload -
+        (resident_head && !head_device ? head_bytes : 0);
 
     if (cache_limit < plan.minimum_expert_bytes) {
         snprintf(error, error_size, "resident tiers leave too little target cache");
@@ -1297,14 +1375,39 @@ int coli_v4_expert_store_open_planned(
     if (slots < options->experts_per_layer && slots < 6) slots = 6;
     plan.expert_cache_bytes = (uint64_t)slots * per_slot;
     runtime->target_expert_cache_bytes = plan.expert_cache_bytes;
-    plan.projected_bytes = fixed + dense_bytes +
-        plan.expert_cache_bytes + (resident_head ? head_bytes : 0);
-    if (resident_head && coli_v4_head_cache_load(
-            engine, options->model_dir, error, error_size)) return -1;
+    plan.projected_bytes = fixed + dense_bytes + plan.expert_cache_bytes +
+        (resident_head && !head_device ? head_bytes : 0);
+    if (resident_head) {
+        int load = coli_v4_head_cache_load(
+            engine, options->model_dir, head_device, error, error_size);
+        if (load > 0 && head_device) {
+            /* The RAM plan remains valid; recalculate it with the host head
+             * rather than leaving an oversized expert cache after a device OOM. */
+            head_device = 0;
+            resident_head = safe_payload >= plan.minimum_expert_bytes +
+                                          head_bytes + 256 * MIB;
+            if (!resident_head) {
+                snprintf(error, error_size,
+                         "resident BF16 head device upload failed and RAM fallback does not fit");
+                return -1;
+            }
+            cache_limit = safe_payload - head_bytes;
+            slots = (int)(cache_limit / per_slot);
+            if (slots > plan.slots_per_layer) slots = plan.slots_per_layer;
+            if (slots < options->experts_per_layer && slots < 6) slots = 6;
+            plan.expert_cache_bytes = (uint64_t)slots * per_slot;
+            runtime->target_expert_cache_bytes = plan.expert_cache_bytes;
+            plan.projected_bytes = fixed + dense_bytes +
+                plan.expert_cache_bytes + head_bytes;
+            load = coli_v4_head_cache_load(engine, options->model_dir, 0,
+                                           error, error_size);
+        }
+        if (load) return -1;
+    }
     fprintf(stderr,
         "ram_tiers available=%.2fGiB vram=%.2fGiB(reserve=%.2fGiB) "
         "dense=%s(host=%.2fGiB device=%.2fGiB) "
-        "target_slots=%d target_cache=%.2fGiB head=%s projected=%.2fGiB\n",
+        "target_slots=%d target_cache=%.2fGiB head=%s dspark=%s projected=%.2fGiB\n",
         plan.planner_available_bytes / (double)GIB,
         tier_inputs.vram_available_bytes / (double)GIB,
         tier_inputs.vram_reserve_bytes / (double)GIB,
@@ -1314,7 +1417,10 @@ int coli_v4_expert_store_open_planned(
         tiers.dense_device_bytes / (double)GIB,
         slots,
         plan.expert_cache_bytes / (double)GIB,
-        resident_head ? "resident-bf16" : "streamed-bf16",
+        head_device ? "vram-bf16" :
+        (resident_head ? "resident-bf16" : "streamed-bf16"),
+        coli_v4_full_dspark_wanted && runtime->vram_enabled ? "vram-lazy" :
+        (coli_v4_full_dspark_wanted ? "ram-lazy" : "off"),
         plan.projected_bytes / (double)GIB);
     ColiDeepSeekV4ExpertStoreOptions automatic = *options;
     automatic.cache_bytes = plan.expert_cache_bytes;
@@ -7385,11 +7491,12 @@ static int v4_dspark_full_wanted(
     return mtp && atoi(mtp) != 0 && draft && atoi(draft) > 0;
 }
 
-static uint64_t v4_dspark_full_reserve_bytes(void) {
+static uint64_t v4_dspark_full_reserve_bytes(int gpu_resident) {
     double cache = coli_v4_dspark_cache_gb() * 1e9;
-    /* The released Flash checkpoint has ~0.56 GiB of resident MTP dense,
-     * projection, Markov and norm tensors.  Add head/scratch/tap margin. */
-    double total = cache + 768.0 * 1024.0 * 1024.0;
+    /* CUDA keeps the ~0.56 GiB FP8 MTP backbone with the head.  The host still
+     * needs the bounded expert slabs plus a small tap/Markov margin; without
+     * CUDA retain the historical, conservative full-core reservation. */
+    double total = cache + (gpu_resident ? 256.0 : 768.0) * 1024.0 * 1024.0;
     return total >= (double)UINT64_MAX ? UINT64_MAX : (uint64_t)total;
 }
 
@@ -7544,6 +7651,11 @@ void coli_v4_engine_destroy(ColiV4Engine *engine) {
     engine->dspark.enabled = 0;
     free(engine->head_cache.data);
     engine->head_cache.data = NULL;
+#ifdef COLI_V4_CUDA
+    v4_cuda_kv_free(engine->head_cache.device);
+    coli_v4_dspark_gpu_release();
+#endif
+    engine->head_cache.device = NULL;
     if (engine->owns_experts && engine->experts && engine->experts->ops &&
         engine->experts->ops->destroy)
         engine->experts->ops->destroy(engine->experts);
@@ -7654,7 +7766,7 @@ int coli_v4_engine_open(ColiV4Engine **output,
         want_dspark = 0;
     }
     engine->runtime.dspark_reserve_bytes = want_full_dspark
-        ? v4_dspark_full_reserve_bytes()
+        ? v4_dspark_full_reserve_bytes(engine->runtime.vram_enabled)
         : (want_dspark ? engine->dspark.bytes : 0);
     coli_v4_full_dspark_wanted = want_full_dspark;
     if (want_full_dspark)
@@ -7671,7 +7783,8 @@ int coli_v4_engine_open(ColiV4Engine **output,
     }
     if (coli_v4_test_skip_expert_store_open) {
         engine->summary.dense_resident = engine->runtime.dense_resident;
-        engine->summary.head_resident = engine->head_cache.data != NULL;
+        engine->summary.head_resident = engine->head_cache.data != NULL ||
+                                        engine->head_cache.device != NULL;
         engine->summary.expert_cache_bytes =
             engine->runtime.target_expert_cache_bytes;
         *output = engine;
@@ -7695,7 +7808,8 @@ int coli_v4_engine_open(ColiV4Engine **output,
                 "v4_dspark warning=cannot-load-markov-head; "
                 "continuing-target-only\n");
     engine->summary.dense_resident = engine->runtime.dense_resident;
-    engine->summary.head_resident = engine->head_cache.data != NULL;
+    engine->summary.head_resident = engine->head_cache.data != NULL ||
+                                    engine->head_cache.device != NULL;
     engine->summary.expert_cache_bytes =
         engine->runtime.target_expert_cache_bytes;
     *output = engine;
@@ -7777,6 +7891,9 @@ int coli_v4_prompt_build(char **output, size_t *output_length,
 #define COLI_V4_GENERATE_MAIN coli_v4_generate_stats_legacy_main
 #define COLI_V4_GENERATE_HELPERS_ONLY
 #define spec_print spec_print_diagnostic_legacy
+#ifdef COLI_V4_CUDA
+#include "backend_cuda_v4.h"
+#endif
 /* Target-only generation helpers. */
 #include <time.h>
 #if defined(__APPLE__) || defined(__linux__) || defined(__FreeBSD__)
@@ -7908,6 +8025,13 @@ static int head_argmax(ColiV4Engine *engine, const float *hidden,
         return -1;
     int shard = coli_st_tensor_shard(index, head);
     size_t resident_bytes = (size_t)vocab * (size_t)d * sizeof(uint16_t);
+#ifdef COLI_V4_CUDA
+    const void *device = coli_v4_head_cache_device(
+        engine, shard, (uint64_t)head->off, resident_bytes);
+    if (device && !v4_cuda_head_argmax(best_logit, best_token, device, hidden,
+                                        vocab, d))
+        return 0;
+#endif
     const uint16_t *resident = coli_v4_head_cache_data(
         engine, shard, (uint64_t)head->off, resident_bytes);
 

@@ -710,11 +710,16 @@ int coli_v4_resident_tier_plan(
 
 int coli_v4_head_cache_probe(const char *model_dir, uint64_t *bytes,
                              char *error, size_t error_size);
+/* device=1 keeps the BF16 payload exclusively on CUDA.  A device allocation
+ * failure returns 1 so the RAM tier planner can retry with a host head. */
 int coli_v4_head_cache_load(ColiV4Engine *engine, const char *model_dir,
-                            char *error, size_t error_size);
+                            int device, char *error, size_t error_size);
 uint64_t coli_v4_head_cache_bytes(const ColiV4Engine *engine);
 const void *coli_v4_head_cache_data(const ColiV4Engine *engine,
                                     int shard, uint64_t offset, size_t length);
+const void *coli_v4_head_cache_device(const ColiV4Engine *engine,
+                                      int shard, uint64_t offset, size_t length);
+void coli_v4_dspark_gpu_release(void);
 /* ==== end deepseek_v4_head_cache.h ==== */
 
 
@@ -744,6 +749,7 @@ struct ColiV4Engine {
     ColiV4EngineMemorySummary summary;
     struct {
         unsigned char *data;
+        void *device;
         uint64_t bytes;
         uint64_t offset;
         int shard;

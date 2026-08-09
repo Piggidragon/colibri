@@ -23,6 +23,10 @@
 #define V4_DSPARK_WIN    128
 #define V4_DSPARK_RANK   256
 
+#ifdef COLI_V4_CUDA
+#include "backend_cuda.h"
+#endif
+
 typedef struct {
     int id;
     uint8_t *slab;
@@ -39,6 +43,10 @@ typedef struct {
     uint8_t *wq_a_w, *wq_b_w, *wkv_w, *wo_a_w, *wo_b_w;
     uint8_t *sh1_w, *sh2_w, *sh3_w;
     float *wq_a_s, *wq_b_s, *wkv_s, *wo_a_s, *wo_b_s;
+#ifdef COLI_V4_CUDA
+    ColiCudaTensor *wq_a_dev, *wq_b_dev, *wkv_dev, *wo_b_dev;
+    ColiCudaTensor *sh1_dev, *sh2_dev, *sh3_dev;
+#endif
     float *sh1_s, *sh2_s, *sh3_s;
 
     ColiFloatTensor q_norm, kv_norm, attn_norm, ffn_norm, attn_sink;
@@ -60,11 +68,20 @@ typedef struct {
 } V4DSparkStage;
 
 static V4DSparkStage g_v4ds[V4_DSPARK_STAGES];
+/* The CPU AVX2 path expects rows8 tiles, while CUDA consumes checkpoint-order
+ * rows.  Decide before the lazy load; a failed GPU admission repacks in place
+ * before the CPU fallback is ever allowed to run. */
+static int g_v4ds_gpu_prepare;
+static int g_v4ds_gpu_active;
+static int g_v4ds_gpu_failed;
 
 static struct {
     int ready;
     uint8_t *main_proj_w;
     float *main_proj_s;
+#ifdef COLI_V4_CUDA
+    ColiCudaTensor *main_proj_dev;
+#endif
     int64_t main_proj_rows, main_proj_cols;
     ColiFloatTensor main_norm;
 
@@ -162,8 +179,8 @@ static int v4_ds_load_fp8(const ColiSafetensorsIndex *index,
         *scale = NULL;
         return -1;
     }
-    if (v4_ds_pack_rows8(*weight, weight_tensor->shape[0],
-                         weight_tensor->shape[1]) < 0) {
+    if (!g_v4ds_gpu_prepare && v4_ds_pack_rows8(
+            *weight, weight_tensor->shape[0], weight_tensor->shape[1]) < 0) {
         free(*weight);
         free(*scale);
         *weight = NULL;
@@ -221,7 +238,21 @@ static void v4_ds_fp8_view(ColiTensorView *view,
  * engine's native reference kernel is both more faithful and considerably
  * faster than the scalar, unquantized prototype. */
 static int v4_ds_mm(float *out, const uint8_t *weight, const float *scale,
+#ifdef COLI_V4_CUDA
+                    ColiCudaTensor *device,
+#endif
                     int64_t rows, int64_t columns, const float *input) {
+#ifdef COLI_V4_CUDA
+    if (device) {
+        ColiCudaTensor *cached = device;
+        if (!coli_cuda_matmul(&cached, out, input, NULL, NULL, 8, 1,
+                               (int)columns, (int)rows, 0, 0))
+            return -1;
+        v4_ds_bf16(out, (size_t)rows);
+        return 0;
+    }
+#endif
+    if (!weight || !scale) return -1;
     ColiTensorView view;
     v4_ds_fp8_view(&view, weight, scale, rows, columns);
     if (coli_fp8_matvec_ref(out, &view, input)) return -1;
@@ -319,6 +350,13 @@ static int v4_ds_stage_load(const ColiSafetensorsIndex *index,
     V4_DS_LOAD_FP8(sh2,  "ffn.shared_experts.w2");
     V4_DS_LOAD_FP8(sh3,  "ffn.shared_experts.w3");
 #undef V4_DS_LOAD_FP8
+    /* wo_a stays on the CPU: each output group has a different input row, so
+     * the generic CUDA matmul cannot express it without redundant work. */
+    if (g_v4ds_gpu_prepare && v4_ds_pack_rows8(
+            stage->wo_a_w, config->o_groups * config->o_lora_rank,
+            (config->num_attention_heads / config->o_groups) *
+                config->head_dim) < 0)
+        return 0;
 
 #define V4_DS_LOAD_F32(field, suffix) \
     do { if (v4_ds_load_f32_suffix(&stage->field, index, stage_id, suffix)) \
@@ -378,11 +416,119 @@ static int v4_ds_stage_load(const ColiSafetensorsIndex *index,
     return 1;
 }
 
-static int v4_ds_load_all(const ColiSafetensorsIndex *index,
+/* Turn the row-major checkpoint buffers into persistent CUDA tensors as one
+ * transaction.  If any allocation fails, discard every partial tensor and
+ * restore the CPU rows8 layout; drafting then remains correct on the CPU. */
+#ifdef COLI_V4_CUDA
+#define V4_DS_UPLOAD(owner, field, rows, columns) \
+    do { if (!coli_cuda_tensor_upload_g(&(owner)->field##_dev, \
+            (owner)->field##_w, (owner)->field##_s, 8, (int)(columns), \
+            (int)(rows), 0, 0)) goto gpu_fail; } while (0)
+#define V4_DS_RELEASE(owner, field) \
+    do { free((owner)->field##_w); free((owner)->field##_s); \
+         (owner)->field##_w = NULL; (owner)->field##_s = NULL; } while (0)
+#define V4_DS_DROP(owner, field) \
+    do { coli_cuda_tensor_free((owner)->field##_dev); \
+         (owner)->field##_dev = NULL; } while (0)
+
+/* Dimensions vary by stage but are identical across its eight matrices. */
+static int v4_ds_gpu_upload(const ColiDeepSeekV4Config *config) {
+    if (!g_v4ds_gpu_prepare) return 0;
+    V4_DS_UPLOAD(&g_v4ds_core, main_proj, g_v4ds_core.main_proj_rows,
+                 g_v4ds_core.main_proj_cols);
+    for (int i = 0; i < V4_DSPARK_STAGES; i++) {
+        V4DSparkStage *s = &g_v4ds[i];
+        int hidden = config->hidden_size;
+        int heads = config->num_attention_heads;
+        int group_width = (heads / config->o_groups) * config->head_dim;
+        int o_width = config->o_groups * config->o_lora_rank;
+        V4_DS_UPLOAD(s, wq_a, config->q_lora_rank, hidden);
+        V4_DS_UPLOAD(s, wq_b, heads * config->head_dim, config->q_lora_rank);
+        V4_DS_UPLOAD(s, wkv, config->head_dim, hidden);
+        V4_DS_UPLOAD(s, wo_b, hidden, o_width);
+        V4_DS_UPLOAD(s, sh1, config->moe_intermediate_size, hidden);
+        V4_DS_UPLOAD(s, sh2, hidden, config->moe_intermediate_size);
+        V4_DS_UPLOAD(s, sh3, config->moe_intermediate_size, hidden);
+        (void)group_width;
+    }
+    V4_DS_RELEASE(&g_v4ds_core, main_proj);
+    for (int i = 0; i < V4_DSPARK_STAGES; i++) {
+        V4DSparkStage *s = &g_v4ds[i];
+        V4_DS_RELEASE(s, wq_a); V4_DS_RELEASE(s, wq_b);
+        V4_DS_RELEASE(s, wkv);  V4_DS_RELEASE(s, wo_b);
+        V4_DS_RELEASE(s, sh1);  V4_DS_RELEASE(s, sh2); V4_DS_RELEASE(s, sh3);
+    }
+    g_v4ds_gpu_active = 1;
+    return 1;
+gpu_fail:
+    V4_DS_DROP(&g_v4ds_core, main_proj);
+    for (int i = 0; i < V4_DSPARK_STAGES; i++) {
+        V4DSparkStage *s = &g_v4ds[i];
+        V4_DS_DROP(s, wq_a); V4_DS_DROP(s, wq_b); V4_DS_DROP(s, wkv);
+        V4_DS_DROP(s, wo_b); V4_DS_DROP(s, sh1); V4_DS_DROP(s, sh2);
+        V4_DS_DROP(s, sh3);
+        v4_ds_pack_rows8(s->wq_a_w, config->q_lora_rank, config->hidden_size);
+        v4_ds_pack_rows8(s->wq_b_w, (int64_t)config->num_attention_heads *
+                          config->head_dim, config->q_lora_rank);
+        v4_ds_pack_rows8(s->wkv_w, config->head_dim, config->hidden_size);
+        v4_ds_pack_rows8(s->wo_b_w, config->hidden_size,
+                          config->o_groups * config->o_lora_rank);
+        v4_ds_pack_rows8(s->sh1_w, config->moe_intermediate_size, config->hidden_size);
+        v4_ds_pack_rows8(s->sh2_w, config->hidden_size, config->moe_intermediate_size);
+        v4_ds_pack_rows8(s->sh3_w, config->moe_intermediate_size, config->hidden_size);
+    }
+    v4_ds_pack_rows8(g_v4ds_core.main_proj_w, g_v4ds_core.main_proj_rows,
+                     g_v4ds_core.main_proj_cols);
+    g_v4ds_gpu_prepare = 0;
+    return 0;
+}
+#undef V4_DS_UPLOAD
+#undef V4_DS_RELEASE
+#undef V4_DS_DROP
+#endif
+
+void coli_v4_dspark_gpu_release(void) {
+#ifdef COLI_V4_CUDA
+    coli_cuda_tensor_free(g_v4ds_core.main_proj_dev);
+    g_v4ds_core.main_proj_dev = NULL;
+    for (int i = 0; i < V4_DSPARK_STAGES; i++) {
+        V4DSparkStage *s = &g_v4ds[i];
+        coli_cuda_tensor_free(s->wq_a_dev); coli_cuda_tensor_free(s->wq_b_dev);
+        coli_cuda_tensor_free(s->wkv_dev);  coli_cuda_tensor_free(s->wo_b_dev);
+        coli_cuda_tensor_free(s->sh1_dev);  coli_cuda_tensor_free(s->sh2_dev);
+        coli_cuda_tensor_free(s->sh3_dev);
+        s->wq_a_dev = s->wq_b_dev = s->wkv_dev = s->wo_b_dev = NULL;
+        s->sh1_dev = s->sh2_dev = s->sh3_dev = NULL;
+    }
+#endif
+    g_v4ds_gpu_active = 0;
+    g_v4ds_gpu_prepare = 0;
+    g_v4ds_gpu_failed = 0;
+}
+
+static int v4_ds_load_all(ColiV4Engine *engine,
+                          const ColiSafetensorsIndex *index,
                           const ColiDeepSeekV4Config *config) {
+    if (!g_v4ds_core.ready) {
+#ifdef COLI_V4_CUDA
+        g_v4ds_gpu_prepare = engine && engine->runtime.vram_enabled;
+#else
+        (void)engine;
+#endif
+    }
+    if (g_v4ds_gpu_failed) return 0;
     if (!v4_ds_core_load(index, config)) return 0;
     for (int stage = 0; stage < V4_DSPARK_STAGES; stage++)
         if (!v4_ds_stage_load(index, config, stage)) return 0;
+#ifdef COLI_V4_CUDA
+    if (g_v4ds_gpu_prepare && !g_v4ds_gpu_active &&
+        !v4_ds_gpu_upload(config)) {
+        /* The RAM plan has already released the CUDA-resident backbone.  Do
+         * not revive its host fallback and overcommit the target cache. */
+        g_v4ds_gpu_failed = 1;
+        return 0;
+    }
+#endif
     return 1;
 }
 
@@ -565,6 +711,9 @@ static int v4_ds_main_x(float *out, int64_t position,
     if (!main_hidden) return 0;
     if (v4_ds_mm(cached, g_v4ds_core.main_proj_w,
                  g_v4ds_core.main_proj_s,
+#ifdef COLI_V4_CUDA
+                 g_v4ds_core.main_proj_dev,
+#endif
                  g_v4ds_core.main_proj_rows,
                  g_v4ds_core.main_proj_cols, main_hidden))
         return 0;
@@ -631,6 +780,9 @@ static int v4_ds_backfill_context(const ColiDeepSeekV4Config *config,
             V4DSparkStage *stage = &g_v4ds[stage_id];
             if (stage->kv_abs[slot] == absolute) continue;
             if (v4_ds_mm(kv, stage->wkv_w, stage->wkv_s,
+#ifdef COLI_V4_CUDA
+                         stage->wkv_dev,
+#endif
                          head_dim, hidden, main_x)) {
                 free(kv); free(main_x); return -1;
             }
@@ -675,11 +827,17 @@ static int v4_ds_attention(float *out, V4DSparkStage *stage,
         free(oa); free(attended); free(query); free(qa); return -1;
     }
     if (v4_ds_mm(qa, stage->wq_a_w, stage->wq_a_s,
+#ifdef COLI_V4_CUDA
+                 stage->wq_a_dev,
+#endif
                  q_rank, hidden, input))
         goto fail;
     v4_ds_rmsnorm(qa, qa, stage->q_norm.data, q_rank,
                   config->rms_norm_eps);
     if (v4_ds_mm(query, stage->wq_b_w, stage->wq_b_s,
+#ifdef COLI_V4_CUDA
+                 stage->wq_b_dev,
+#endif
                  (int64_t)heads * head_dim, q_rank, qa))
         goto fail;
     for (int head = 0; head < heads; head++) {
@@ -757,6 +915,9 @@ static int v4_ds_attention(float *out, V4DSparkStage *stage,
         v4_ds_bf16(oa + (size_t)group * o_rank, (size_t)o_rank);
     }
     if (v4_ds_mm(out, stage->wo_b_w, stage->wo_b_s,
+#ifdef COLI_V4_CUDA
+                 stage->wo_b_dev,
+#endif
                  hidden, (int64_t)groups * o_rank, oa))
         goto fail;
     free(oa); free(attended); free(query); free(qa);
@@ -783,17 +944,40 @@ static int v4_ds_moe(float *out, V4DSparkStage *stage,
             config->routed_scaling_factor))
         return -1;
 
-    ColiTensorView shared_gate, shared_down, shared_up;
-    v4_ds_fp8_view(&shared_gate, stage->sh1_w, stage->sh1_s,
-                   intermediate, hidden);
-    v4_ds_fp8_view(&shared_down, stage->sh2_w, stage->sh2_s,
-                   hidden, intermediate);
-    v4_ds_fp8_view(&shared_up, stage->sh3_w, stage->sh3_s,
-                   intermediate, hidden);
-    if (coli_v4_shared_expert_forward_ref(out, &shared_gate, &shared_down,
-                                          &shared_up, input,
-                                          config->swiglu_limit))
-        return -1;
+#ifdef COLI_V4_CUDA
+    if (g_v4ds_gpu_active) {
+        float *gate = malloc((size_t)intermediate * sizeof(*gate));
+        float *up = malloc((size_t)intermediate * sizeof(*up));
+        if (!gate || !up ||
+            v4_ds_mm(gate, stage->sh1_w, stage->sh1_s, stage->sh1_dev,
+                     intermediate, hidden, input) ||
+            v4_ds_mm(up, stage->sh3_w, stage->sh3_s, stage->sh3_dev,
+                     intermediate, hidden, input)) {
+            free(up); free(gate); return -1;
+        }
+        for (int i = 0; i < intermediate; i++) {
+            float value = gate[i];
+            gate[i] = value / (1.0f + expf(-value)) * up[i];
+        }
+        int failed = v4_ds_mm(out, stage->sh2_w, stage->sh2_s, stage->sh2_dev,
+                               hidden, intermediate, gate);
+        free(up); free(gate);
+        if (failed) return -1;
+    } else
+#endif
+    {
+        ColiTensorView shared_gate, shared_down, shared_up;
+        v4_ds_fp8_view(&shared_gate, stage->sh1_w, stage->sh1_s,
+                       intermediate, hidden);
+        v4_ds_fp8_view(&shared_down, stage->sh2_w, stage->sh2_s,
+                       hidden, intermediate);
+        v4_ds_fp8_view(&shared_up, stage->sh3_w, stage->sh3_s,
+                       intermediate, hidden);
+        if (coli_v4_shared_expert_forward_ref(out, &shared_gate, &shared_down,
+                                              &shared_up, input,
+                                              config->swiglu_limit))
+            return -1;
+    }
 
     float *branch = malloc((size_t)hidden * sizeof(float));
     if (!branch) return -1;
@@ -858,6 +1042,9 @@ static int v4_ds_stage_forward(float *state, V4DSparkStage *stage,
                       config->rms_norm_eps);
         float *kv = block_kv + (size_t)item * head_dim;
         if (v4_ds_mm(kv, stage->wkv_w, stage->wkv_s,
+#ifdef COLI_V4_CUDA
+                     stage->wkv_dev,
+#endif
                      head_dim, hidden, xn))
             goto fail;
         v4_ds_rmsnorm(kv, kv, stage->kv_norm.data, head_dim,
@@ -979,12 +1166,28 @@ static int v4_ds_heads(ColiV4Engine *engine,
 
     const uint16_t *resident = coli_v4_head_cache_data(
         engine, head_shard, head_offset, (size_t)head->nbytes);
+#ifdef COLI_V4_CUDA
+    const void *device = coli_v4_head_cache_device(
+        engine, head_shard, head_offset, (size_t)head->nbytes);
+#endif
     enum { ROWS = 64 };
     uint16_t *raw = resident ? NULL :
         malloc((size_t)ROWS * hidden * sizeof(uint16_t));
-    if (!resident && !raw) {
+    if (!resident
+#ifdef COLI_V4_CUDA
+        && !device
+#endif
+        && !raw) {
         free(logits); free(hiddens); return -1;
     }
+#ifdef COLI_V4_CUDA
+    if (device) {
+        if (v4_cuda_head_logits(logits, device, hiddens, V4_DSPARK_BLOCK,
+                                vocab, hidden)) {
+            free(raw); free(logits); free(hiddens); return -1;
+        }
+    } else
+#endif
     for (int start = 0; start < vocab; start += ROWS) {
         int rows = vocab - start < ROWS ? vocab - start : ROWS;
         const uint16_t *weights = resident
@@ -1069,7 +1272,7 @@ static int v4_dspark_draft(ColiV4Engine *engine,
                            int *draft, int max_out) {
     if (!engine || !index || !config || !draft || max_out < 1) return 0;
     double began = spec_now();
-    if (!v4_ds_load_all(index, config)) return 0;
+    if (!v4_ds_load_all(engine, index, config)) return 0;
     double loaded = spec_now();
 
     int hidden = config->hidden_size;
