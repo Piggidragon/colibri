@@ -11,6 +11,7 @@ extern "C" {
 
 int v4_cuda_init(int device);
 void v4_cuda_shutdown(void);
+int v4_cuda_ready(void);
 size_t v4_cuda_free_bytes(void);
 
 void *v4_cuda_kv_alloc(size_t bytes);
@@ -27,7 +28,7 @@ int v4_cuda_flash_attention(
     const void *window_kv, int window_size, const int *window_indices,
     const void *compressed_kv, int compressed_count,
     const int *compressed_indices, int compressed_selected,
-    const float *sinks, int codec, int heads, int head_dim,
+    const float *sinks, int codec, int heads, int head_dim, int rope_dim,
     size_t row_bytes, float scale);
 
 #ifdef __cplusplus

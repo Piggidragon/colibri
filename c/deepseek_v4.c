@@ -1449,6 +1449,7 @@ int coli_v4_swiglu(float *output, const float *gate, const float *up,
 #endif
 
 static int set_error(char *error, size_t size, const char *format, ...);
+static int v4_flash_enabled(void);
 
 struct ColiDeepSeekV4WindowAttentionState {
     int window_size;
@@ -1466,7 +1467,6 @@ struct ColiDeepSeekV4WindowAttentionState {
 #ifdef COLI_V4_CUDA
     void *kv_device;
     void *compressed_device;
-    int cuda_failed;
 #endif
     float *compressor_scratch;
     int compressed_count;
@@ -1482,7 +1482,6 @@ static void v4_attention_cuda_disable(
     v4_cuda_kv_free(state->kv_device);
     state->compressed_device = NULL;
     state->kv_device = NULL;
-    state->cuda_failed = 1;
     if (!v4_attention_cuda_warning_emitted) {
         fprintf(stderr, "v4_cuda warning=%s; continuing-on-cpu\n", reason);
         v4_attention_cuda_warning_emitted = 1;
@@ -1543,7 +1542,7 @@ int coli_v4_window_attention_create(ColiDeepSeekV4WindowAttentionState **output,
         return -1;
     }
 #ifdef COLI_V4_CUDA
-    if (v4_cuda_free_bytes()) {
+    if (v4_cuda_ready()) {
         (*output)->kv_device = v4_cuda_kv_alloc(
             (size_t)config->sliding_window * row_bytes);
         if (!(*output)->kv_device)
@@ -1852,7 +1851,7 @@ static int attention_token_impl(float *output,
             }
             int cuda_attention = 0;
 #ifdef COLI_V4_CUDA
-            if (state->kv_device &&
+            if (v4_flash_enabled() && state->kv_device &&
                 (!compressed_selected || state->compressed_device)) {
                 if (!v4_cuda_flash_attention(
                         attended, q, state->kv_device, state->window_size,
@@ -1860,7 +1859,7 @@ static int attention_token_impl(float *output,
                         state->compressed_count,
                         state->indexer ? compressed_indices : NULL,
                         compressed_selected, sinks, state->codec,
-                        heads, head_dim, state->row_bytes,
+                        heads, head_dim, state->rope_dim, state->row_bytes,
                         1.0f / sqrtf((float)head_dim)))
                     cuda_attention = 1;
                 else
@@ -1985,7 +1984,6 @@ struct ColiDeepSeekV4WindowAttentionState {
 #ifdef COLI_V4_CUDA
     void *kv_device;
     void *compressed_device;
-    int cuda_failed;
 #endif
     float *compressor_scratch;
     int compressed_count;
@@ -2001,7 +1999,6 @@ static void v4_attention_cuda_disable(
     v4_cuda_kv_free(state->kv_device);
     state->compressed_device = NULL;
     state->kv_device = NULL;
-    state->cuda_failed = 1;
     if (!v4_attention_cuda_warning_emitted) {
         fprintf(stderr, "v4_cuda warning=%s; continuing-on-cpu\n", reason);
         v4_attention_cuda_warning_emitted = 1;
@@ -2062,7 +2059,7 @@ int coli_v4_window_attention_create(ColiDeepSeekV4WindowAttentionState **output,
         return -1;
     }
 #ifdef COLI_V4_CUDA
-    if (v4_cuda_free_bytes()) {
+    if (v4_cuda_ready()) {
         (*output)->kv_device = v4_cuda_kv_alloc(
             (size_t)config->sliding_window * row_bytes);
         if (!(*output)->kv_device)
@@ -2371,7 +2368,7 @@ static int attention_token_impl(float *output,
             }
             int cuda_attention = 0;
 #ifdef COLI_V4_CUDA
-            if (state->kv_device &&
+            if (v4_flash_enabled() && state->kv_device &&
                 (!compressed_selected || state->compressed_device)) {
                 if (!v4_cuda_flash_attention(
                         attended, q, state->kv_device, state->window_size,
@@ -2379,7 +2376,7 @@ static int attention_token_impl(float *output,
                         state->compressed_count,
                         state->indexer ? compressed_indices : NULL,
                         compressed_selected, sinks, state->codec,
-                        heads, head_dim, state->row_bytes,
+                        heads, head_dim, state->rope_dim, state->row_bytes,
                         1.0f / sqrtf((float)head_dim)))
                     cuda_attention = 1;
                 else
@@ -2653,13 +2650,14 @@ int coli_v4_attention_window_batch_ref(
                 ? compressed_indices + (size_t)item * config->index_topk : NULL;
             int cuda_attention = 0;
 #ifdef COLI_V4_CUDA
-            if (state->kv_device && (!selected || state->compressed_device)) {
+            if (v4_flash_enabled() && state->kv_device &&
+                (!selected || state->compressed_device)) {
                 if (!v4_cuda_flash_attention(
                         item_attended, item_q, state->kv_device,
                         state->window_size, window_indices,
                         state->compressed_device, compressed_counts[item],
                         item_compressed_indices, selected, sinks, state->codec,
-                        heads, head_dim, state->row_bytes,
+                        heads, head_dim, state->rope_dim, state->row_bytes,
                         1.0f / sqrtf((float)head_dim)))
                     cuda_attention = 1;
                 else
@@ -5257,7 +5255,6 @@ struct ColiDeepSeekV4WindowAttentionState {
 #ifdef COLI_V4_CUDA
     void *kv_device;
     void *compressed_device;
-    int cuda_failed;
 #endif
     float *compressor_scratch;
     int compressed_count;
@@ -5273,7 +5270,6 @@ static void v4_attention_cuda_disable(
     v4_cuda_kv_free(state->kv_device);
     state->compressed_device = NULL;
     state->kv_device = NULL;
-    state->cuda_failed = 1;
     if (!v4_attention_cuda_warning_emitted) {
         fprintf(stderr, "v4_cuda warning=%s; continuing-on-cpu\n", reason);
         v4_attention_cuda_warning_emitted = 1;
@@ -5334,7 +5330,7 @@ int coli_v4_window_attention_create(ColiDeepSeekV4WindowAttentionState **output,
         return -1;
     }
 #ifdef COLI_V4_CUDA
-    if (v4_cuda_free_bytes()) {
+    if (v4_cuda_ready()) {
         (*output)->kv_device = v4_cuda_kv_alloc(
             (size_t)config->sliding_window * row_bytes);
         if (!(*output)->kv_device)
@@ -5643,7 +5639,7 @@ static int attention_token_impl(float *output,
             }
             int cuda_attention = 0;
 #ifdef COLI_V4_CUDA
-            if (state->kv_device &&
+            if (v4_flash_enabled() && state->kv_device &&
                 (!compressed_selected || state->compressed_device)) {
                 if (!v4_cuda_flash_attention(
                         attended, q, state->kv_device, state->window_size,
@@ -5651,7 +5647,7 @@ static int attention_token_impl(float *output,
                         state->compressed_count,
                         state->indexer ? compressed_indices : NULL,
                         compressed_selected, sinks, state->codec,
-                        heads, head_dim, state->row_bytes,
+                        heads, head_dim, state->rope_dim, state->row_bytes,
                         1.0f / sqrtf((float)head_dim)))
                     cuda_attention = 1;
                 else
@@ -5801,16 +5797,15 @@ int coli_v4_attention_snapshot_restore(
         memcpy(state->compressed, snapshot->compressed,
                (size_t)snapshot->compressed_count * state->row_bytes);
 #ifdef COLI_V4_CUDA
-    for (int slot = 0; state->kv_device && slot < state->window_size; slot++)
-        v4_attention_cuda_write(
-            state, state->kv_device, slot,
-            (unsigned char *)state->kv + (size_t)slot * state->row_bytes);
-    for (int slot = 0; state->compressed_device &&
-                       slot < state->compressed_count; slot++)
-        v4_attention_cuda_write(
-            state, state->compressed_device, slot,
-            (unsigned char *)state->compressed +
-                (size_t)slot * state->row_bytes);
+    if (state->kv_device && v4_cuda_kv_write_row(
+            state->kv_device, 0, state->kv,
+            (size_t)state->window_size * state->row_bytes))
+        v4_attention_cuda_disable(state, "KV-restore-failed");
+    if (state->compressed_device && state->compressed_count &&
+        v4_cuda_kv_write_row(
+            state->compressed_device, 0, state->compressed,
+            (size_t)state->compressed_count * state->row_bytes))
+        v4_attention_cuda_disable(state, "KV-restore-failed");
 #endif
     if ((state->compressor != NULL) != (snapshot->compressor != NULL) ||
         (state->indexer != NULL) != (snapshot->indexer != NULL)) return -1;
@@ -7417,8 +7412,22 @@ int coli_v4_engine_open(ColiV4Engine **output,
     engine->runtime.index_codec = coli_v4_kv_codec_from_env(
         "V4_KV_INDEX", COLI_V4_KV_INDEX, engine->config.index_head_dim,
         0, COLI_V4_KV_NATIVE);
+    if (engine->runtime.context_tokens > engine->config.max_position_embeddings)
+        engine->runtime.context_tokens = engine->config.max_position_embeddings;
+    fprintf(stderr,
+            "v4_kv main=%s row=%zuB index=%s row=%zuB context=%d\n",
+            coli_v4_kv_codec_name(engine->runtime.kv_codec),
+            coli_v4_kv_row_bytes(
+                engine->runtime.kv_codec, COLI_V4_KV_MAIN,
+                engine->config.head_dim, engine->config.qk_rope_head_dim),
+            coli_v4_kv_codec_name(engine->runtime.index_codec),
+            coli_v4_kv_row_bytes(
+                engine->runtime.index_codec, COLI_V4_KV_INDEX,
+                engine->config.index_head_dim, 0),
+            engine->runtime.context_tokens);
 #ifdef COLI_V4_CUDA
     if (v4_vram_requested()) {
+        /* TODO(plan 08): make device selection part of the VRAM planner. */
         int initialized = !v4_cuda_init(0);
         if (initialized && !v4_cuda_publish_tables()) {
             engine->runtime.vram_enabled = 1;
@@ -7434,19 +7443,6 @@ int coli_v4_engine_open(ColiV4Engine **output,
         fprintf(stderr,
                 "v4_cuda warning=CUDA-build-required; continuing-on-cpu\n");
 #endif
-    if (engine->runtime.context_tokens > engine->config.max_position_embeddings)
-        engine->runtime.context_tokens = engine->config.max_position_embeddings;
-    fprintf(stderr,
-            "v4_kv main=%s row=%zuB index=%s row=%zuB context=%d\n",
-            coli_v4_kv_codec_name(engine->runtime.kv_codec),
-            coli_v4_kv_row_bytes(
-                engine->runtime.kv_codec, COLI_V4_KV_MAIN,
-                engine->config.head_dim, engine->config.qk_rope_head_dim),
-            coli_v4_kv_codec_name(engine->runtime.index_codec),
-            coli_v4_kv_row_bytes(
-                engine->runtime.index_codec, COLI_V4_KV_INDEX,
-                engine->config.index_head_dim, 0),
-            engine->runtime.context_tokens);
     if (coli_st_index_open(&engine->target_index,
                            engine->runtime.target_model_dir, error,
                            error_size))

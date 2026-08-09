@@ -36,6 +36,10 @@ extern "C" void v4_cuda_shutdown(void) {
     g_v4_tables_ready = 0;
 }
 
+extern "C" int v4_cuda_ready(void) {
+    return g_v4_cuda_device >= 0;
+}
+
 extern "C" size_t v4_cuda_free_bytes(void) {
     size_t free_bytes = 0, total_bytes = 0;
     if (g_v4_cuda_device < 0 ||
@@ -144,7 +148,7 @@ __device__ static float v4_e4m3_decode(unsigned char value) {
 template<int Codec>
 __device__ static void v4_decode_row(
     float *values, const unsigned char *row, int head_dim, int native_nope,
-    size_t row_bytes) {
+    size_t row_bytes, int *decode_failed) {
     for (int column = threadIdx.x; column < head_dim; column += blockDim.x) {
         if constexpr (Codec == COLI_V4_KV_F32) {
             values[column] = reinterpret_cast<const float *>(row)[column];
@@ -170,6 +174,11 @@ __device__ static void v4_decode_row(
             unsigned short norm_bits = (unsigned short)block[0] |
                                        (unsigned short)block[1] << 8;
             float norm = v4_fp16_decode(norm_bits);
+            if (!isfinite(norm)) {
+                atomicExch(decode_failed, 1);
+                values[column] = 0.0f;
+                continue;
+            }
             int index;
             if constexpr (Codec == COLI_V4_KV_TURBO2) {
                 index = (block[2 + within / 4] >> ((within % 4) * 2)) & 3;
@@ -192,8 +201,9 @@ __device__ static void v4_decode_row(
         __syncthreads();
         int groups = head_dim / COLI_TQ_GROUP;
         for (int width = 1; width < COLI_TQ_GROUP; width *= 2) {
-            int pair = threadIdx.x;
-            if (pair < groups * (COLI_TQ_GROUP / 2)) {
+            for (int pair = threadIdx.x;
+                 pair < groups * (COLI_TQ_GROUP / 2);
+                 pair += blockDim.x) {
                 int group = pair / (COLI_TQ_GROUP / 2);
                 int local = pair % (COLI_TQ_GROUP / 2);
                 int base = group * COLI_TQ_GROUP +
@@ -216,10 +226,10 @@ __global__ static void v4_flash_attention_kernel(
     float *ctx, const float *queries,
     const unsigned char *window_kv, int window_size,
     const int *window_indices,
-    const unsigned char *compressed_kv, int compressed_count,
+    const unsigned char *compressed_kv,
     const int *compressed_indices, int compressed_selected,
     const float *sinks, int head_dim, int native_nope,
-    size_t row_bytes, float scale) {
+    size_t row_bytes, float scale, int *decode_failed) {
     int head = blockIdx.x;
     extern __shared__ float shared[];
     float *query = shared;
@@ -252,7 +262,9 @@ __global__ static void v4_flash_attention_kernel(
                             : compressed_kv + (size_t)index * row_bytes;
         }
         if (!row) continue;
-        v4_decode_row<Codec>(values, row, head_dim, native_nope, row_bytes);
+        v4_decode_row<Codec>(values, row, head_dim, native_nope, row_bytes,
+                             decode_failed);
+        if (*decode_failed) return;
         float partial = 0.0f;
         for (int column = threadIdx.x; column < head_dim; column += blockDim.x)
             partial += query[column] * values[column];
@@ -290,7 +302,7 @@ template<int Codec>
 static int v4_launch_flash(
     float *ctx, const float *q,
     const void *window_kv, int window_size, const int *window_indices,
-    const void *compressed_kv, int compressed_count,
+    const void *compressed_kv,
     const int *compressed_indices, int compressed_selected,
     const float *sinks, int heads, int head_dim, int native_nope,
     size_t row_bytes, float scale) {
@@ -306,13 +318,19 @@ static int v4_launch_flash(
         : nullptr;
     float *device_sinks = coli_cuda_pipe_scratch(
         g_v4_cuda_device, 4, (size_t)heads * sizeof(float));
+    int *device_failed = reinterpret_cast<int *>(coli_cuda_pipe_scratch(
+        g_v4_cuda_device, 5, sizeof(int)));
+    int decode_failed = 0;
     if (!device_q || !device_ctx || !device_window || !device_sinks ||
+        !device_failed ||
         (compressed_selected && compressed_indices && !device_compressed) ||
         !coli_cuda_pipe_upload(g_v4_cuda_device, device_q, q, vector_bytes) ||
         !coli_cuda_pipe_upload(g_v4_cuda_device, device_window, window_indices,
                                (size_t)window_size * sizeof(int)) ||
         !coli_cuda_pipe_upload(g_v4_cuda_device, device_sinks, sinks,
                                (size_t)heads * sizeof(float)) ||
+        !coli_cuda_pipe_upload(g_v4_cuda_device, device_failed,
+                               &decode_failed, sizeof(decode_failed)) ||
         (compressed_selected && compressed_indices && !coli_cuda_pipe_upload(
             g_v4_cuda_device, device_compressed, compressed_indices,
             (size_t)compressed_selected * sizeof(int))))
@@ -322,15 +340,17 @@ static int v4_launch_flash(
         device_ctx, device_q,
         static_cast<const unsigned char *>(window_kv), window_size,
         device_window,
-        static_cast<const unsigned char *>(compressed_kv), compressed_count,
+        static_cast<const unsigned char *>(compressed_kv),
         device_compressed, compressed_selected, device_sinks,
-        head_dim, native_nope, row_bytes, scale);
+        head_dim, native_nope, row_bytes, scale, device_failed);
     if (cudaGetLastError() != cudaSuccess ||
         !coli_cuda_pipe_download(
             g_v4_cuda_device, device_ctx, ctx, vector_bytes) ||
+        !coli_cuda_pipe_download(g_v4_cuda_device, device_failed,
+                                 &decode_failed, sizeof(decode_failed)) ||
         !coli_cuda_pipe_sync(g_v4_cuda_device))
         return -1;
-    return 0;
+    return decode_failed ? -1 : 0;
 }
 
 extern "C" int v4_cuda_flash_attention(
@@ -338,13 +358,14 @@ extern "C" int v4_cuda_flash_attention(
     const void *window_kv, int window_size, const int *window_indices,
     const void *compressed_kv, int compressed_count,
     const int *compressed_indices, int compressed_selected,
-    const float *sinks, int codec, int heads, int head_dim,
+    const float *sinks, int codec, int heads, int head_dim, int rope_dim,
     size_t row_bytes, float scale) {
     if (g_v4_cuda_device < 0 || !g_v4_tables_ready || !ctx || !q ||
         !window_kv || !window_indices || !sinks || window_size < 1 ||
         compressed_count < 0 || compressed_selected < 0 ||
         (compressed_selected && !compressed_kv) ||
-        heads < 1 || head_dim < 1 || head_dim > 512 || !row_bytes ||
+        heads < 1 || head_dim < 1 || head_dim > 512 || rope_dim < 0 ||
+        rope_dim > head_dim || !row_bytes ||
         !(scale > 0.0f) || codec < COLI_V4_KV_F32 ||
         codec > COLI_V4_KV_TURBO2)
         return -1;
@@ -366,15 +387,10 @@ extern "C" int v4_cuda_flash_attention(
     if (codec == COLI_V4_KV_F32) {
         expected = (size_t)head_dim * sizeof(float);
     } else if (codec == COLI_V4_KV_NATIVE) {
-        for (int nope = 0; nope <= head_dim; nope++) {
-            size_t bytes = (size_t)nope + (size_t)(nope + 63) / 64 +
-                           (size_t)(head_dim - nope) * 2;
-            if (bytes == row_bytes) {
-                native_nope = nope;
-                expected = bytes;
-                break;
-            }
-        }
+        native_nope = head_dim - rope_dim;
+        expected = (size_t)native_nope +
+                   (size_t)(native_nope + 63) / 64 +
+                   (size_t)rope_dim * 2;
     } else {
         if (head_dim % COLI_TQ_GROUP) return -1;
         int bits = codec == COLI_V4_KV_TURBO2 ? 2
@@ -387,31 +403,31 @@ extern "C" int v4_cuda_flash_attention(
         case COLI_V4_KV_F32:
             return v4_launch_flash<COLI_V4_KV_F32>(
                 ctx, q, window_kv, window_size, window_indices,
-                compressed_kv, compressed_count, compressed_indices,
+                compressed_kv, compressed_indices,
                 compressed_selected, sinks, heads, head_dim, native_nope,
                 row_bytes, scale);
         case COLI_V4_KV_NATIVE:
             return v4_launch_flash<COLI_V4_KV_NATIVE>(
                 ctx, q, window_kv, window_size, window_indices,
-                compressed_kv, compressed_count, compressed_indices,
+                compressed_kv, compressed_indices,
                 compressed_selected, sinks, heads, head_dim, native_nope,
                 row_bytes, scale);
         case COLI_V4_KV_TURBO4:
             return v4_launch_flash<COLI_V4_KV_TURBO4>(
                 ctx, q, window_kv, window_size, window_indices,
-                compressed_kv, compressed_count, compressed_indices,
+                compressed_kv, compressed_indices,
                 compressed_selected, sinks, heads, head_dim, native_nope,
                 row_bytes, scale);
         case COLI_V4_KV_TURBO3:
             return v4_launch_flash<COLI_V4_KV_TURBO3>(
                 ctx, q, window_kv, window_size, window_indices,
-                compressed_kv, compressed_count, compressed_indices,
+                compressed_kv, compressed_indices,
                 compressed_selected, sinks, heads, head_dim, native_nope,
                 row_bytes, scale);
         case COLI_V4_KV_TURBO2:
             return v4_launch_flash<COLI_V4_KV_TURBO2>(
                 ctx, q, window_kv, window_size, window_indices,
-                compressed_kv, compressed_count, compressed_indices,
+                compressed_kv, compressed_indices,
                 compressed_selected, sinks, heads, head_dim, native_nope,
                 row_bytes, scale);
         default: return -1;

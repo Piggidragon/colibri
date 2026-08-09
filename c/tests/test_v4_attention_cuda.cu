@@ -31,16 +31,22 @@ static float random_signed(void) {
     return ((float)((rng_state >> 8) & 0xffffu) / 32768.0f - 1.0f) * 0.75f;
 }
 
-static int make_model_row(float *row, int row_id) {
-    float qdq[448];
-    uint8_t scales[7];
+static int make_native_row(float *row, int row_id, int rope_dim) {
+    float qdq[512];
+    uint8_t scales[8];
+    int nope = 512 - rope_dim;
     for (int i = 0; i < 512; i++)
         row[i] = random_signed() + 0.01f * sinf((float)(row_id + i));
-    if (coli_fp8_activation_qdq_ref(qdq, scales, row, 448, 64)) return -1;
-    memcpy(row, qdq, sizeof(qdq));
-    coli_bf16_round_array(row, 448);
-    coli_bf16_round_array(row + 448, 64);
+    if (coli_fp8_activation_qdq_ref(qdq, scales, row, (size_t)nope, 64))
+        return -1;
+    memcpy(row, qdq, (size_t)nope * sizeof(*row));
+    coli_bf16_round_array(row, (size_t)nope);
+    coli_bf16_round_array(row + nope, (size_t)rope_dim);
     return 0;
+}
+
+static int make_model_row(float *row, int row_id) {
+    return make_native_row(row, row_id, 64);
 }
 
 static int close_enough(const float *reference, const float *actual,
@@ -133,7 +139,8 @@ static int run_case(ColiV4KVCodec codec, int heads,
     if (!result) result = v4_cuda_flash_attention(
         gpu, queries, device_window, WINDOW, window_indices,
         device_compressed, compressed_count, selected_indices,
-        compressed_selected, sinks, codec, heads, HEAD_DIM, row_bytes, scale);
+        compressed_selected, sinks, codec, heads, HEAD_DIM, ROPE_DIM,
+        row_bytes, scale);
     double cuda_seconds = monotonic_seconds() - cuda_started;
     if (!result && report_timing) {
         const int iterations = 5;
@@ -150,7 +157,7 @@ static int run_case(ColiV4KVCodec codec, int heads,
                 gpu, queries, device_window, WINDOW, window_indices,
                 device_compressed, compressed_count, selected_indices,
                 compressed_selected, sinks, codec, heads, HEAD_DIM,
-                row_bytes, scale);
+                ROPE_DIM, row_bytes, scale);
         cuda_seconds = (monotonic_seconds() - cuda_started) / iterations;
     }
     float cosine = 0.0f;
@@ -181,7 +188,7 @@ static int test_rejections_before_tables(void) {
     if (!device || v4_cuda_kv_write_row(device, 0, row, sizeof(row))) return -1;
     int result = v4_cuda_flash_attention(
         output, query, device, 1, &index, NULL, 0, NULL, 0,
-        &sink, COLI_V4_KV_F32, 1, 512, sizeof(row),
+        &sink, COLI_V4_KV_F32, 1, 512, 0, sizeof(row),
         1.0f / sqrtf(512.0f));
     v4_cuda_kv_free(device);
     return result == -1 ? 0 : -1;
@@ -198,10 +205,75 @@ static int test_invalid_compressed_index(void) {
     int result = v4_cuda_flash_attention(
         output, query, window, 1, &window_index, compressed, 1,
         &compressed_index, 1, &sink, COLI_V4_KV_F32, 1, 512,
-        sizeof(row), 1.0f / sqrtf(512.0f));
+        0, sizeof(row), 1.0f / sqrtf(512.0f));
     v4_cuda_kv_free(compressed);
     v4_cuda_kv_free(window);
     return result == -1 ? 0 : -1;
+}
+
+static int test_native_rope_dimension(void) {
+    enum { HEAD_DIM = 512, ROPE_DIM = 63 };
+    float source[HEAD_DIM], query[HEAD_DIM], cpu[HEAD_DIM], gpu[HEAD_DIM];
+    float sink = -0.25f, cosine = 0.0f;
+    int index = 0;
+    size_t row_bytes = coli_v4_kv_row_bytes(
+        COLI_V4_KV_NATIVE, COLI_V4_KV_MAIN, HEAD_DIM, ROPE_DIM);
+    unsigned char *row = (unsigned char *)malloc(row_bytes);
+    if (!row) return -1;
+    if (make_native_row(source, 17, ROPE_DIM)) {
+        free(row);
+        return -1;
+    }
+    for (int column = 0; column < HEAD_DIM; column++) {
+        query[column] = random_signed();
+    }
+    int result = coli_v4_kv_encode_row(
+        COLI_V4_KV_NATIVE, COLI_V4_KV_MAIN, row, source,
+        HEAD_DIM, ROPE_DIM);
+    void *device = !result ? v4_cuda_kv_alloc(row_bytes) : NULL;
+    if (!device || v4_cuda_kv_write_row(device, 0, row, row_bytes)) result = -1;
+    if (!result) result = coli_v4_flash_attention_codec_ref(
+        cpu, query, row, 1, NULL, 0, &index, NULL, 0,
+        COLI_V4_KV_NATIVE, ROPE_DIM, &sink, 1, HEAD_DIM,
+        1.0f / sqrtf((float)HEAD_DIM));
+    if (!result) result = v4_cuda_flash_attention(
+        gpu, query, device, 1, &index, NULL, 0, NULL, 0, &sink,
+        COLI_V4_KV_NATIVE, 1, HEAD_DIM, ROPE_DIM, row_bytes,
+        1.0f / sqrtf((float)HEAD_DIM));
+    if (!result) result = close_enough(cpu, gpu, HEAD_DIM, &cosine);
+    v4_cuda_kv_free(device);
+    free(row);
+    return result;
+}
+
+static int test_nonfinite_turbo_norm(void) {
+    enum { HEAD_DIM = 512, ROPE_DIM = 64 };
+    float source[HEAD_DIM], query[HEAD_DIM] = {0}, output[HEAD_DIM];
+    float sink = 0.0f;
+    int index = 0;
+    size_t row_bytes = coli_v4_kv_row_bytes(
+        COLI_V4_KV_TURBO2, COLI_V4_KV_MAIN, HEAD_DIM, ROPE_DIM);
+    unsigned char *row = (unsigned char *)malloc(row_bytes);
+    if (!row) return -1;
+    for (int column = 0; column < HEAD_DIM; column++)
+        source[column] = random_signed();
+    int result = coli_v4_kv_encode_row(
+        COLI_V4_KV_TURBO2, COLI_V4_KV_MAIN, row, source,
+        HEAD_DIM, ROPE_DIM);
+    row[0] = 0x00;
+    row[1] = 0x7c;
+    void *device = !result ? v4_cuda_kv_alloc(row_bytes) : NULL;
+    if (!device || v4_cuda_kv_write_row(device, 0, row, row_bytes)) result = -1;
+    if (!result) {
+        result = v4_cuda_flash_attention(
+            output, query, device, 1, &index, NULL, 0, NULL, 0, &sink,
+            COLI_V4_KV_TURBO2, 1, HEAD_DIM, ROPE_DIM, row_bytes,
+            1.0f / sqrtf((float)HEAD_DIM));
+        result = result == -1 ? 0 : -1;
+    }
+    v4_cuda_kv_free(device);
+    free(row);
+    return result;
 }
 
 int main(void) {
@@ -210,7 +282,8 @@ int main(void) {
         return 77;
     }
     if (test_rejections_before_tables() || v4_cuda_publish_tables() ||
-        test_invalid_compressed_index())
+        test_invalid_compressed_index() || test_native_rope_dimension() ||
+        test_nonfinite_turbo_norm())
         return 1;
     if (v4_cuda_kv_alloc(SIZE_MAX / 2) != NULL) {
         fprintf(stderr, "absurd allocation unexpectedly succeeded\n");
