@@ -19,10 +19,23 @@ int main(void) {
     };
     for (int i = 0; i < 16; i++)
         if (!close_enough(coli_e2m1_decode((uint8_t)i), fp4[i])) return 1;
+    if (!signbit(coli_e2m1_decode(8))) return 1;
     if (!close_enough(coli_e8m0_decode(0x7e), 0.5f) ||
         !close_enough(coli_e8m0_decode(0x7f), 1.0f) ||
         !close_enough(coli_e8m0_decode(0x80), 2.0f) ||
         !isnan(coli_e8m0_decode(0xff))) return 1;
+    for (int code = 0; code < 255; code++)
+        if (coli_e8m0_decode((uint8_t)code) !=
+            ldexpf(1.0f, code - 127)) return 1;
+
+    for (int code = 0; code < 256; code++) {
+        float decoded = coli_e4m3fn_decode((uint8_t)code);
+        if ((code & 0x7f) == 0x7f) {
+            if (!isnan(decoded)) return 1;
+        } else if (coli_e4m3fn_encode(decoded) != (uint8_t)code) {
+            return 1;
+        }
+    }
 
     static const float representable[] = {
         0.0f, 0.001953125f, 0.5f, 1.0f, 1.5f, 6.0f,

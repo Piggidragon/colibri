@@ -72,7 +72,9 @@ class DeepSeekV4AmalgamSourceTest(unittest.TestCase):
         self.assertEqual(len(batch_callers), 1, "standalone batch path count")
 
         for caller in token_callers + batch_callers:
-            self.assertEqual(caller.count("coli_v4_attention_two_source_ref("), 1)
+            self.assertEqual(
+                caller.count("coli_v4_attention_two_source_codec_ref("), 1
+            )
             self.assertEqual(
                 caller.count("window_indices[i] = i <= position ? i : -1;"), 1
             )
@@ -88,6 +90,8 @@ class DeepSeekV4AmalgamSourceTest(unittest.TestCase):
             )
             self.assertNotIn("all_kv", caller)
             self.assertNotIn("coli_v4_sparse_attention_ref(", caller)
+            self.assertEqual(caller.count("encode_attention_kv_row("), 2)
+            self.assertNotIn("coli_v4_kv_encode_row(", caller)
 
         batch = batch_callers[0]
         self.assertIn(
@@ -99,9 +103,14 @@ class DeepSeekV4AmalgamSourceTest(unittest.TestCase):
             batch,
         )
         self.assertIn(
-            "item_compressed_indices, selected, sinks, heads, head_dim,",
+            "item_compressed_indices, selected, state->codec, state->rope_dim,",
             batch,
         )
+
+    def test_attention_encode_failures_set_an_error(self):
+        helpers = definitions(ENGINE, "static int encode_attention_kv_row(")
+        self.assert_copies(helpers, 3, "attention KV encode helper")
+        self.assertIn('"cannot encode KV row"', helpers[0])
 
     def test_compressor_copies_stay_identical(self):
         copies = regions(

@@ -150,8 +150,11 @@ deshalb die Warnung.
 Beim echten Modell passt dagegen **beides**: `head_dim=512 = 4×128` und
 `index_head_dim=128 = 1×128`.
 
-`coli_v4_kv_dot` dequantisiert gruppenweise in einen 128er-Stackpuffer und
-akkumuliert — kein Heap, keine ganze Zeile im Speicher.
+`coli_v4_kv_decode_row` dequantisiert die vier Gruppen in den zeilengroßen
+Scratch, den Attention und Indexer seit dem Review-Fix aus Plan 03 einmal pro
+geteilter KV-Zeile verwenden. Die nie produktiv aufgerufenen
+`coli_v4_kv_dot`/`_accumulate` wurden in Plan 03 entfernt; TurboQuant bekommt
+stattdessen spezialisierte Kernel. Kein Heap und kein kontextgroßer f32-Puffer.
 
 ## RoPE-Schwanz
 
@@ -197,9 +200,10 @@ Die WHT ist orthogonal, also `<Rq, Rk> = <q, k>`. Statt jede gelesene Zeile
 zurückzudrehen:
 
 1. Q einmal pro Token und Head vorwärts-WHT (`heads × head_dim/128` Transformationen).
-2. `coli_v4_kv_dot` arbeitet direkt auf den rotierten Zentroidwerten — **keine**
-   inverse WHT pro Zeile.
-3. `coli_v4_kv_accumulate` akkumuliert im rotierten Raum.
+2. Ein spezialisierter Turbo-Attention-Pfad arbeitet direkt auf den rotierten
+   Zentroidwerten — **keine** inverse WHT pro Zeile. Der generische Decode-once-
+   Pfad aus Plan 03 bleibt das Referenzorakel.
+3. Der spezialisierte Pfad akkumuliert im rotierten Raum.
 4. **Eine** inverse WHT auf `head_output`, *danach* `coli_bf16_round`, *danach* das
    RoPE-Inverse ([:1720](../c/deepseek_v4.c)).
 

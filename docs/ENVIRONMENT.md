@@ -313,6 +313,8 @@ the V4 `SERVE=1` launcher only; pass `--memory-gb` to the one-shot CLI.
 | Variable | Default | Effect |
 |---|---|---|
 | `V4_FLASH` | `1` | Use single-pass online-softmax attention over the separate window and compressed KV sources. Set to `0` for the two-pass reference algorithm. The paths are equivalent within BF16 numerical tolerance, not bit-identical, so a close sampled-token decision can differ at long context. Other values fall back to the default. |
+| `V4_KV` | `native` | Main V4 KV row format. `native` stores the model's existing FP8+E8M0 values and BF16 RoPE tail without changing their decoded bits; `f32` keeps the diagnostic legacy layout. The reserved Plan 04 names `turbo4`, `turbo3`, and `turbo2` are recognized but currently warn and fall back to `native`; malformed values do the same. |
+| `V4_KV_INDEX` | `native` | Lightning Indexer KV row format, selected separately because future lossy codecs can change top-k semantics. `native` losslessly packs the existing FP4+E8M0 values; `f32` keeps the diagnostic legacy layout. The reserved Plan 04 names `turbo4`, `turbo3`, and `turbo2` are recognized but currently warn and fall back to `native`; malformed values do the same. |
 | `V4_SCRATCH_MB` | `512` | Planner reserve for V4 runtime scratch, clamped to 64–4096 MiB. Invalid text falls back to 512. This is accounting headroom, not an allocator limit; lowering it makes the RAM plan more optimistic. The 32 GiB target profile uses `128`. |
 
 The benchmark harness also sets `COLI_V4_SAVE_USAGE=0` so its unmeasured warm-up
