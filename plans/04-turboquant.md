@@ -48,8 +48,11 @@ Entwicklungsumgebung nicht vorhanden ist. `make test` und `make check` sind
 grün. Das vorhandene Tiny-Fixture besteht Oracle und Prefix-Reuse mit Defaults
 und mit `V4_KV{,_INDEX}=turbo2|turbo3|turbo4`; alle drei Einstellungen warnen
 wie vorgesehen und fallen wegen der 32er-Dimension token-identisch auf `native`
-zurück. Das erzwungene Neuerzeugen des Fixtures war ohne PyTorch und eine
-DeepSeek-V4-fähige Transformers-Version nicht möglich.
+zurück. Das Fixture wurde anschließend mit `torch==2.13.0+cpu`,
+`transformers==5.14.1` und `safetensors==0.8.0` aus der lokalen
+`.venv-v4-tiny` erzwungen neu erzeugt. Der vollständige
+`deepseek-v4-tiny-check` besteht Target-Oracle, Session-/Serve-Protokoll und
+Prefix-Reuse token-identisch; der generierte Modellbestand bleibt unter 1 MiB.
 
 ## Ziel
 

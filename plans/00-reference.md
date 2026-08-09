@@ -789,6 +789,21 @@ Das Tiny-Fixture braucht torch+transformers CPU-only
 Es muss in **jeder** Phase mit den Defaults token-identisch bleiben — das ist der
 eigentliche Regressionsbeweis.
 
+Auf der Zielmaschine ist die gitignorierte `.venv-v4-tiny` mit den dort exakt
+gepinnten Versionen eingerichtet. Sie lässt sich ohne CUDA und ohne vollständigen
+Checkpoint reproduzieren:
+
+```bash
+uv venv .venv-v4-tiny --python /usr/bin/python3
+uv pip install --python .venv-v4-tiny/bin/python \
+  -r c/tools/requirements-deepseek-v4-tiny.txt
+make -C c PYTHON="$PWD/.venv-v4-tiny/bin/python" deepseek-v4-tiny-check
+```
+
+Der Generator baut ein deterministisches Drei-Layer-Modell von unter 1 MiB mit
+der offiziellen `DeepseekV4ForCausalLM`-Implementierung. Das deckt das lokale
+Oracle ab, nicht Durchsatz oder Qualität des 167-GB-Checkpoints.
+
 Sobald der Checkpoint da ist (`hf download deepseek-ai/DeepSeek-V4-Flash-0731`,
 ~167 GB) greift zusätzlich:
 

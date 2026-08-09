@@ -199,6 +199,22 @@ make -C c deepseek-v4-tiny-check
 Das Tiny-Fixture muss mit den Defaults **token-identisch** bleiben. Kippt es, ist
 das ein Befund und gehört in den PR-Text — nicht weggedrückt.
 
+Für die erzwungene Neugenerierung braucht der Check die exakt gepinnten
+CPU-Pakete aus `c/tools/requirements-deepseek-v4-tiny.txt`. Auf dieser Maschine
+ist dafür `.venv-v4-tiny` eingerichtet; sie braucht weder CUDA noch den
+167-GB-Checkpoint. Reproduzierbar neu anlegen und verwenden:
+
+```bash
+uv venv .venv-v4-tiny --python /usr/bin/python3
+uv pip install --python .venv-v4-tiny/bin/python \
+  -r c/tools/requirements-deepseek-v4-tiny.txt
+make -C c PYTHON="$PWD/.venv-v4-tiny/bin/python" deepseek-v4-tiny-check
+```
+
+Das Fixture ist ein synthetisches, deterministisches Drei-Layer-V4 und kein
+Ausschnitt des großen Modells. Es prüft das Transformers-Orakel und die
+Tokenidentität; Full-Checkpoint-Qualität und -Durchsatz ersetzt es nicht.
+
 ### 5. Messen statt behaupten
 
 Jeder Performance-Plan hat Abnahmekriterien mit Zahlen. Ein PR, der sie nicht
