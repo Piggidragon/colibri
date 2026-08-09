@@ -669,6 +669,22 @@ static int resident_enabled_v2(ColiV4Engine *engine) {
     return engine && engine->runtime.dense_resident;
 }
 
+/* Giving up on the resident tier mid-load has to release what the earlier
+ * layers already took.  Their device tensors would otherwise hold VRAM that
+ * nothing can reach again -- resident_enabled_v2() is false from here on -- and
+ * starve the per-session KV mirror, which is the one thing that must fit. */
+static void v4_dense_resident_drop_all(ColiV4Engine *engine) {
+    for (int layer = 0; layer < COLI_V4_RESIDENT_MAX_LAYERS_V2; layer++) {
+        if (!engine->dense_resident.ready[layer]) continue;
+        coli_v4_layer_resident_reference_free(
+            NULL, &engine->dense_resident.layers[layer]);
+        engine->dense_resident.ready[layer] = 0;
+    }
+    engine->dense_resident.index = NULL;
+    engine->dense_resident.host_bytes = 0;
+    engine->dense_resident.device_bytes = 0;
+}
+
 int coli_v4_layer_load(ColiV4Engine *engine,
                        ColiDeepSeekV4LayerWeights *weights,
                        const ColiDeepSeekV4Config *config,
@@ -703,6 +719,7 @@ int coli_v4_layer_load(ColiV4Engine *engine,
             !loaded.gpu_resident) {
             engine->runtime.dense_location = COLI_V4_DENSE_STREAMED;
             engine->runtime.dense_resident = 0;
+            v4_dense_resident_drop_all(engine);
             fprintf(stderr,
                     "v4_dense warning=vram-fallback layer=%d; "
                     "disabling-resident-cache\n",
@@ -936,8 +953,12 @@ int coli_v4_resident_tier_plan(
                           "resident V4 tiers leave too little target cache");
 
     uint64_t device_host_bytes = inputs->dense_bytes - inputs->dense_device_bytes;
+    uint64_t device_claim;
+    if (add_u64(inputs->dense_device_bytes, inputs->vram_reserve_bytes,
+                &device_claim))
+        device_claim = UINT64_MAX;
     if (inputs->vram_enabled && inputs->dense_device_bytes &&
-        inputs->dense_device_bytes <= inputs->vram_available_bytes &&
+        device_claim <= inputs->vram_available_bytes &&
         resident_tiers_fit(inputs->available_bytes, inputs->fixed_bytes,
                            device_host_bytes, inputs->minimum_expert_bytes)) {
         plan->dense_location = COLI_V4_DENSE_VRAM;
@@ -1091,6 +1112,29 @@ static uint64_t context_bytes(const ColiDeepSeekV4Config *config, int context,
         codec, index_codec);
 }
 
+#ifdef COLI_V4_CUDA
+/* v4_cuda_free_bytes() is a snapshot, and admitting the dense tier against all
+ * of it leaves nothing for what is allocated later: the per-session attention
+ * KV mirror, the matmul scratch, allocator granularity, and whatever a
+ * non-headless desktop takes afterwards.  Formula and clamp as specified in
+ * plans/08-vram-planner.md, brought forward because phase 06 is the first
+ * tier that can consume the whole card. */
+static uint64_t v4_cuda_reserve_bytes(uint64_t free_bytes) {
+    const char *setting = getenv("V4_VRAM_RESERVE_MB");
+    if (setting && setting[0]) {
+        char *end = NULL;
+        errno = 0;
+        long parsed = strtol(setting, &end, 10);
+        if (!errno && end != setting && !*end && parsed >= 0)
+            return (uint64_t)(parsed > 16384 ? 16384 : parsed) * MIB;
+    }
+    uint64_t reserve = free_bytes / 8;
+    if (reserve < 256 * MIB) reserve = 256 * MIB;
+    if (reserve > 1024 * MIB) reserve = 1024 * MIB;
+    return reserve;
+}
+#endif
+
 static int build_runtime_plan(ColiV4Engine *engine,
                               const ColiDeepSeekV4ExpertStoreOptions *options,
                               ColiDeepSeekV4ResourcePlan *plan,
@@ -1216,6 +1260,8 @@ int coli_v4_expert_store_open_planned(
     tier_inputs.vram_enabled = runtime->vram_enabled;
     tier_inputs.vram_available_bytes = runtime->vram_enabled
         ? v4_cuda_free_bytes() : 0;
+    tier_inputs.vram_reserve_bytes = runtime->vram_enabled
+        ? v4_cuda_reserve_bytes(tier_inputs.vram_available_bytes) : 0;
 #endif
     if (coli_v4_resident_tier_plan(&tiers, &tier_inputs,
                                    error, error_size)) return -1;
@@ -1252,9 +1298,12 @@ int coli_v4_expert_store_open_planned(
     if (resident_head && coli_v4_head_cache_load(
             engine, options->model_dir, error, error_size)) return -1;
     fprintf(stderr,
-        "ram_tiers available=%.2fGiB dense=%s(host=%.2fGiB device=%.2fGiB) "
+        "ram_tiers available=%.2fGiB vram=%.2fGiB(reserve=%.2fGiB) "
+        "dense=%s(host=%.2fGiB device=%.2fGiB) "
         "target_slots=%d target_cache=%.2fGiB head=%s projected=%.2fGiB\n",
         plan.planner_available_bytes / (double)GIB,
+        tier_inputs.vram_available_bytes / (double)GIB,
+        tier_inputs.vram_reserve_bytes / (double)GIB,
         tiers.dense_location == COLI_V4_DENSE_VRAM ? "vram" :
         tiers.dense_location == COLI_V4_DENSE_RAM ? "ram" : "streamed",
         dense_bytes / (double)GIB,
@@ -1285,6 +1334,25 @@ int coli_v4_expert_store_open_planned(
 #include "native_quant.h"
 #ifdef COLI_V4_CUDA
 #include "backend_cuda.h"
+#endif
+
+#ifdef COLI_V4_CUDA
+/* The GPU dense path has no cheap fallback: v4_layer_cuda_upload() frees the
+ * host FP8 buffers, so a failed dispatch would otherwise re-read the tensor
+ * from the checkpoint on every projection.  Nothing that gets us here heals by
+ * the next call -- the scratch reserve, launch and memcpy all fail because the
+ * card is full, and the activation buffers fail because the host is -- so latch
+ * the path off after the first one and say so once. */
+int coli_v4_dense_cuda_disabled;
+
+static void v4_dense_cuda_disable(const char *reason) {
+    if (!coli_v4_dense_cuda_disabled) {
+        fprintf(stderr,
+                "v4_dense warning=%s; resident-dense-unusable "
+                "(re-run with V4_VRAM=0)\n", reason);
+        coli_v4_dense_cuda_disabled = 1;
+    }
+}
 #endif
 
 static int dense_tensor_indices(
@@ -1324,7 +1392,8 @@ int coli_v4_dense_matmul(float *output,
         rows > total_rows - row_start)
         return -1;
 #ifdef COLI_V4_CUDA
-    if (weights->gpu_resident && weights->device[wi]) {
+    if (weights->gpu_resident && weights->device[wi] &&
+        !coli_v4_dense_cuda_disabled) {
         size_t count = (size_t)batch * columns;
         float *qdq = malloc(count * sizeof(*qdq));
         uint8_t *scales = malloc((size_t)batch * (size_t)columns / 128);
@@ -1339,31 +1408,19 @@ int coli_v4_dense_matmul(float *output,
         free(scales);
         free(qdq);
         if (computed) return 0;
+        v4_dense_cuda_disable(failed ? "dense-activation-quant-failed"
+                                     : "dense-matmul-failed");
     }
 #endif
-    ColiOwnedTensor loaded = {0};
-    ColiTensorView view;
-    if (weights->data[wi] && weights->data[si]) {
-        view = (ColiTensorView){
-            COLI_TENSOR_FP8_E4M3_BLOCK, COLI_SCALE_F32,
-            weights->data[wi], weights->data[si],
-            (size_t)total_rows * columns,
-            (size_t)ss->shape[0] * (size_t)ss->shape[1] * sizeof(float),
-            total_rows, columns, ws->packed_rows8 ? 8 : 128, 128};
-    } else {
-#ifdef COLI_V4_CUDA
-        char full_prefix[COLI_V4_MAX_TENSOR_NAME];
-        if (!weights->source_index || snprintf(
-                full_prefix, sizeof(full_prefix), "layers.%d.%s",
-                weights->plan.layer, prefix) >= (int)sizeof(full_prefix) ||
-            coli_tensor_load_fp8(&loaded, weights->source_index, full_prefix,
-                                 NULL, 0))
-            return -1;
-        view = loaded.view;
-#else
-        return -1;
-#endif
-    }
+    /* Resident-on-GPU tensors have no host copy left; failing loudly beats
+     * silently reloading 13-34 MB per projection off the checkpoint. */
+    if (!weights->data[wi] || !weights->data[si]) return -1;
+    ColiTensorView view = {
+        COLI_TENSOR_FP8_E4M3_BLOCK, COLI_SCALE_F32,
+        weights->data[wi], weights->data[si],
+        (size_t)total_rows * columns,
+        (size_t)ss->shape[0] * (size_t)ss->shape[1] * sizeof(float),
+        total_rows, columns, ws->packed_rows8 ? 8 : 128, 128};
     int scale_columns = (columns + 127) / 128;
     view.data = (const unsigned char *)view.data + (size_t)row_start * columns;
     view.scales = (const float *)view.scales +
@@ -1372,11 +1429,9 @@ int coli_v4_dense_matmul(float *output,
     view.scale_bytes =
         (size_t)((rows + 127) / 128) * scale_columns * sizeof(float);
     view.rows = rows;
-    int result = batch == 1
+    return batch == 1
         ? coli_fp8_matvec_ref(output, &view, input)
         : coli_fp8_matmul_batch_ref(output, &view, input, batch);
-    coli_owned_tensor_free(&loaded);
-    return result;
 }
 
 int coli_v4_dense_shared_expert(

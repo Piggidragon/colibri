@@ -697,7 +697,7 @@ Neue Knöpfe dieses Branches:
 | `V4_KV` | `native` | 03 |
 | `V4_KV_INDEX` | `native` | 03 |
 | `V4_VRAM` | 0 | 05–08 |
-| `V4_VRAM_RESERVE_MB` | `free/8`, geklemmt 256…1024 | 08 |
+| `V4_VRAM_RESERVE_MB` | `free/8`, geklemmt 256…1024 | 06 (vorgezogen), 08 |
 | `V4_VRAM_LIMIT_MB` | aus (kappt das gemeldete freie VRAM) | 08 |
 | `V4_VRAM_FAIL_AT` | aus, nur unter `COLI_V4_TEST_HOOKS` | 08 |
 | `V4_OMP_CORES` | `perf`, wenn erkennbar; sonst `all` | 09 |

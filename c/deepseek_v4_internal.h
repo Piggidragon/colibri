@@ -144,6 +144,9 @@ static inline int v4_flash_enabled(void) {
 /* Defined once in COLI_V4_UNIT_MATH; latches the CPU-fallback warning so it is
  * printed once per process rather than once per attention unit. */
 extern int coli_v4_attention_cuda_warned;
+/* Also COLI_V4_UNIT_MATH; latches the resident-dense GPU path off after its
+ * first failure, because the host FP8 buffers are gone by then. */
+extern int coli_v4_dense_cuda_disabled;
 #endif
 
 /* ==== begin deepseek_v4_layer.h ==== */
@@ -660,6 +663,9 @@ typedef struct {
 typedef struct {
     uint64_t available_bytes;
     uint64_t vram_available_bytes;
+    /* Kept clear of the dense tier: the per-session KV mirror and the kernel
+     * scratch are allocated later and have nowhere else to go. */
+    uint64_t vram_reserve_bytes;
     uint64_t fixed_bytes;
     uint64_t dense_bytes;
     uint64_t dense_device_bytes;

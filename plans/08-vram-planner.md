@@ -106,6 +106,14 @@ if (reserve > 1024 * MIB) reserve = 1024 * MIB;
 Über `V4_VRAM_RESERVE_MB` überschreibbar, mit Clamp — Muster
 `coli_v4_dspark_cache_gb` ([:6288](../c/deepseek_v4.c)).
 
+**Genau diese Formel ist in Phase 06 vorgezogen worden** (`v4_cuda_reserve_bytes`,
+Unit `EXPERT_STORE_AUTO`) und fließt als `vram_reserve_bytes` in
+`coli_v4_resident_tier_plan`. Grund: 06 ist die erste Stufe, die die ganze Karte
+belegen kann, und ohne Reserve schlug danach jedes `v4_cuda_kv_alloc` fehl — das
+schaltet Phase 05 still ab und ist langsamer als `V4_VRAM=0`. Phase 08 erbt die
+Funktion und den Knopf; sie muss sie nicht neu bauen, sondern nur um Head,
+DSpark und Expert-Cache erweitern.
+
 **Diese Reserve ist Teil des Budgets in [00-reference.md](00-reference.md), nicht
 eine Zutat obendrauf.** Auf dem 4070 greift der obere Clamp: `11.7/8 = 1.46` → volle
 1.0 GiB, also **10.7 GiB für die vier Stufen**, nicht 11.7. Eine frühere Fassung

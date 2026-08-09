@@ -5,12 +5,14 @@
 
 #define GIB UINT64_C(1073741824)
 
-static int expect(ColiDeepSeekV4DenseLocation location,
-                  uint64_t available, uint64_t vram_available,
-                  uint64_t expected_host, uint64_t expected_device) {
+static int expect_reserved(ColiDeepSeekV4DenseLocation location,
+                           uint64_t available, uint64_t vram_available,
+                           uint64_t vram_reserve,
+                           uint64_t expected_host, uint64_t expected_device) {
     ColiDeepSeekV4ResidentTierInputs inputs = {
         .available_bytes = available,
         .vram_available_bytes = vram_available,
+        .vram_reserve_bytes = vram_reserve,
         .fixed_bytes = 4 * GIB,
         .dense_bytes = 24 * GIB,
         .dense_device_bytes = 6 * GIB,
@@ -38,10 +40,23 @@ static int expect(ColiDeepSeekV4DenseLocation location,
     return 0;
 }
 
+static int expect(ColiDeepSeekV4DenseLocation location,
+                  uint64_t available, uint64_t vram_available,
+                  uint64_t expected_host, uint64_t expected_device) {
+    return expect_reserved(location, available, vram_available, 0,
+                           expected_host, expected_device);
+}
+
 int main(void) {
     if (expect(COLI_V4_DENSE_VRAM, 40 * GIB, 6 * GIB, 18 * GIB, 6 * GIB) ||
         expect(COLI_V4_DENSE_RAM, 40 * GIB, 5 * GIB, 24 * GIB, 0) ||
-        expect(COLI_V4_DENSE_STREAMED, 39 * GIB, 5 * GIB, 0, 0))
+        expect(COLI_V4_DENSE_STREAMED, 39 * GIB, 5 * GIB, 0, 0) ||
+        /* The reserve has to come off the top: 6 GiB dense no longer fits in
+         * 6 GiB of free VRAM once the KV mirror is accounted for. */
+        expect_reserved(COLI_V4_DENSE_RAM, 40 * GIB, 6 * GIB, 1 * GIB,
+                        24 * GIB, 0) ||
+        expect_reserved(COLI_V4_DENSE_VRAM, 40 * GIB, 7 * GIB, 1 * GIB,
+                        18 * GIB, 6 * GIB))
         return 1;
     puts("V4 dense tier tests: ok");
     return 0;

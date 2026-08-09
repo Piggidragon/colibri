@@ -15,9 +15,35 @@ Implementiert und auf der Zielmaschine abgenommen in PR #8. Der
 row-major auf die RTX 4070, gibt ihre Hostbuffer frei und dispatcht
 Attention-Projektionen, Indexer-Query und Shared Expert auf CUDA. Der Planner
 bevorzugt VRAM, fällt bei Platzmangel auf residenten RAM und danach auf Streaming
-zurück. Schlägt ein Upload fehl, wird die residente Stufe abgeschaltet; bei einem
-Compute-Fehler wird der einzelne Tensor aus dem Checkpoint für den bestehenden
-CPU-Pfad rematerialisiert.
+zurück. Schlägt ein Upload fehl, wird die residente Stufe abgeschaltet und alles
+bereits Hochgeladene wieder freigegeben.
+
+### Nachtrag: Review-Befunde zu PR #8
+
+Vier Befunde aus dem Review sind nachgezogen; einer davon ändert das oben
+beschriebene Verhalten:
+
+- **Compute-Fehler brechen jetzt ab, statt zu rematerialisieren.** Der Upload
+  gibt die Host-FP8-Buffer frei, also hätte der CPU-Rückfall den Tensor pro
+  Projektion neu aus dem Checkpoint gelesen — 43 Layer × ~8 Projektionen,
+  13–34 MB je Lesevorgang, auf einer DRAM-losen NVMe, ohne jede Meldung. Alle
+  realen Fehlerursachen (Scratch-`cudaMalloc`, Launch, Memcpy) bedeuten
+  erschöpftes VRAM und heilen nicht bis zum nächsten Aufruf. Der Pfad rastet
+  darum nach dem ersten Fehler aus (`coli_v4_dense_cuda_disabled`), meldet eine
+  Zeile und schlägt fehl; der Ausweg ist `V4_VRAM=0`. **Damit gilt die
+  Abnahmezeile „ebenso bei injiziertem CUDA-Compute-Fehler" unten nicht mehr:**
+  unter `COLI_GPU_FAIL_AFTER` bleibt der Lauf nicht mehr tokenidentisch, sondern
+  bricht sauber ab. Das ist beabsichtigt — die Alternative war ein stiller Hänger
+  auf dem großen Checkpoint.
+- **Der VRAM-Fallback gab bereits hochgeladene Layer nicht frei.** Sie blieben
+  als tote Device-Allokationen liegen, während `resident_enabled_v2()` sie nie
+  wieder erreichte, und ließen danach `v4_cuda_kv_alloc` scheitern — also
+  langsamer als `V4_VRAM=0`. `v4_dense_resident_drop_all` räumt jetzt auf.
+- **Der Dense-Tier wurde ohne jede Reserve zugelassen.** Siehe
+  [Plan 08](08-vram-planner.md): dessen Formel ist vorgezogen.
+- **`tests/test_v4_dense_tier` baute sein Objekt im gemeinsamen Verzeichnis**
+  und kollidierte unter `make -j` mit dem Sub-Make von `tests/test_deepseek_v4`.
+  Eigenes `build/v4-dense-tier/`, Muster `V4_ROWS8_DIR`.
 
 Die Full-Checkpoint-Inventur hat die zentrale Planannahme korrigiert: **6.267 GiB**
 sind das gesamte Dense-Inventar, aber nur **5.456 GiB** davon sind FP8-Gewichte

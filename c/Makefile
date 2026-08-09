@@ -991,10 +991,21 @@ tests/test_v4_rows8_skip$(EXE): tests/test_v4_rows8_skip.c \
 		$(V4_ROWS8_DIR)/native_quant.o
 	$(CC) $(V4_ROWS8_CFLAGS) $^ -o $@ -pthread $(LDFLAGS)
 
-tests/test_v4_dense_tier$(EXE): tests/test_v4_dense_tier.c deepseek_v4.c \
-		deepseek_v4_internal.h
-	$(MAKE) -f Makefile.deepseek-v4 ARCH=$(ARCH) COLI_V4_UNIT_RESOURCE_PLAN.o
-	$(CC) $(CFLAGS) $< COLI_V4_UNIT_RESOURCE_PLAN.o -o $@ $(LDFLAGS)
+# A private object dir, like V4_ROWS8_DIR: sub-making COLI_V4_UNIT_RESOURCE_PLAN.o
+# in the shared directory races tests/test_deepseek_v4's sub-make under make -j,
+# and both would rewrite .deepseek-v4-build-config underneath each other.
+V4_DENSE_TIER_DIR = build/v4-dense-tier
+
+$(V4_DENSE_TIER_DIR):
+	mkdir -p $(V4_DENSE_TIER_DIR)
+
+$(V4_DENSE_TIER_DIR)/resource_plan.o: deepseek_v4.c deepseek_v4.h \
+		deepseek_v4_internal.h | $(V4_DENSE_TIER_DIR)
+	$(CC) $(CFLAGS) -DCOLI_V4_UNIT_RESOURCE_PLAN -c deepseek_v4.c -o $@
+
+tests/test_v4_dense_tier$(EXE): tests/test_v4_dense_tier.c \
+		$(V4_DENSE_TIER_DIR)/resource_plan.o
+	$(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS)
 
 endif
 
