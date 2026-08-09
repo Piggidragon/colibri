@@ -61,7 +61,7 @@ typedef struct {
     uint64_t dense_bytes;
     uint64_t head_bytes;
     uint64_t dspark_bytes;
-    uint64_t kv_bytes;               /* aus context_bytes(), Codec-abhängig */
+    uint64_t kv_bytes;               /* nur Attention-KV; Indexer bleibt CPU */
     uint64_t workspace_bytes;
 } ColiV4VramTierInputs;
 
@@ -78,7 +78,7 @@ Feste Reihenfolge, jede Stufe einzeln rückfallfähig:
 
 | # | Posten | Warum diese Position |
 |---|---|---|
-| 1 | **KV** | Ohne KV auf dem Gerät ist der Attention-Kernel aus Plan 05 sinnlos. Der einzige Posten, der mit dem Kontext wächst — 0.43 GiB (`native`, 128k) bis 3.4 GiB (`native`, 1M). |
+| 1 | **KV** | Ohne KV auf dem Gerät ist der Attention-Kernel aus Plan 05 sinnlos. Der einzige Posten, der mit dem Kontext wächst — 0.388 GiB (`native`, 128k) bis 3.08 GiB (`native`, 1M). Der Lightning-Indexer bleibt CPU-seitig und gehört nicht in diesen VRAM-Posten. |
 | 2 | **Dense** | Größter RAM-Gewinn pro VRAM-Byte (6.27 GiB für 6.27 GiB) und macht Q device-resident. |
 | 3 | **Head** | 0.99 GiB, größter Rechenzeitgewinn, aber unabhängig vom Rest. |
 | 4 | **DSpark** | Nur wenn aktiv; muss mit dem Head zusammen wandern (siehe Plan 07). |
@@ -129,8 +129,10 @@ Branch seinen Nutzen realisiert** — ohne sie bleibt der Expert-Cache gleich gr
 egal was auf der GPU liegt.
 
 Dasselbe gilt für `runtime_other` in `build_runtime_plan`
-([:961](../c/deepseek_v4.c)): `context_bytes(...)` gehört nur dann hinein, wenn das
-KV im RAM liegt.
+([:961](../c/deepseek_v4.c)): Die bisher gemeinsame `context_bytes(...)`-Zahl muss
+in Attention- und Indexer-Anteil getrennt werden. Nur der Attention-Anteil darf
+entfallen, wenn der Planner **exklusive** Device-Eigentümerschaft aktiviert und
+den Host-Shadow aus Phase 05 entfernt; der Indexer-Anteil bleibt immer im RAM.
 
 ### Report
 
@@ -139,7 +141,7 @@ ergänzen — gleiche Form, gleicher Ort, damit beides zusammen im Log steht:
 
 ```
 ram_tiers  available=28.00GiB dense=vram target_slots=21 target_cache=~11.2GiB head=vram projected=~11.5GiB
-vram_tiers free=11.70GiB reserve=1.00GiB kv=vram(0.43GiB) dense=vram(6.27GiB) head=vram(0.99GiB) dspark=vram(0.56GiB) used=8.55GiB
+vram_tiers free=11.70GiB reserve=1.00GiB kv=vram(0.39GiB) dense=vram(6.27GiB) head=vram(0.99GiB) dspark=vram(0.56GiB) used=8.51GiB
 ```
 
 Ohne diesen Report ist nicht nachvollziehbar, warum eine Konfiguration schnell oder
@@ -167,9 +169,10 @@ Zeit pro Token aufgeschlüsselt.
 
 Verlinkung aus `docs/deepseek-v4.md` unter „Memory policy".
 
-Bei `CTX=131072` reicht `native` — verlustfrei, 0.43 GiB KV, ~2.15 GiB übrig.
-Bis einschließlich 512k bleibt das so (1.7 GiB KV, ~0.88 GiB übrig). **Erst beim
-1M-Profil wird turbo3 Pflicht**: `native` bräuchte dort 3.4 GiB und bekommt ~2.6.
+Bei `CTX=131072` reicht `native` — verlustfrei, 0.388 GiB Attention-KV, ~2.19 GiB
+übrig. Bis einschließlich 512k bleibt das so (1.54 GiB KV, ~1.04 GiB übrig).
+**Erst beim 1M-Profil wird turbo3 Pflicht**: `native` bräuchte dort 3.08 GiB und
+bekommt ~2.58 GiB.
 Dann gilt der Semantik-Vorbehalt für `V4_KV_INDEX`: turbo auf dem Indexer
 quantisiert die Top-k-Auswahl, also Router-Semantik. Ein zweites Profil für 1M
 gehört ins Doc, mit den Messungen aus Plan 04 als Beleg, dass die Tokenfolge
@@ -245,9 +248,9 @@ Abgleich der beiden Abnahmekriterien.
 ## Abnahme
 
 - Auf dem 4070 (headless) zeigt `vram_tiers` alle vier Posten als `vram` bei
-  `used ≈ 8.55 GiB` für `CTX=131072`/`native`, `reserve = 1.00 GiB`.
+  `used ≈ 8.51 GiB` für `CTX=131072`/`native`, `reserve = 1.00 GiB`.
 - Bei `CTX=131072` liegt `target_cache` nach Slot-Rundung innerhalb der in
-  [00-reference.md](00-reference.md) hergeleiteten Obergrenze von 11.55 GiB
+  [00-reference.md](00-reference.md) hergeleiteten Obergrenze von 11.51 GiB
   (rund 21–22 Slots). Der Gewinn wird gegen einen echten `main`-Lauf mit
   identischem `CTX` ausgewiesen; die früher genannten 27.6/14.4 GiB beruhten auf
   der inzwischen korrigierten 64-Token-State-Reserve und sind kein Gate mehr.

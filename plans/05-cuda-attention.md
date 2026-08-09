@@ -7,6 +7,46 @@ Voraussetzung: [00-reference.md](00-reference.md), [02](02-flash-attention.md), 
 2. `feat: V4 CUDA backend — resident quantized KV`
 3. `feat: V4 CUDA flash sparse MLA attention kernel`
 
+## Ergebnis
+
+Implementiert und auf der Zielmaschine abgenommen in PR #7. Der opt-in
+`CUDA=1`-Build hält einen Device-Spiegel des kodierten Attention-KV und führt
+Sparse MLA für alle fünf Codecs als Online-Softmax-Kernel auf der RTX 4070 aus.
+Initialisierung, Allocation, Upload und Kernel können jeweils auf den bestehenden
+CPU-Pfad zurückfallen; ohne `V4_VRAM=1` bleibt das Verhalten unverändert.
+
+Abnahme am 2026-08-09, Commit `0f9cfcb` plus finalem Benchmark-Follow-up, RTX
+4070 (`sm_89`), Treiber 610.57.04, CUDA 13.3:
+
+- CUDA-Harness grün für fünf Codecs, Heads `{1,8,64}`, Selektionen
+  `{1,7,64,2048}`, Sinks, `-1`-Padding, OOB, fehlende Tabellen und absichtliches
+  OOM. Full-Checkpoint gegen die CPU-Oracle: Teacher-Forcing 1/1 und Greedy 1/1.
+- Fünf gemittelte Aufrufe des nativen 64-Head-Kernels inklusive Q/Indizes-H2D,
+  Context-D2H und Sync: 640 Zeilen 11.943 → 0.846 ms (**14.12×**), 1152 Zeilen
+  20.971 → 1.493 ms (**14.05×**), 7940 Zeilen 151.763 → 10.007 ms
+  (**15.17×**). Cosine war jeweils 1.0000000.
+- Ein kurzer warmer Full-Checkpoint-Lauf erzeugte CPU und CUDA identisch
+  `The capital of France`. CPU: TTFT 41.596 s, drei Decode-Tokens in 8.020 s
+  (0.374 tok/s); CUDA: 40.943 s und 7.925 s (0.379 tok/s). Die rund 1.2 % sind
+  wegen 1521 gegenüber 1534 Cache-Misses und nur 9–12 Kontexttokens kein
+  belastbarer End-to-end-Gewinn; der isolierte Kernelwert oben ist die saubere
+  Messung dieser Phase.
+- `nvidia-smi` zeigte im Zehn-Token-Orakellauf 160 MiB Prozess-VRAM. Bei vollem
+  128k-Kontext belegt nur der Attention-KV auf dem Gerät rechnerisch 0.388 GiB
+  (`native`) beziehungsweise 0.133 GiB (`turbo3`); die früher genannten
+  0.431/0.165 GiB enthalten zusätzlich den CPU-seitigen Indexer-KV.
+
+Abweichungen vom Plan: Phase 04 hat den rotierten TurboQuant-Modus verworfen,
+also gibt es hier keinen `rotated`-Dispatch. Außerdem bleibt der Host-KV als
+Fallback-Shadow bestehen. Phase 05 gibt daher allein noch keinen RAM frei und
+erhöht `target_cache` nicht; die exklusive Tier-Eigentümerschaft und
+RAM-Rückkopplung bleiben Aufgabe von Plan 08. Referenz- und Plannerplan sind auf
+diese tatsächlich gebaute Grenze korrigiert. Die Tiny-Neugenerierung war auf der
+Zielmaschine mangels PyTorch/Transformers nicht wiederholbar; ihr generiertes,
+gitignoriertes `model.safetensors` war hier nicht vorhanden. Die stärkere
+Full-Checkpoint-Oracle und die vollständigen normalen C-/Python-Gates blieben
+grün.
+
 ## Ziel
 
 Der erste GPU-Brückenkopf für V4. Der KV-Cache zieht nach VRAM, die Attention läuft
@@ -152,18 +192,12 @@ Der dequantisierte Wert wird **zweimal im selben Registerfenster** benutzt (Scor
 und Akkumulation) und nie zurückgeschrieben. Das ist der ganze Punkt des
 Flash-Umbaus aus Plan 02.
 
-Zwei CPU-Follow-ups werden in dieser Phase separat gemessen, nicht mit dem
-Staging-Gewinn aus Plan 02 vermischt:
-
-- Der aktuelle Head-Outer-Kernel hat pro Head keinen gemeinsamen Scratch mehr.
-  Ein `#pragma omp parallel for` über die 64 Heads ist damit korrekt möglich;
-  behalten wird es nur bei einem Gewinn auf dem i5-13400F, mit der hybriden
-  P-/E-Core-Policy aus Plan 09.
-- Eine Rank-Outer-Variante hält pro Head `running_max`, `running_sum` und den
-  512-Float-Akkumulator (zusammen rund 131 KiB) und verarbeitet jede ausgewählte
-  KV-Zeile für alle Heads, bevor die nächste Zeile geladen wird. Das ist die
-  eigentliche CPU-Tiling-Variante, die den ausgewählten KV-Satz nicht Head für
-  Head erneut streamt. Sie bekommt einen eigenen A/B-Benchmark gegen Head-Outer.
+Der CPU-Orakelpfad ist nach Phase 02 bereits Rank-/Row-Outer: Er dekodiert jede
+ausgewählte KV-Zeile einmal und verarbeitet damit alle Heads. Eine zusätzliche
+Head-Outer-Variante würde denselben kodierten Satz pro Head erneut dekodieren und
+wurde deshalb nicht als vermeintliche Optimierung eingeführt. Der optionale
+`V4_CUDA_BENCH=1`-Modus vergleicht den CUDA-Aufruf direkt gegen dieses stärkere
+CPU-Orakel.
 
 **Sink-Initialisierung** wie auf der CPU: `running_max = sinks[head]`,
 `running_sum = 1.0f`.
@@ -222,7 +256,10 @@ turbo3 200 Bytes) — vernachlässigbar.
 
 `ColiDeepSeekV4WindowAttentionState` bekommt unter `#ifdef COLI_V4_CUDA` zwei
 Device-Zeiger neben den Host-Puffern. Die Codec-Kodierung passiert **auf der CPU**
-(sie ist billig, einmal pro Token), hochgeladen wird die fertige Zeile.
+(sie ist billig, einmal pro Token), hochgeladen wird die fertige Zeile. Die
+Host-Puffer bleiben in dieser Phase als vollständiger Fallback-Shadow bestehen;
+erst der Tier-Planner aus Plan 08 darf exklusive Device-Eigentümerschaft wählen
+und den Posten aus dem RAM-Budget nehmen.
 
 Fallback-Kette, die nie hart scheitert:
 
@@ -253,6 +290,9 @@ Ein Fehler im Kernel-Aufruf fällt für diesen Token auf CPU zurück und loggt e
   nicht gegen Nullen rechnen (das ist die Lehre aus `g_fp8_lut_ready`,
   [c/backend_cuda.cu:1059](../c/backend_cuda.cu)).
 - OOM: `v4_cuda_kv_alloc` mit absurder Größe gibt NULL, kein Absturz.
+- Optional setzt `V4_CUDA_BENCH=1` drei nicht-gatende Messpunkte für den nativen
+  64-Head-Pfad bei 640/1152/7940 Zeilen; berichtet wird der Mittelwert aus fünf
+  Aufrufen inklusive der kleinen Host↔Device-Transfers.
 
 Dazu ein CPU-seitiger Test, dass die Fallback-Kette greift, wenn
 `v4_cuda_init` scheitert (per Test-Hook, Muster `COLI_V4_TEST_HOOKS`).
@@ -262,8 +302,8 @@ Dazu ein CPU-seitiger Test, dass die Fallback-Kette greift, wenn
 - `make -C c deepseek-v4` ohne `CUDA=1` baut unverändert und ist token-identisch.
 - `make -C c deepseek-v4 CUDA=1` baut; ohne GPU zur Laufzeit sauberer CPU-Fallback.
 - Kernel innerhalb Toleranz gegen CPU-Referenz, alle Codecs.
-- `nvidia-smi` zeigt während des Laufs den erwarteten KV-Footprint
-  (bei turbo3 und 128k: ~0.16 GiB, siehe KV-Bilanz in [00-reference.md](00-reference.md)).
+- `nvidia-smi` zeigt während des Laufs den erwarteten Attention-KV-Footprint
+  (bei turbo3 und 128k: ~0.13 GiB; weitere ~0.03 GiB Indexer-KV bleiben auf der CPU).
 - Ein Layer end-to-end mit `V4_VRAM=1` liefert dieselben Tokens wie ohne.
 
 ## Risiken

@@ -7,6 +7,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 extern "C" int coli_v4_flash_attention_codec_ref(
     float *output, const float *queries,
@@ -18,6 +19,12 @@ extern "C" int coli_v4_flash_attention_codec_ref(
     const float *sinks, int heads, int head_dimension, float softmax_scale);
 
 static uint32_t rng_state = UINT32_C(0x31415926);
+
+static double monotonic_seconds(void) {
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    return (double)now.tv_sec + (double)now.tv_nsec * 1e-9;
+}
 
 static float random_signed(void) {
     rng_state = rng_state * UINT32_C(1664525) + UINT32_C(1013904223);
@@ -58,7 +65,7 @@ static int close_enough(const float *reference, const float *actual,
 }
 
 static int run_case(ColiV4KVCodec codec, int heads,
-                    int compressed_selected) {
+                    int compressed_selected, int report_timing) {
     enum { HEAD_DIM = 512, ROPE_DIM = 64, WINDOW = 8 };
     int compressed_count = compressed_selected > 0 ? compressed_selected : 0;
     size_t row_bytes = coli_v4_kv_row_bytes(
@@ -90,9 +97,9 @@ static int run_case(ColiV4KVCodec codec, int heads,
             return -1;
     }
     for (int i = 0; i < WINDOW; i++)
-        window_indices[i] = i == 3 ? -1 : i;
+        window_indices[i] = !report_timing && i == 3 ? -1 : i;
     for (int i = 0; i < compressed_count; i++)
-        compressed_indices[i] = i && i % 257 == 0 ? -1 : i;
+        compressed_indices[i] = !report_timing && i && i % 257 == 0 ? -1 : i;
     for (int head = 0; head < heads; head++) {
         sinks[head] = heads == 1 && compressed_selected == 7
             ? 80.0f : (float)(head % 7 - 3) * 0.125f;
@@ -116,14 +123,36 @@ static int run_case(ColiV4KVCodec codec, int heads,
     float scale = 1.0f / sqrtf((float)HEAD_DIM);
     const int *selected_indices = heads == 8 && compressed_selected == 64
         ? NULL : compressed_indices;
+    double cpu_started = monotonic_seconds();
     int result = coli_v4_flash_attention_codec_ref(
         cpu, queries, window, WINDOW, compressed, compressed_count,
         window_indices, selected_indices, compressed_selected,
         codec, ROPE_DIM, sinks, heads, HEAD_DIM, scale);
+    double cpu_seconds = monotonic_seconds() - cpu_started;
+    double cuda_started = monotonic_seconds();
     if (!result) result = v4_cuda_flash_attention(
         gpu, queries, device_window, WINDOW, window_indices,
         device_compressed, compressed_count, selected_indices,
         compressed_selected, sinks, codec, heads, HEAD_DIM, row_bytes, scale);
+    double cuda_seconds = monotonic_seconds() - cuda_started;
+    if (!result && report_timing) {
+        const int iterations = 5;
+        cpu_started = monotonic_seconds();
+        for (int iteration = 0; !result && iteration < iterations; iteration++)
+            result = coli_v4_flash_attention_codec_ref(
+                cpu, queries, window, WINDOW, compressed, compressed_count,
+                window_indices, selected_indices, compressed_selected,
+                codec, ROPE_DIM, sinks, heads, HEAD_DIM, scale);
+        cpu_seconds = (monotonic_seconds() - cpu_started) / iterations;
+        cuda_started = monotonic_seconds();
+        for (int iteration = 0; !result && iteration < iterations; iteration++)
+            result = v4_cuda_flash_attention(
+                gpu, queries, device_window, WINDOW, window_indices,
+                device_compressed, compressed_count, selected_indices,
+                compressed_selected, sinks, codec, heads, HEAD_DIM,
+                row_bytes, scale);
+        cuda_seconds = (monotonic_seconds() - cuda_started) / iterations;
+    }
     float cosine = 0.0f;
     if (!result) result = close_enough(
         cpu, gpu, (size_t)heads * HEAD_DIM, &cosine);
@@ -131,6 +160,12 @@ static int run_case(ColiV4KVCodec codec, int heads,
         fprintf(stderr, "failed codec=%s heads=%d selected=%d cosine=%g\n",
                 coli_v4_kv_codec_name(codec), heads,
                 compressed_selected, cosine);
+    else if (report_timing)
+        printf("v4_cuda_bench codec=%s heads=%d rows=%d cpu=%.3fms "
+               "cuda=%.3fms speedup=%.2fx cosine=%.7f\n",
+               coli_v4_kv_codec_name(codec), heads,
+               WINDOW + compressed_selected, cpu_seconds * 1e3,
+               cuda_seconds * 1e3, cpu_seconds / cuda_seconds, cosine);
 
     v4_cuda_kv_free(device_compressed);
     v4_cuda_kv_free(device_window);
@@ -194,8 +229,17 @@ int main(void) {
             for (size_t selected = 0;
                  selected < sizeof(selections) / sizeof(selections[0]); selected++)
                 if (run_case(codecs[codec], head_counts[heads],
-                             selections[selected]))
+                             selections[selected], 0))
                     return 1;
+    if (getenv("V4_CUDA_BENCH")) {
+        const int benchmark_selections[] = {632, 1144, 7932};
+        for (size_t selected = 0;
+             selected < sizeof(benchmark_selections) /
+                        sizeof(benchmark_selections[0]); selected++)
+            if (run_case(COLI_V4_KV_NATIVE, 64,
+                         benchmark_selections[selected], 1))
+                return 1;
+    }
     v4_cuda_shutdown();
     puts("test_v4_attention_cuda: ok");
     return 0;

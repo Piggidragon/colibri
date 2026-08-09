@@ -1,4 +1,4 @@
-# Draft PR — Phase 05: CUDA KV + Flash-Sparse-MLA-Attention
+# PR #7 — Phase 05: CUDA KV + Flash-Sparse-MLA-Attention
 
 **Branch:** `phase-05-cuda-attention`
 **Basis:** `main` auf Phase-04-Merge `8b7d346`
@@ -22,30 +22,38 @@ einmalig geloggt auf die bestehende CPU-Implementierung zurück.
 ## Abnahme
 
 - [x] CPU-Build ohne CUDA bleibt unverändert.
-- [x] `make -C c test && make -C c check` grün; 356 Python-Tests.
+- [x] `make -C c test && make -C c check` grün; im finalen `check` 358 Python-Tests.
 - [x] Tiny-Fixture und Prefix-Reuse tokenidentisch.
 - [x] CUDA 12.0 / GCC 12 / `sm_89`: Backend, Harness und V4-Binary kompilieren/linken.
 - [x] Ohne GPU: `V4_VRAM=1` fällt sauber und tokenidentisch auf CPU zurück.
-- [ ] CUDA-Harness auf echter RTX 4070: alle fünf Codecs, Heads `{1,8,64}`,
+- [x] CUDA-Harness auf echter RTX 4070: alle fünf Codecs, Heads `{1,8,64}`,
       Selektionen `{1,7,64,2048}`, Sinks, `-1`-Padding, OOB und OOM.
-- [ ] Full-Checkpoint: `V4_VRAM=1` gegen CPU tokenidentisch.
-- [ ] `nvidia-smi`-Messung des KV-Footprints.
-- [ ] CPU-A/B und CUDA-Durchsatz/PCIe-Transfer messen.
+- [x] Full-Checkpoint: `V4_VRAM=1` gegen CPU tokenidentisch (Teacher-Forcing 1/1,
+      Greedy 1/1; kurzer Lauf ebenfalls identischer Text).
+- [x] `nvidia-smi`: 160 MiB Prozess-VRAM im Zehn-Token-Orakellauf.
+- [x] CPU-Orakel gegen CUDA inklusive PCIe-Transfers gemessen.
 
-## Offener Status
+## Zielmaschinen-Ergebnis
 
-Die PR ist absichtlich noch ein Draft. Die Entwicklungs-VM hat kein NVIDIA-
-Gerät; die letzten vier Punkte sind auf der Zielmaschine auszuführen. Bis dahin
-bleibt Phase 05 in `AGENTS.md` und der Plantabelle `offen`.
+RTX 4070 (`sm_89`), Treiber 610.57.04, CUDA 13.3. Der native 64-Head-Kernel
+erreichte über fünf gemittelte Aufrufe 14.12× bei 640 Zeilen, 14.05× bei 1152
+Zeilen und 15.17× bei 7940 Zeilen; Cosine jeweils 1.0000000. Der kurze warme
+Full-Checkpoint-Lauf lag bei 0.374 tok/s CPU und 0.379 tok/s CUDA. Wegen leicht
+unterschiedlicher Expert-Miss-Zahlen und des winzigen Kontexts ist das kein
+belastbarer End-to-end-Speedup; die Kernelmessung isoliert die Phase.
+
+Der Device-KV ist in Phase 05 ein Spiegel mit vollständigem Host-Fallback. Daher
+wird hier noch kein RAM frei. Plan 08 übernimmt die exklusive Tier-
+Eigentümerschaft und die Rückkopplung in den RAM-Planner. Bei 128k umfasst der
+Device-Posten 0.388 GiB (`native`) beziehungsweise 0.133 GiB (`turbo3`); die
+früher dokumentierten 0.431/0.165 GiB enthielten den CPU-seitigen Indexer.
 
 ## Testkommandos auf der Zielmaschine
 
 ```bash
 make -C c v4-cuda-test CUDA=1 CUDA_ARCH=sm_89
+V4_CUDA_BENCH=1 make -C c v4-cuda-test CUDA=1 CUDA_ARCH=sm_89
 make -C c deepseek-v4 CUDA=1 CUDA_ARCH=sm_89
 V4_VRAM=1 ./c/deepseek_v4 ...
 nvidia-smi
 ```
-
-Die gemessenen Zahlen und der finale PR-Link gehören nach der GPU-Abnahme in
-den `## Ergebnis`-Block von [Plan 05](05-cuda-attention.md).
