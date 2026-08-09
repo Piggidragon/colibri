@@ -1,5 +1,3 @@
-_Leggi il leggimi in [Italiano](README.IT.md)._
-
 
 # Colibrì Guide - Local Inference Engine
 
