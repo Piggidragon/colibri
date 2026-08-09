@@ -5,13 +5,56 @@ Voraussetzung: [00-reference.md](00-reference.md), [05-cuda-attention.md](05-cud
 *Commits:*
 1. `feat: skip the AVX2 rows8 repack for GPU-resident fp8 tensors`
 2. `feat: resident fp8 dense tensors on GPU for V4`
-3. `feat: keep the attention query on-device across projections`
+3. `feat: keep the attention query on-device across projections` — nach Messung
+   nicht umgesetzt, siehe Ergebnis
+
+## Ergebnis
+
+Implementiert und auf der Zielmaschine abgenommen in PR #8. Der
+`CUDA=1 V4_VRAM=1`-Pfad lädt die FP8-Dense-Gewichte samt expandierten Scales
+row-major auf die RTX 4070, gibt ihre Hostbuffer frei und dispatcht
+Attention-Projektionen, Indexer-Query und Shared Expert auf CUDA. Der Planner
+bevorzugt VRAM, fällt bei Platzmangel auf residenten RAM und danach auf Streaming
+zurück. Schlägt ein Upload fehl, wird die residente Stufe abgeschaltet; bei einem
+Compute-Fehler wird der einzelne Tensor aus dem Checkpoint für den bestehenden
+CPU-Pfad rematerialisiert.
+
+Die Full-Checkpoint-Inventur hat die zentrale Planannahme korrigiert: **6.267 GiB**
+sind das gesamte Dense-Inventar, aber nur **5.456 GiB** davon sind FP8-Gewichte
+und expandierte Scales und können in dieser Phase wandern. **0.810 GiB**
+BF16/f32/i64 bleiben auf dem Host. Bei `--memory-gb 28`, `CTX=4096` wuchs der
+Expert-Cache damit von 36 auf 46 Slots pro Layer beziehungsweise von 19.27 auf
+24.63 GiB. `nvidia-smi` zeigte 5750 MiB Prozess-VRAM inklusive CUDA-Kontext und
+dem kleinen Phase-05-KV.
+
+Abnahme am 2026-08-09, RTX 4070 (`sm_89`), Full Checkpoint, Prompt
+`The capital of France is`, DSpark aus:
+
+- Full-Checkpoint-Oracle: Teacher Forcing 10/10, Greedy 1/1. Die frisch mit
+  `torch==2.13.0+cpu`, `transformers==5.14.1` und `safetensors==0.8.0`
+  regenerierte Tiny-Fixture blieb CPU- und CUDA-seitig vollständig tokenidentisch;
+  ebenso bei injiziertem CUDA-Compute-Fehler.
+- Der CUDA-Harness prüfte alle Dense-Shapes aus diesem Plan einschließlich eines
+  `wo_a`-Rowslices gegen die CPU-Referenz: null Abweichungen außerhalb
+  `1e-3 × (|Referenz| + 1e-3)`.
+- Bei nahezu gleicher Misszahl (CPU 1442, CUDA 1445) sank TTFT von 36.397 auf
+  28.624 s (**−21.4 %**). Zwei Decode-Tokens nach TTFT sanken von 5.268 auf
+  3.426 s (**−35.0 %**, 0.380 auf 0.584 tok/s).
+- `make -C c test && make -C c check`, der CUDA-Harness und der
+  Source-Sync-Test waren grün.
+
+Der optionale dritte Commit wurde verworfen. Durchgängig device-residentes Q
+würde rund 11 MB PCIe-Verkehr pro Token sparen, auf PCIe 4 x16 also weniger als
+0.4 ms gegenüber dem hier mehrsekündigen Decode. Dafür wären Norm, RoPE und die
+Attention-API gemeinsam umzubauen. Der RAM-Gewinn und die gemessene
+Beschleunigung hängen nicht davon ab.
 
 ## Ziel
 
-**Der größte Einzelposten: 6.27 GiB RAM frei.** Der Expert-Cache wächst um ~11
-Slots pro Layer. Gleichzeitig fällt der PCIe-Verkehr aus Plan 05 weitgehend weg,
-weil Q das Gerät nicht mehr verlässt.
+**Der größte verschiebbare Einzelposten: 5.456 GiB RAM frei.** Der Expert-Cache
+wächst auf der Zielkonfiguration gemessen um zehn Slots pro Layer. Die Dense-
+Matmuls laufen auf der GPU; Q bleibt nach der Messentscheidung oben noch nicht
+durchgängig auf dem Gerät.
 
 ## Ausgangslage
 
@@ -20,7 +63,9 @@ weil Q das Gerät nicht mehr verlässt.
 `v5_dense_inventory` ([c/deepseek_v4.c:981](../c/deepseek_v4.c)) summiert
 `stats.total_bytes` über alle Layer — die **komplette Layer-Inventur ohne geroutete
 Experten**: Attention-Projektionen, Compressor, Indexer, Router-Gate, Shared Expert,
-Norms, HC-Parameter. Laut `docs/deepseek-v4.md` ~6.27 GiB.
+Norms, HC-Parameter. Laut Checkpoint-Inventur 6.267 GiB insgesamt. Davon sind
+5.455 GiB FP8-Weights und 0.001 GiB expandierte Scales; 0.810 GiB sonstige
+Tensoren bleiben CPU-seitig.
 
 Die fp8-Tensoren pro Layer, aus `coli_v4_layer_plan`
 ([c/deepseek_v4.c:355](../c/deepseek_v4.c) ff.), alle mit `.scale` als
@@ -199,10 +244,10 @@ Die `ram_tiers`-Zeile ([:1057](../c/deepseek_v4.c)) muss es ausweisen, sonst ist
 nicht sichtbar, was passiert ist:
 
 ```
-ram_tiers available=28.00GiB dense=vram(6.27GiB) target_slots=38 ...
+ram_tiers available=28.00GiB dense=vram(host=0.81GiB device=5.46GiB) target_slots=46 ...
 ```
 
-## Commit 3 — Q bleibt auf dem Gerät
+## Commit 3 — Q bleibt auf dem Gerät (nach Messung verworfen)
 
 Sobald `wq_a`, `wq_b` und `wkv` auf der GPU rechnen, entsteht Q dort. Der
 Attention-Kernel aus Plan 05 bekommt eine `_dev`-Variante, die einen Device-Zeiger
@@ -231,10 +276,12 @@ die Messaufgabe dieses Commits.
 
 ## Abnahme
 
-- `ram_tiers` zeigt `dense=vram`, `target_cache` **≥6 GiB höher** als vorher.
-- `nvidia-smi` zeigt den erwarteten Dense-Footprint (~6.3 GiB plus KV aus Plan 05).
+- `ram_tiers` zeigt `dense=vram`, `target_cache` gemessen **5.36 GiB höher** als vorher.
+- `nvidia-smi` zeigt den erwarteten Prozess-Footprint (5750 MiB inklusive CUDA-
+  Kontext und KV; davon 5.456 GiB inventarisierte Dense-Tensoren).
 - fp8-Matmuls auf GPU innerhalb Toleranz gegen die CPU-Referenz.
-- PCIe-Verkehr pro Token messbar gesunken gegenüber Plan 05.
+- Der mögliche PCIe-Gewinn von Commit 3 ist quantifiziert und gegen den
+  gemessenen Decode-Anteil entschieden; siehe Ergebnis.
 - Ohne `CUDA=1` unverändertes Verhalten, Bytes und Tokens identisch.
 
 ## Risiken
@@ -243,9 +290,9 @@ die Messaufgabe dieses Commits.
   Reihenfolge wie `matmul_fp8`. Logits weichen minimal ab; am Tiny-Fixture auf
   Token-Identität prüfen und, falls sie kippt, als Toleranz dokumentieren statt
   wegzudrücken. Das ist die einzige echte Semantikfrage dieser Phase.
-- **6.27 dense + 0.99 head + 0.56 DSpark + 0.30 Workspace = 8.12 GiB Fixkosten**
-  lassen auf der headless 12-GB-Karte ~2.6 GiB für den KV — 11.7 nutzbar minus
-  1.0 GiB Planner-Reserve aus Plan 08 minus 8.12 (siehe VRAM-Budget in
+- **5.456 dense + 0.99 head + 0.56 DSpark + 0.30 Workspace = 7.31 GiB
+  Fixkosten** lassen auf der headless 12-GB-Karte ~3.39 GiB für den KV — 11.7
+  nutzbar minus 1.0 GiB Planner-Reserve aus Plan 08 minus 7.31 (siehe VRAM-Budget in
   [00-reference.md](00-reference.md)). Ohne den Codec aus Plan 03 schließt das
   Budget bei langem Kontext trotzdem nicht. Reihenfolge nicht umdrehen.
 - **Der `gpu_resident`-Durchstich** berührt den Ladepfad, den auch der

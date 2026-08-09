@@ -79,7 +79,7 @@ Feste Reihenfolge, jede Stufe einzeln rückfallfähig:
 | # | Posten | Warum diese Position |
 |---|---|---|
 | 1 | **KV** | Ohne KV auf dem Gerät ist der Attention-Kernel aus Plan 05 sinnlos. Der einzige Posten, der mit dem Kontext wächst — 0.388 GiB (`native`, 128k) bis 3.08 GiB (`native`, 1M). Der Lightning-Indexer bleibt CPU-seitig und gehört nicht in diesen VRAM-Posten. |
-| 2 | **Dense** | Größter RAM-Gewinn pro VRAM-Byte (6.27 GiB für 6.27 GiB) und macht Q device-resident. |
+| 2 | **Dense** | Größter RAM-Gewinn pro VRAM-Byte: Phase 06 misst 5.456 GiB FP8-Device-Tensoren und 5.456 GiB freigegebene Hostbuffer. Die übrigen 0.810 GiB Dense bleiben im RAM. |
 | 3 | **Head** | 0.99 GiB, größter Rechenzeitgewinn, aber unabhängig vom Rest. |
 | 4 | **DSpark** | Nur wenn aktiv; muss mit dem Head zusammen wandern (siehe Plan 07). |
 
@@ -109,14 +109,16 @@ if (reserve > 1024 * MIB) reserve = 1024 * MIB;
 **Diese Reserve ist Teil des Budgets in [00-reference.md](00-reference.md), nicht
 eine Zutat obendrauf.** Auf dem 4070 greift der obere Clamp: `11.7/8 = 1.46` → volle
 1.0 GiB, also **10.7 GiB für die vier Stufen**, nicht 11.7. Eine frühere Fassung
-des VRAM-Budgets in 00 rechnete ohne sie und kam deshalb auf ~3.5 GiB KV-Spielraum
-statt der tatsächlichen ~2.6 — mit der Folge, dass `native` bei 1M dort noch zu
-passen schien. Wer diese Reserve ändert, korrigiert das Budget in 00 mit; sonst
+des VRAM-Budgets in 00 rechnete ohne sie. Nach der gemessenen Phase-06-Korrektur
+bleiben mit Reserve ~3.39 GiB KV-Spielraum; ohne Reserve wären es irreführende
+~4.39 GiB. Wer diese Reserve ändert, korrigiert das Budget in 00 mit; sonst
 planen die beiden Dokumente gegeneinander.
 
 ### Rückkopplung in den RAM-Plan
 
-Was auf der GPU liegt, darf im RAM-Plan nicht mehr auftauchen. In
+Was auf der GPU liegt, darf im RAM-Plan nicht mehr auftauchen. Phase 06 hat dafür
+bereits Device- und verbleibende Hostbytes getrennt; Plan 08 darf also nur die
+gemessenen 5.456 GiB abziehen, nicht das 6.267-GiB-Gesamtinventar. In
 `coli_v4_expert_store_open_planned` ([:1001](../c/deepseek_v4.c)):
 
 ```c
@@ -140,8 +142,8 @@ Die `ram_tiers`-Zeile ([:1057](../c/deepseek_v4.c)) um eine `vram_tiers`-Zeile
 ergänzen — gleiche Form, gleicher Ort, damit beides zusammen im Log steht:
 
 ```
-ram_tiers  available=28.00GiB dense=vram target_slots=21 target_cache=~11.2GiB head=vram projected=~11.5GiB
-vram_tiers free=11.70GiB reserve=1.00GiB kv=vram(0.39GiB) dense=vram(6.27GiB) head=vram(0.99GiB) dspark=vram(0.56GiB) used=8.51GiB
+ram_tiers  available=28.00GiB dense=vram(host=0.81GiB device=5.46GiB) target_slots=20 target_cache=~10.7GiB head=vram
+vram_tiers free=11.70GiB reserve=1.00GiB kv=vram(0.39GiB) dense=vram(5.46GiB) head=vram(0.99GiB) dspark=vram(0.56GiB) used=7.69GiB
 ```
 
 Ohne diesen Report ist nicht nachvollziehbar, warum eine Konfiguration schnell oder
@@ -169,10 +171,11 @@ Zeit pro Token aufgeschlüsselt.
 
 Verlinkung aus `docs/deepseek-v4.md` unter „Memory policy".
 
-Bei `CTX=131072` reicht `native` — verlustfrei, 0.388 GiB Attention-KV, ~2.19 GiB
-übrig. Bis einschließlich 512k bleibt das so (1.54 GiB KV, ~1.04 GiB übrig).
-**Erst beim 1M-Profil wird turbo3 Pflicht**: `native` bräuchte dort 3.08 GiB und
-bekommt ~2.58 GiB.
+Bei `CTX=131072` reicht `native` — verlustfrei, 0.388 GiB Attention-KV, ~3.01 GiB
+übrig. Bis einschließlich 512k bleibt das so (1.54 GiB KV, ~1.85 GiB übrig).
+Beim 1M-Profil passt `native` mit 3.08 GiB nach der gemessenen Dense-Korrektur
+nominell in die ~3.39 GiB, lässt aber nur ~0.31 GiB Marge. `turbo3` ist dort
+daher empfohlen, nicht mehr rechnerisch zwingend.
 Dann gilt der Semantik-Vorbehalt für `V4_KV_INDEX`: turbo auf dem Indexer
 quantisiert die Top-k-Auswahl, also Router-Semantik. Ein zweites Profil für 1M
 gehört ins Doc, mit den Messungen aus Plan 04 als Beleg, dass die Tokenfolge
@@ -248,10 +251,10 @@ Abgleich der beiden Abnahmekriterien.
 ## Abnahme
 
 - Auf dem 4070 (headless) zeigt `vram_tiers` alle vier Posten als `vram` bei
-  `used ≈ 8.51 GiB` für `CTX=131072`/`native`, `reserve = 1.00 GiB`.
+  `used ≈ 7.69 GiB` für `CTX=131072`/`native`, `reserve = 1.00 GiB`.
 - Bei `CTX=131072` liegt `target_cache` nach Slot-Rundung innerhalb der in
-  [00-reference.md](00-reference.md) hergeleiteten Obergrenze von 11.51 GiB
-  (rund 21–22 Slots). Der Gewinn wird gegen einen echten `main`-Lauf mit
+  [00-reference.md](00-reference.md) hergeleiteten Obergrenze von 10.70 GiB
+  (rund 20 Slots). Der Gewinn wird gegen einen echten `main`-Lauf mit
   identischem `CTX` ausgewiesen; die früher genannten 27.6/14.4 GiB beruhten auf
   der inzwischen korrigierten 64-Token-State-Reserve und sind kein Gate mehr.
 - Künstlich verkleinertes VRAM-Budget (`V4_VRAM_LIMIT_MB`) degradiert stufenweise

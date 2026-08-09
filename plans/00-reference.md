@@ -55,13 +55,17 @@ was nicht gecacht ist,
 wird pro Token von der Platte gestreamt. Jedes freigemachte GiB RAM ist direkt
 mehr resident gehaltene Experten.
 
-Der RTX 4070 liegt dabei ungenutzt daneben: die V4-Engine hat **null**
-GPU-Anbindung. `grep -i cuda c/deepseek_v4.c` ist leer, `c/Makefile.deepseek-v4`
-ruft nur gcc mit `-fopenmp`. CUDA/Vulkan/Metal hängen ausschließlich an
-`c/colibri.c` (GLM-5.2).
+Phase 05 hat die opt-in CUDA-Anbindung für V4 hergestellt: `CUDA=1 V4_VRAM=1`
+spiegelt den Attention-KV und führt Sparse MLA auf der RTX 4070 aus. Phase 06
+nutzt denselben Build nun auch für Dense-FP8. Ohne diese beiden Opt-ins bleibt
+der CPU-Pfad das unveränderte Defaultverhalten.
 
-Dense-Gewichte (6.27 GiB), BF16-Head (0.99 GiB) und DSpark (~1.17 GiB) belegen
-heute RAM, obwohl sie zusammen in 12 GB VRAM passen. **Das ist der Haupthebel.**
+Das Dense-Gesamtinventar (6.267 GiB), der BF16-Head (0.99 GiB) und DSpark
+(~1.17 GiB) belegen vor den GPU-Phasen RAM. Phase 06 hat am echten Checkpoint
+gezeigt, dass davon **5.456 GiB Dense-FP8** verschiebbar sind; 0.810 GiB
+BF16/f32/i64 bleiben auf dem Host. Die verschiebbaren Dense-Tensoren, Head und
+der residente DSpark-Anteil passen zusammen in 12 GB VRAM. **Das ist der
+Haupthebel.**
 
 ## RAM-Bilanz
 
@@ -122,13 +126,14 @@ behält den Host-Fallback; der RAM-Gewinn entsteht erst mit exklusiver
 Device-Eigentümerschaft in Phase 08 und beträgt 0.388 GiB. Der native
 Lightning-Indexer (0.044 GiB bei 128k) bleibt auf der CPU.
 
-Eine Gegenprobe für den theoretischen Endzustand, nachdem Attention-KV, Dense,
-Head und DSpark aus dem RAM verschoben sind, zeigt den verbleibenden Kontextpreis.
-Der CPU-seitige Indexer-KV bleibt dabei abzuziehen:
+Eine Gegenprobe für den theoretischen Endzustand, nachdem Attention-KV, der
+verschiebbare Dense-Anteil, Head und DSpark aus dem RAM verschoben sind, zeigt
+den verbleibenden Kontextpreis. Der CPU-seitige Indexer-KV und die gemessenen
+0.810 GiB nicht-FP8-Dense-Tensoren bleiben dabei abzuziehen:
 
 ```
-CTX=32k:  28.0 − 0.32 Layer − 4.00 State − 0.125 Scratch − 0.011 Index = 23.54 GiB
-CTX=128k: 28.0 − 0.32 Layer − 16.0 State − 0.125 Scratch − 0.044 Index = 11.51 GiB
+CTX=32k:  28.0 − 0.32 Layer − 4.00 State − 0.125 Scratch − 0.011 Index − 0.810 Dense = 22.73 GiB
+CTX=128k: 28.0 − 0.32 Layer − 16.0 State − 0.125 Scratch − 0.044 Index − 0.810 Dense = 10.70 GiB
 ```
 
 Das sind Obergrenzen vor Slot-Rundung, keine Messwerte. 128k kostet im aktuellen
@@ -158,17 +163,19 @@ nutzbar nach Treiberreserve            11.70 GiB
                                        ──────
  = Budget für die Stufen               10.70 GiB
 
-dense fp8          6.27   Phase 6
+dense fp8          5.456  Phase 6 — Checkpoint-Inventur: 5.455 GiB Weights
+                           + 0.001 GiB expandierte Scales; 0.810 GiB sonstige
+                           Dense-Tensoren bleiben im RAM
 head bf16          0.99   Phase 7 — 129280 × 4096 × 2 B = 1.059 GB = 0.986 GiB
 DSpark             0.56   Phase 7 — nur der residente Teil (markov_w1/w2,
                            main_proj_w); die 768-MiB-Marge in der RAM-Reserve
                            deckt Head-/Scratch-Bedarf ab, ist kein VRAM-Tensor
 workspace         ~0.30
                   ─────
-Fixkosten          8.12 GiB   → ~2.6 GiB bleiben für den KV
+Fixkosten          7.31 GiB   → ~3.39 GiB bleiben für den KV
 ```
 
-**Zwei Korrekturen gegenüber einer früheren Fassung, beide nach unten.**
+**Drei Korrekturen gegenüber früheren Fassungen, alle nach unten.**
 
 1. Die **Planner-Reserve aus Plan 08** (`free/8`, geklemmt auf 256 MiB…1 GiB)
    fehlte hier ganz. Auf einer 11.7-GiB-Karte greift der obere Clamp, also volle
@@ -179,8 +186,11 @@ Fixkosten          8.12 GiB   → ~2.6 GiB bleiben für den KV
    1.059 **GB**; eine frühere Doku-Fassung trug daran das falsche GiB-Suffix. In
    Millisekunden gerechnet bleibt 1.059 GB / 45 GB/s ≈ 24 ms (siehe unten); nur
    in einer GiB-Bilanz darf man den Dezimalwert nicht ungeprüft addieren. Gilt
-   für den Head, **nicht** für die 6.27 GiB Dense — die sind echte GiB
-   (nachgerechnet über `coli_v4_layer_plan`).
+   für den Head. Das Dense-Gesamtinventar sind ebenfalls echte 6.267 GiB
+   (nachgerechnet über `coli_v4_layer_plan`), aber nicht alles davon ist FP8.
+3. Die echte Phase-06-Inventur trennt **5.456 GiB verschiebbare FP8-Weights und
+   Scales** von **0.810 GiB BF16/f32/i64**, die auf dem Host bleiben. Die frühere
+   Bilanz behandelte fälschlich alle 6.267 GiB als CUDA-Tensoren.
 
 Der **Attention-KV auf dem Gerät** entscheidet damit die erreichbare
 Kontextlänge. Die bislang hier geführten Gesamt-KV-Zahlen enthielten fälschlich
@@ -189,14 +199,16 @@ hochlädt:
 
 | Kontext | KV f32 | KV `native` | KV turbo3 | passt mit |
 |---|---|---|---|---|
-| 128k | 1.36 | **0.388** | 0.133 | native (~2.19 GiB übrig) |
-| 256k | 2.71 | **0.772** | 0.265 | native (~1.81 GiB übrig) |
-| 512k | 5.42 | **1.54** | 0.529 | native (~1.04 GiB übrig) |
-| 1M | 10.82 | 3.08 ✗ | **1.06** | **nur turbo3** (~1.52 GiB übrig) |
+| 128k | 1.36 | **0.388** | 0.133 | native (~3.01 GiB übrig) |
+| 256k | 2.71 | **0.772** | 0.265 | native (~2.62 GiB übrig) |
+| 512k | 5.42 | **1.54** | 0.529 | native (~1.85 GiB übrig) |
+| 1M | 10.82 | **3.08** | 1.06 | native nominell (~0.31 GiB), turbo3 komfortabel (~2.33 GiB) |
 
-**Damit ist Phase 4 für das 1M-Profil Pflicht, sonst optional.** `native` braucht
-bei 1M 3.08 GiB und bekommt rund 2.58 — es fehlt etwa 0.50 GiB. Bis einschließlich
-512k reicht `native` mit Luft. Der getrennte native Indexer belegt bei 1M weitere
+**Damit ist Phase 4 auch für das 1M-Profil nicht rechnerisch zwingend, aber als
+Sicherheitsmarge empfohlen.** `native` braucht bei 1M 3.08 GiB und bekommt
+nominell rund 3.39 GiB — nur etwa 0.31 GiB Luft, bevor reale Workspace-Spitzen
+oder fremde Belegung eingerechnet sind. Bis einschließlich 512k reicht `native`
+mit deutlich mehr Luft. Der getrennte native Indexer belegt bei 1M weitere
 0.349 GiB RAM, aber kein VRAM.
 
 Vor dem 1M-Profil trotzdem mit `V4_VRAM_LIMIT_MB` (Plan 08) durchspielen, statt
@@ -727,7 +739,7 @@ daraus automatisch Gates. Keine zentrale Liste, kein Merge-Konflikt.
 | 03 | [KV-Codec](03-kv-codec.md) | **natives fp8+bf16/fp4, bit-exakt**, `context_bytes` folgt | **+1.25 GiB** | — |
 | 04 | [TurboQuant](04-turboquant.md) | turbo2/3/4 als verlustbehafteter Tier | +0.27 GiB vor 08; +0.012 danach³ | −2.0 bei 1M |
 | 05 | [CUDA-Attention](05-cuda-attention.md) | `backend_cuda_v4`, Flash-Kernel, Attention-KV-Spiegel | 0 (Host-Shadow) | −0.39 |
-| 06 | [Dense in VRAM](06-dense-vram.md) | fp8-Residenz + Matmuls auf GPU | +6.3 GiB | −6.3 |
+| 06 | [Dense in VRAM](06-dense-vram.md) | fp8-Residenz + Matmuls auf GPU | +5.456 GiB | −5.456 |
 | 07 | [Head und DSpark in VRAM](07-head-dspark-vram.md) | Head-Matvec + Drafter auf GPU | +2.16 GiB | −1.55² |
 | 08 | [VRAM-Planner](08-vram-planner.md) | Stufenplanung, exklusive KV-Eigentümerschaft, 4070-Profil | +0.39 GiB¹ | — |
 | 09 | [Arch / CachyOS](09-arch-cachyos.md) | `omp_tune.h`, THP, CUDA-Pfade | — | — |
@@ -744,8 +756,8 @@ VRAM-Budget oben); die restlichen ~0.61 GiB der DSpark-RAM-Reserve waren Marge f
 Head/Scratch, kein eigener VRAM-Posten.
 ³ Vor 08 komprimiert 04 auch den Host-Shadow. Danach bleibt als RAM-Gewinn nur
 der Indexer (0.044 → 0.032 GiB bei 128k); Attention-KV zahlt im VRAM ein. Bei 1M
-ist 04 **Pflicht**, weil `native` (3.08 GiB) das Budget von ~2.58 GiB sprengt und
-turbo3 (1.06 GiB) nicht. Bis 512k ist 04 optional.
+passt `native` (3.08 GiB) nach der Phase-06-Inventur nominell in das ~3.39-GiB-
+Budget, aber mit nur ~0.31 GiB Marge; turbo3 (1.06 GiB) bleibt dort empfohlen.
 
 Referenzdokumente ohne Nummer: [paper-deepseek-v4.md](paper-deepseek-v4.md) (das
 Paper), [llamacpp-deepseek-v4.md](llamacpp-deepseek-v4.md) (die
