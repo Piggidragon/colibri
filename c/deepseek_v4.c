@@ -860,6 +860,66 @@ uint64_t coli_v4_vram_limit_bytes(uint64_t free_bytes) {
     return free_bytes;
 }
 
+#ifndef COLI_V4_MAX_PIN_SLOTS_PER_LAYER
+#define COLI_V4_MAX_PIN_SLOTS_PER_LAYER 4
+#endif
+
+/* V4_PIN_SLOTS (absolute) and V4_PIN_FRACTION (share of available_pins, the
+ * slots left after minimum_slots) turn the former compile-time ceiling into
+ * a runtime one; the compile-time value (16 on Linux/MSYS2, see
+ * Makefile.deepseek-v4) stays the default when neither is set. If both are
+ * set, V4_PIN_SLOTS wins -- it is applied last. Garbage or out-of-range
+ * input on either falls back to the default, same pattern as
+ * coli_v4_vram_limit_bytes() above; the result is always clamped into
+ * [0, available_pins]. Lives in RESOURCE_PLAN (not the ROWS16 hot-policy
+ * unit that calls it) so it links standalone for tests, same reason
+ * coli_v4_vram_limit_bytes does. */
+int coli_v4_pin_slots_ceiling(int available_pins) {
+    if (available_pins < 0) available_pins = 0;
+    int ceiling = COLI_V4_MAX_PIN_SLOTS_PER_LAYER;
+    const char *frac = getenv("V4_PIN_FRACTION");
+    if (frac && frac[0]) {
+        char *end = NULL;
+        errno = 0;
+        double parsed = strtod(frac, &end);
+        if (!errno && end != frac && !*end && parsed >= 0.0 && parsed <= 1.0)
+            ceiling = (int)(parsed * available_pins + 0.5);
+    }
+    const char *slots = getenv("V4_PIN_SLOTS");
+    if (slots && slots[0]) {
+        char *end = NULL;
+        errno = 0;
+        long parsed = strtol(slots, &end, 10);
+        if (!errno && end != slots && !*end && parsed >= 0 &&
+            parsed <= INT_MAX)
+            ceiling = (int)parsed;
+    }
+    if (ceiling < 0) ceiling = 0;
+    if (ceiling > available_pins) ceiling = available_pins;
+    return ceiling;
+}
+
+#ifndef COLI_V4_PIN_RAMP_REQUESTS
+#define COLI_V4_PIN_RAMP_REQUESTS 0
+#endif
+
+/* V4_PIN_RAMP_REQUESTS overrides the compile-time default; 0 disables the
+ * ramp (every pin is active immediately once history is unseeded). Garbage
+ * or a negative value falls back to the compile-time default, same pattern
+ * as coli_v4_vram_limit_bytes() above. */
+int coli_v4_pin_ramp_requests(void) {
+    const char *setting = getenv("V4_PIN_RAMP_REQUESTS");
+    if (setting && setting[0]) {
+        char *end = NULL;
+        errno = 0;
+        long parsed = strtol(setting, &end, 10);
+        if (!errno && end != setting && !*end && parsed >= 0 &&
+            parsed <= INT_MAX)
+            return (int)parsed;
+    }
+    return COLI_V4_PIN_RAMP_REQUESTS;
+}
+
 int coli_v4_session_state_bytes(int context_tokens, int hc_mult,
                                 int hidden_size, uint64_t *bytes) {
     uint64_t slots, values, one_buffer;
@@ -6843,6 +6903,7 @@ fail:
 typedef struct V4HotPolicy {
     ColiExpertStore *store;
     int pin_count;
+    int ramp_requests;
     uint64_t repin_interval;
     uint64_t *usage;
     uint64_t *layer_requests;
@@ -6993,21 +7054,15 @@ static V4HotPolicy *hot_find(ColiExpertStore *store) {
     return policy;
 }
 
-#ifndef COLI_V4_PIN_RAMP_REQUESTS
-#define COLI_V4_PIN_RAMP_REQUESTS 0
-#endif
-
 static int hot_is_pinned(const V4HotPolicy *policy, int layer, int expert) {
     if (!policy || policy->pin_count < 1) return 0;
     int active = policy->pin_count;
-#if COLI_V4_PIN_RAMP_REQUESTS > 0
-    if (!policy->history_seeded && active > 4) {
+    if (policy->ramp_requests > 0 && !policy->history_seeded && active > 4) {
         uint64_t grown = policy->layer_requests[layer] /
-                         COLI_V4_PIN_RAMP_REQUESTS;
+                         (uint64_t)policy->ramp_requests;
         active = grown >= (uint64_t)(active - 4)
             ? active : 4 + (int)grown;
     }
-#endif
     const int *pins = policy->pins + (size_t)layer * policy->pin_count;
     for (int i = 0; i < active; i++)
         if (pins[i] == expert) return 1;
@@ -7387,12 +7442,8 @@ int COLI_V4_ROWS16_STORE_OPEN(
             direct_io ? "direct-aligned" : "buffered-pread");
     int minimum_slots = state->experts_per_layer < 6
         ? state->experts_per_layer : 6;
-    int maximum_pins = state->slots_per_layer - minimum_slots;
-#ifndef COLI_V4_MAX_PIN_SLOTS_PER_LAYER
-#define COLI_V4_MAX_PIN_SLOTS_PER_LAYER 4
-#endif
-    if (maximum_pins > COLI_V4_MAX_PIN_SLOTS_PER_LAYER)
-        maximum_pins = COLI_V4_MAX_PIN_SLOTS_PER_LAYER;
+    int available_pins = state->slots_per_layer - minimum_slots;
+    int maximum_pins = coli_v4_pin_slots_ceiling(available_pins);
     int pin_requested = options->pin_slots_per_layer;
     /* -1 / 0 => implementation default (use maximum_pins). */
     uint64_t requested = pin_requested > 0
@@ -7420,6 +7471,7 @@ int COLI_V4_ROWS16_STORE_OPEN(
     }
     for (size_t i = 0; i < pins; i++) policy->pins[i] = -1;
     policy->store = *output; policy->pin_count = pin_count;
+    policy->ramp_requests = coli_v4_pin_ramp_requests();
     policy->history_path = hot_history_path(options->model_dir);
     policy->repin_interval = options->repin_interval
         ? options->repin_interval : (uint64_t)minimum_slots;
@@ -7439,8 +7491,10 @@ int COLI_V4_ROWS16_STORE_OPEN(
     pthread_mutex_unlock(&hot_policies_mutex);
     (*output)->ops = &hot_operations;
     fprintf(stderr,
-            "v4_hot_policy pin_slots_per_layer=%d repin_interval=%llu "
-            "mode=resident-ram rows16=hot-pins\n", pin_count,
+            "v4_hot_policy pin_slots_per_layer=%d available_pins=%d "
+            "ramp_requests=%d repin_interval=%llu mode=resident-ram "
+            "rows16=hot-pins\n", pin_count, available_pins,
+            policy->ramp_requests,
             (unsigned long long)policy->repin_interval);
     const char *prewarm = getenv("COLI_V4_PREWARM");
     if (policy->history_seeded && prewarm && atoi(prewarm) != 0 &&

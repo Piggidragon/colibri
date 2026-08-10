@@ -696,6 +696,17 @@ int coli_v4_context_tokens(void);
  * malformed/unset input, leaves `free_bytes` unchanged.  `0` is a valid
  * clamp-down value (not malformed) and forces the result to zero. */
 uint64_t coli_v4_vram_limit_bytes(uint64_t free_bytes);
+/* V4_PIN_SLOTS (absolute) / V4_PIN_FRACTION (share of available_pins) turn
+ * the former COLI_V4_MAX_PIN_SLOTS_PER_LAYER compile-time ceiling into a
+ * runtime one.  V4_PIN_SLOTS wins if both are set.  Result is always
+ * clamped into [0, available_pins]; garbage/out-of-range input on either
+ * knob falls back to the compile-time default. */
+int coli_v4_pin_slots_ceiling(int available_pins);
+/* V4_PIN_RAMP_REQUESTS overrides the compile-time COLI_V4_PIN_RAMP_REQUESTS
+ * default (0 = ramp disabled).  Garbage/negative input falls back to the
+ * compile-time default. */
+int coli_v4_pin_ramp_requests(void);
+
 int coli_v4_session_state_bytes(int context_tokens, int hc_mult,
                                 int hidden_size, uint64_t *bytes);
 int coli_v4_resource_plan_compute(
