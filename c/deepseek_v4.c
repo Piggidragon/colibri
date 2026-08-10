@@ -526,6 +526,11 @@ static int v4_fp8_maybe_pack_rows8(unsigned char *data,
 
 #ifdef COLI_V4_CUDA
 static int v4_layer_cuda_upload(ColiDeepSeekV4LayerWeights *weights) {
+    /* plans/08-vram-planner.md runtime-degrade test: force the failure before
+     * any tensor actually uploads, so the caller's existing
+     * v4_layer_restore_cpu_layout() fallback runs for every layer and the
+     * whole session matches a plain CPU run token-for-token. */
+    if (coli_v4_vram_fail_at() == COLI_V4_VRAM_FAIL_DENSE) return -1;
     for (size_t i = 0; i < weights->plan.tensor_count; i++) {
         ColiDeepSeekV4TensorSpec *weight = &weights->plan.tensors[i];
         if (weight->dtype != COLI_ST_F8_E4M3 || weight->rank != 2) continue;
@@ -840,6 +845,20 @@ int coli_v4_context_tokens(void) {
     return (int)tokens;
 }
 
+uint64_t coli_v4_vram_limit_bytes(uint64_t free_bytes) {
+    const char *setting = getenv("V4_VRAM_LIMIT_MB");
+    if (setting && setting[0]) {
+        char *end = NULL;
+        errno = 0;
+        long parsed = strtol(setting, &end, 10);
+        if (!errno && end != setting && !*end && parsed >= 0) {
+            uint64_t limit = (uint64_t)parsed * MIB;
+            if (limit < free_bytes) return limit;
+        }
+    }
+    return free_bytes;
+}
+
 int coli_v4_session_state_bytes(int context_tokens, int hc_mult,
                                 int hidden_size, uint64_t *bytes) {
     uint64_t slots, values, one_buffer;
@@ -984,6 +1003,71 @@ int coli_v4_resident_tier_plan(
     }
     return 0;
 }
+
+/* Claims `want` bytes from *budget if it fits; VRAM on success, RAM (the
+ * always-legal fallback) otherwise.  Never partially claims a tier -- a tier
+ * that does not fully fit stays off the card entirely, same as the RAM
+ * planner's all-or-nothing dense/head admission above. */
+static ColiV4TierLocation v4_vram_claim(uint64_t *budget, uint64_t want) {
+    if (want <= *budget) {
+        *budget -= want;
+        return COLI_V4_TIER_VRAM;
+    }
+    return COLI_V4_TIER_RAM;
+}
+
+int coli_v4_vram_tier_plan(
+    ColiV4VramTierPlan *plan, const ColiV4VramTierInputs *inputs,
+    char *error, size_t error_size) {
+    if (!plan || !inputs)
+        return plan_error(error, error_size, "invalid V4 VRAM-tier inputs");
+    memset(plan, 0, sizeof(*plan));
+    plan->kv = plan->dense = plan->head = plan->dspark = COLI_V4_TIER_RAM;
+    uint64_t budget;
+    if (inputs->vram_reserve_bytes >= inputs->vram_available_bytes)
+        budget = 0;
+    else
+        budget = inputs->vram_available_bytes - inputs->vram_reserve_bytes;
+
+    plan->kv = v4_vram_claim(&budget, inputs->kv_bytes);
+    plan->dense = v4_vram_claim(&budget, inputs->dense_bytes);
+    plan->head = v4_vram_claim(&budget, inputs->head_bytes);
+    /* Coupling invariant (plan 07): a drafter without a resident head loses
+     * its context injection path, so DSpark can never outrank the head it
+     * depends on -- if the head fell back to RAM/host, DSpark must too,
+     * regardless of whether its own bytes would otherwise fit. */
+    plan->dspark = (inputs->dspark_wanted && plan->head == COLI_V4_TIER_VRAM)
+        ? v4_vram_claim(&budget, inputs->dspark_bytes)
+        : COLI_V4_TIER_RAM;
+
+    uint64_t used = 0;
+    if (plan->kv == COLI_V4_TIER_VRAM) used += inputs->kv_bytes;
+    if (plan->dense == COLI_V4_TIER_VRAM) used += inputs->dense_bytes;
+    if (plan->head == COLI_V4_TIER_VRAM) used += inputs->head_bytes;
+    if (plan->dspark == COLI_V4_TIER_VRAM) used += inputs->dspark_bytes;
+    plan->vram_used_bytes = used;
+    return 0;
+}
+
+/* Read by coli_v4_window_attention_create (all three ATTENTION copies) so a
+ * device KV mirror is only attempted when the plan actually budgeted for it;
+ * set once per engine open in EXPERT_STORE_AUTO, next to where the plan is
+ * computed.  Plain global rather than a ColiV4Engine field because that
+ * function takes only a config, not an engine (see plans/08-vram-planner.md,
+ * Commit 1, and the identical coli_v4_full_dspark_wanted precedent below). */
+int coli_v4_kv_vram_enabled = 0;
+
+#ifdef COLI_V4_TEST_HOOKS
+ColiV4VramFailStage coli_v4_vram_fail_at(void) {
+    const char *setting = getenv("V4_VRAM_FAIL_AT");
+    if (!setting) return COLI_V4_VRAM_FAIL_NONE;
+    if (!strcmp(setting, "kv")) return COLI_V4_VRAM_FAIL_KV;
+    if (!strcmp(setting, "dense")) return COLI_V4_VRAM_FAIL_DENSE;
+    if (!strcmp(setting, "head")) return COLI_V4_VRAM_FAIL_HEAD;
+    if (!strcmp(setting, "dspark")) return COLI_V4_VRAM_FAIL_DSPARK;
+    return COLI_V4_VRAM_FAIL_NONE;
+}
+#endif
 #endif /* COLI_V4_UNIT_RESOURCE_PLAN */
 
 #ifdef COLI_V4_UNIT_HEAD_CACHE
@@ -1041,7 +1125,11 @@ int coli_v4_head_cache_load(ColiV4Engine *engine, const char *model_dir,
         enum { CHUNK = 32 * 1024 * 1024 };
         size_t chunk = head->nbytes < CHUNK ? (size_t)head->nbytes : CHUNK;
         unsigned char *buffer = malloc(chunk);
-        void *resident = buffer ? v4_cuda_kv_alloc((size_t)head->nbytes) : NULL;
+        /* plans/08-vram-planner.md runtime-degrade test: same effect as a
+         * real allocation failure -- the caller already retries with a host
+         * head (coli_v4_expert_store_open_planned's load > 0 branch). */
+        void *resident = buffer && coli_v4_vram_fail_at() != COLI_V4_VRAM_FAIL_HEAD
+            ? v4_cuda_kv_alloc((size_t)head->nbytes) : NULL;
         int failed = !resident;
         for (uint64_t offset = 0; !failed && offset < (uint64_t)head->nbytes;) {
             size_t bytes = (uint64_t)head->nbytes - offset < chunk
@@ -1153,6 +1241,7 @@ int coli_st_read_at_engine(ColiV4Engine *engine,
 #define GIB UINT64_C(1073741824)
 
 extern int coli_v4_full_dspark_wanted;
+extern int coli_v4_kv_vram_enabled;
 
 static uint64_t expert_record_bytes(const ColiSafetensorsIndex *index) {
     static const char *parts[] = {
@@ -1381,19 +1470,32 @@ int coli_v4_expert_store_open_planned(
     tier_inputs.dense_device_bytes =
         dense.fp8_weight_bytes + dense.fp8_scale_bytes;
     tier_inputs.minimum_expert_bytes = plan.minimum_expert_bytes;
+    runtime->kv_vram_enabled = 0;
+    uint64_t base_vram_reserve = 0, kv_device_bytes = 0, dspark_bytes = 0;
+    int dspark_wanted = coli_v4_full_dspark_wanted && runtime->vram_enabled;
 #ifdef COLI_V4_CUDA
-    uint64_t dspark_device_bytes = coli_v4_full_dspark_wanted &&
-        runtime->vram_enabled
-        ? v4_dspark_device_backbone_bytes(&engine->config) : 0;
     tier_inputs.vram_enabled = runtime->vram_enabled;
     tier_inputs.vram_available_bytes = runtime->vram_enabled
-        ? v4_cuda_free_bytes() : 0;
-    tier_inputs.vram_reserve_bytes = runtime->vram_enabled
-        ? v4_cuda_reserve_bytes(tier_inputs.vram_available_bytes) : 0;
-    if (tier_inputs.vram_reserve_bytes > UINT64_MAX - dspark_device_bytes)
+        ? coli_v4_vram_limit_bytes(v4_cuda_free_bytes()) : 0;
+    if (runtime->vram_enabled) {
+        base_vram_reserve = v4_cuda_reserve_bytes(tier_inputs.vram_available_bytes);
+        int kv_context = runtime->context_tokens;
+        if (kv_context > engine->config.max_position_embeddings)
+            kv_context = engine->config.max_position_embeddings;
+        kv_device_bytes = coli_v4_kv_device_bytes(
+            engine->config.num_hidden_layers, engine->config.sliding_window,
+            engine->config.head_dim, engine->config.qk_rope_head_dim,
+            engine->config.compress_ratios, kv_context, runtime->kv_codec);
+    }
+    /* plans/08-vram-planner.md priority is KV > dense > head > dspark: KV's
+     * device budget must be reserved before dense is admitted, or a large
+     * dense tier can starve every session's attention-KV mirror the way the
+     * pre-08 dspark-only reservation used to (dspark outranked dense there,
+     * backwards from the plan). */
+    if (base_vram_reserve > UINT64_MAX - kv_device_bytes)
         tier_inputs.vram_reserve_bytes = UINT64_MAX;
     else
-        tier_inputs.vram_reserve_bytes += dspark_device_bytes;
+        tier_inputs.vram_reserve_bytes = base_vram_reserve + kv_device_bytes;
 #endif
     if (coli_v4_resident_tier_plan(&tiers, &tier_inputs,
                                    error, error_size)) return -1;
@@ -1408,17 +1510,26 @@ int coli_v4_expert_store_open_planned(
                             dense_bytes;
     int requested_head = -1;
     int head_device = 0;
+    ColiV4VramTierPlan vram_plan;
+    vram_plan.kv = vram_plan.dense = vram_plan.head = vram_plan.dspark =
+        COLI_V4_TIER_RAM;
+    vram_plan.vram_used_bytes = 0;
 #ifdef COLI_V4_CUDA
-    /* Dense has not been uploaded yet.  Admit the head only if its allocation
-     * leaves the already-approved dense tier, lazy DSpark backbone, and
-     * Phase-06 reserve intact. */
-    uint64_t device_claim = tiers.dense_device_bytes;
-    if (runtime->vram_enabled && device_claim <= tier_inputs.vram_available_bytes &&
-        tier_inputs.vram_reserve_bytes <=
-            tier_inputs.vram_available_bytes - device_claim &&
-        head_bytes <= tier_inputs.vram_available_bytes - device_claim -
-                      tier_inputs.vram_reserve_bytes)
-        head_device = 1;
+    /* Dense has already been decided above (coli_v4_resident_tier_plan, fed
+     * the same reserve); this call only settles head and dspark against
+     * whatever budget dense left behind, in that priority order. */
+    dspark_bytes = dspark_wanted
+        ? v4_dspark_device_backbone_bytes(&engine->config) : 0;
+    ColiV4VramTierInputs vram_inputs = {
+        tier_inputs.vram_available_bytes, base_vram_reserve, kv_device_bytes,
+        tiers.dense_device_bytes, head_bytes, dspark_bytes, dspark_wanted,
+    };
+    if (coli_v4_vram_tier_plan(&vram_plan, &vram_inputs, error, error_size))
+        return -1;
+    runtime->kv_vram_enabled = runtime->vram_enabled &&
+        vram_plan.kv == COLI_V4_TIER_VRAM;
+    coli_v4_kv_vram_enabled = runtime->kv_vram_enabled;
+    head_device = runtime->vram_enabled && vram_plan.head == COLI_V4_TIER_VRAM;
 #endif
     int resident_head = head_device ||
         safe_payload >= plan.minimum_expert_bytes + head_bytes + 256 * MIB;
@@ -1483,9 +1594,21 @@ int coli_v4_expert_store_open_planned(
         plan.expert_cache_bytes / (double)GIB,
         head_device ? "vram-bf16" :
         (resident_head ? "resident-bf16" : "streamed-bf16"),
-        coli_v4_full_dspark_wanted && runtime->vram_enabled ? "vram-lazy" :
+        dspark_wanted && vram_plan.dspark == COLI_V4_TIER_VRAM ? "vram-lazy" :
         (coli_v4_full_dspark_wanted ? "ram-lazy" : "off"),
         plan.projected_bytes / (double)GIB);
+    fprintf(stderr,
+        "vram_tiers free=%.2fGiB reserve=%.2fGiB kv=%s(%.2fGiB) "
+        "dense=%s(%.2fGiB) head=%s(%.2fGiB) dspark=%s(%.2fGiB) used=%.2fGiB\n",
+        tier_inputs.vram_available_bytes / (double)GIB,
+        base_vram_reserve / (double)GIB,
+        runtime->kv_vram_enabled ? "vram" : "ram", kv_device_bytes / (double)GIB,
+        tiers.dense_location == COLI_V4_DENSE_VRAM ? "vram" : "ram",
+        tiers.dense_device_bytes / (double)GIB,
+        head_device ? "vram" : "ram", head_bytes / (double)GIB,
+        dspark_wanted && vram_plan.dspark == COLI_V4_TIER_VRAM ? "vram" : "ram",
+        dspark_bytes / (double)GIB,
+        vram_plan.vram_used_bytes / (double)GIB);
     ColiDeepSeekV4ExpertStoreOptions automatic = *options;
     automatic.cache_bytes = plan.expert_cache_bytes;
     automatic.pin_slots_per_layer = runtime->pin_slots_per_layer;
@@ -2102,7 +2225,14 @@ int coli_v4_window_attention_create(ColiDeepSeekV4WindowAttentionState **output,
         return -1;
     }
 #ifdef COLI_V4_CUDA
-    if (v4_cuda_ready()) {
+    /* plans/08-vram-planner.md: the plan, not the bare v4_cuda_ready() check
+     * phase 05 shipped with, decides whether a device mirror was budgeted --
+     * otherwise dense/head/dspark's earlier claims could silently starve
+     * every session's KV mirror instead of it getting the share the planner
+     * reserved for it. */
+    extern int coli_v4_kv_vram_enabled;
+    if (v4_cuda_ready() && coli_v4_kv_vram_enabled &&
+        coli_v4_vram_fail_at() != COLI_V4_VRAM_FAIL_KV) {
         (*output)->kv_device = v4_cuda_kv_alloc(
             (size_t)config->sliding_window * row_bytes);
         if (!(*output)->kv_device)
@@ -2586,7 +2716,14 @@ int coli_v4_window_attention_create(ColiDeepSeekV4WindowAttentionState **output,
         return -1;
     }
 #ifdef COLI_V4_CUDA
-    if (v4_cuda_ready()) {
+    /* plans/08-vram-planner.md: the plan, not the bare v4_cuda_ready() check
+     * phase 05 shipped with, decides whether a device mirror was budgeted --
+     * otherwise dense/head/dspark's earlier claims could silently starve
+     * every session's KV mirror instead of it getting the share the planner
+     * reserved for it. */
+    extern int coli_v4_kv_vram_enabled;
+    if (v4_cuda_ready() && coli_v4_kv_vram_enabled &&
+        coli_v4_vram_fail_at() != COLI_V4_VRAM_FAIL_KV) {
         (*output)->kv_device = v4_cuda_kv_alloc(
             (size_t)config->sliding_window * row_bytes);
         if (!(*output)->kv_device)
@@ -5729,7 +5866,14 @@ int coli_v4_window_attention_create(ColiDeepSeekV4WindowAttentionState **output,
         return -1;
     }
 #ifdef COLI_V4_CUDA
-    if (v4_cuda_ready()) {
+    /* plans/08-vram-planner.md: the plan, not the bare v4_cuda_ready() check
+     * phase 05 shipped with, decides whether a device mirror was budgeted --
+     * otherwise dense/head/dspark's earlier claims could silently starve
+     * every session's KV mirror instead of it getting the share the planner
+     * reserved for it. */
+    extern int coli_v4_kv_vram_enabled;
+    if (v4_cuda_ready() && coli_v4_kv_vram_enabled &&
+        coli_v4_vram_fail_at() != COLI_V4_VRAM_FAIL_KV) {
         (*output)->kv_device = v4_cuda_kv_alloc(
             (size_t)config->sliding_window * row_bytes);
         if (!(*output)->kv_device)
@@ -11959,6 +12103,27 @@ uint64_t coli_v4_kv_context_bytes(
                 return UINT64_MAX;
             total += compressed * index_row;
         }
+    }
+    return total;
+}
+
+uint64_t coli_v4_kv_device_bytes(
+    int layers, int sliding_window, int head_dim, int rope_dim,
+    const int *compress_ratios, int context, ColiV4KVCodec codec) {
+    if (layers < 1 || sliding_window < 1 || !compress_ratios || context < 1)
+        return UINT64_MAX;
+    size_t kv_row = coli_v4_kv_row_bytes(codec, COLI_V4_KV_MAIN, head_dim, rope_dim);
+    if (!kv_row) return UINT64_MAX;
+    uint64_t window_rows = (uint64_t)layers * (uint64_t)sliding_window;
+    if (window_rows > UINT64_MAX / kv_row) return UINT64_MAX;
+    uint64_t total = window_rows * kv_row;
+    for (int layer = 0; layer < layers; layer++) {
+        int ratio = compress_ratios[layer];
+        if (!ratio) continue;
+        uint64_t compressed = ((uint64_t)context + (uint64_t)ratio - 1) /
+                              (uint64_t)ratio;
+        if (compressed > (UINT64_MAX - total) / kv_row) return UINT64_MAX;
+        total += compressed * kv_row;
     }
     return total;
 }

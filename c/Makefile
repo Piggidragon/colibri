@@ -1036,6 +1036,14 @@ tests/test_v4_dense_tier$(EXE): tests/test_v4_dense_tier.c \
 		$(V4_DENSE_TIER_DIR)/resource_plan.o
 	$(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS)
 
+tests/test_v4_vram_tier$(EXE): tests/test_v4_vram_tier.c \
+		$(V4_DENSE_TIER_DIR)/resource_plan.o
+	$(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS)
+
+tests/test_v4_tier_feedback$(EXE): tests/test_v4_tier_feedback.c \
+		$(V4_DENSE_TIER_DIR)/resource_plan.o
+	$(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS)
+
 endif
 
 tests/test_route_trace$(EXE): tests/test_route_trace.c route_trace.h

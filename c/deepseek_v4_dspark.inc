@@ -499,6 +499,12 @@ static void v4_ds_release_all(void) {
 /* Dimensions vary by stage but are identical across its eight matrices. */
 static int v4_ds_gpu_upload(const ColiDeepSeekV4Config *config) {
     if (!g_v4ds_gpu_prepare) return 0;
+    /* plans/08-vram-planner.md runtime-degrade test: v4_ds_load_all already
+     * treats a false return as an upload failure and disables the drafter
+     * for the rest of the run -- exact target verification means every
+     * token still matches a plain CPU/no-drafter run, just without the
+     * speculative speedup. */
+    if (coli_v4_vram_fail_at() == COLI_V4_VRAM_FAIL_DSPARK) return 0;
     V4_DS_UPLOAD(&g_v4ds_core, main_proj, g_v4ds_core.main_proj_rows,
                  g_v4ds_core.main_proj_cols);
     for (int i = 0; i < V4_DSPARK_STAGES; i++) {
