@@ -56,6 +56,15 @@ class DeepSeekV4DSparkSourceTest(unittest.TestCase):
         self.assertIn("static int v4_ds_pack_rows8(", self.drafter)
         self.assertIn("view->block_rows = 8", self.drafter)
 
+    def test_full_reserve_is_the_same_in_both_placement_modes(self):
+        start = self.engine.index("static uint64_t v4_dspark_full_reserve_bytes")
+        body = self.engine[start:self.engine.index("\n}", start)]
+        # The upload is transactional, so the host peak is mode-independent;
+        # a VRAM-mode discount would be borrowed from the target cache.
+        self.assertIn("(void)gpu_resident;", body)
+        self.assertIn("768.0 * 1024.0 * 1024.0", body)
+        self.assertNotIn("if (gpu_resident)", body)
+
     def test_cuda_matvec_quantizes_the_activation_like_the_reference(self):
         start = self.drafter.index("static int v4_ds_mm(")
         end = self.drafter.index("static int v4_ds_core_load(", start)
