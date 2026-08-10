@@ -8,6 +8,74 @@ Voraussetzung: [00-reference.md](00-reference.md)
 3. `build: find the CUDA toolkit at Arch's /opt/cuda`
 4. `docs: Arch/CachyOS notes in the tuning profile`
 
+## Ergebnis Commit 1 (PR #11)
+
+Commit 1 ist gebaut und grün; **Commit 2–4 und 1b bleiben offen.**
+
+`coli_omp_tune_threads("deepseek_v4")` hängt an allen drei Einsprungpunkten des
+`GENERATE_STATS`-Units: produktives `main`, `v4_serve_main` (an dem `SERVE=1` am
+ersten vorbeigeht) und das Legacy-`main` des First-Token-Tools. Der Include steht
+**vor** `#define main coli_v4_first_token_legacy_main` — dahinter würde die
+Umbenennung durch den Header laufen. Auf der Zielmaschine meldet er
+
+```
+[OMP] deepseek_v4: 10 physical-core threads instead of 16 logical CPUs
+```
+
+`OMP_NUM_THREADS` und `COLI_NO_OMP_TUNE` unterdrücken ihn beide, wie der Header
+zusichert. Damit ist die Hybrid-Blindheit aus dem Abschnitt unten **gemessen
+bestätigt**: 6 P + 4 E ergeben 10, nicht 6.
+
+### Die Messung ist ein Nullergebnis
+
+Gemessen am 2026-08-10, `bench_v4.py --profile short --cache-state warm
+--ctx 32768 --ram-gb 24 --scratch-mb 128 --max-tokens 24`, verschränkt
+16/10/16/10 gegen Drift:
+
+| Threads | prefill | decode | TTFT |
+|---|---:|---:|---:|
+| 16 | 0.62 tok/s | 0.14 tok/s | 697.65 s |
+| 10 | 0.65 | 0.14 | 663.66 |
+| 16 | 0.67 | 0.14 | 646.50 |
+| 10 | 0.63 | 0.11 | 689.55 |
+
+Mittel: 16 → prefill 0.645, TTFT 672.1 s; 10 → 0.640 und 676.6 s. Das sind
+−0.8 % und +0.7 % — **und die Streuung innerhalb einer Konfiguration ist zehnmal
+größer als der Unterschied zwischen ihnen** (TTFT bei 16 Threads 646.50–697.65 s
+= 7.9 %). Der Decode-Ausreißer 0.11 gegen dreimal 0.14 ist bei n=2 nicht
+interpretierbar; die Daten schließen weder einen kleinen Gewinn noch eine kleine
+Regression aus.
+
+**Der Grund steht in derselben Zeile:** `disk=1.69GB/token`,
+`expert_hit=50.9%`. Bei 0.14 tok/s dauert ein Token ~7 s, und die gehen für
+1.69 GB Expertengewichte von der NVMe drauf. Die Teamgröße wirkt auf Compute,
+und Compute ist in diesem Regime nicht der Engpass. Die +2.3× aus `#718` wurden
+auf einem Zen3-5950X gemessen — SMT-lastig und rechengebunden, also das
+Gegenteil. Sie waren nie eine Zusage, und hier tragen sie nicht.
+
+**Commit 1 wird trotzdem übernommen**, weil er risikoarm ist (rät nie,
+respektiert beide Overrides) und V4 mit den drei anderen Motoren gleichzieht —
+nicht, weil ein Gewinn belegt wäre. Er ist es nicht.
+
+### Zwei Funde für die Folgecommits
+
+- **`bench_v4.py` maskiert dieses Tuning.** Es setzt `OMP_NUM_THREADS`
+  bedingungslos auf `--omp-threads` (Default `os.cpu_count()`), und genau darauf
+  steigt `coli_omp_tune_threads` aus. Der Harness aus Plan 01 hätte den neuen
+  Pfad nie gemessen; das A/B oben lief deshalb über `--omp-threads 16` gegen
+  `--omp-threads 10`, was dasselbe bewirkt. Commit 4 sollte den Harness einen
+  „nicht setzen"-Modus bekommen lassen, sonst bleibt die Default-Konfiguration
+  unmessbar.
+- **`--ram-gb 28` kippt im CPU-Build in den OOM-Killer** (`engine exited with
+  -9`, Planner projizierte 27.87 GiB). Das dokumentierte 32-GiB-Profil aus
+  `docs/deepseek-v4-tuning-32gb.md` setzt die 5.456 GiB Dense auf der Karte
+  voraus; ohne `CUDA=1 V4_VRAM=1` bleiben sie im RAM. Deshalb die 24 GiB oben —
+  und deshalb liegen die absoluten Zahlen unter Phase 07 (15 statt 30 Slots).
+
+**Die eigentliche Abnahme steht weiter aus.** Sie verlangt den Dreiervergleich
+16 / 10 / nur-6-P-Cores, und die dritte Konfiguration ist ohne Commit 1b gar
+nicht fahrbar. Die Tabelle mit den P-Äquivalenten unten bleibt eine Abschätzung.
+
 ## Vorbemerkung zur Messbarkeit
 
 Die Codefunde unten sind maschinenunabhängig und verifiziert. Die *Systemwerte*

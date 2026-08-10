@@ -72,7 +72,7 @@ und nicht wiederholen.
 | 06 | [Dense in VRAM](plans/06-dense-vram.md) | fertig (#8) |
 | 07 | [Head und DSpark in VRAM](plans/07-head-dspark-vram.md) | fertig (#9) |
 | 08 | [VRAM-Planner](plans/08-vram-planner.md) | offen |
-| 09 | [Arch / CachyOS](plans/09-arch-cachyos.md) | offen |
+| 09 | [Arch / CachyOS](plans/09-arch-cachyos.md) | Commit 1 fertig (#11), Rest offen |
 | 10 | [Dual-Streaming](plans/10-dual-streaming.md) | offen |
 | 11 | [Rückbau auf V4](plans/11-strip-to-v4.md) | offen, **zuletzt** |
 | 12 | [Expert-Cache-Politik](plans/12-expert-cache-policy.md) | offen |
@@ -88,10 +88,11 @@ Referenzdokumente ohne Nummer:
 
 Die Nummern sind Kennungen, keine Reihenfolge. So wird gearbeitet:
 
-**Stand:** 01–07 sind fertig, als nächstes steht **08** an. Die Tabelle unten ist
-die ursprüngliche Empfehlung und wurde nicht buchstäblich befolgt: 09 Commit 1+1b
-und 12 wurden übersprungen, dafür lief 02 → 05 → 06 → 07 am Stück durch, und 04
-kam vor 07 statt danach. Für den Rest gilt sie unverändert.
+**Stand:** 01–07 sind fertig, dazu **09 Commit 1** nachgeholt (ohne belegten
+Gewinn, siehe dessen Ergebnisblock). Als nächstes steht **08** an. Die Tabelle
+unten ist die ursprüngliche Empfehlung und wurde nicht buchstäblich befolgt: 12
+wurde übersprungen, dafür lief 02 → 05 → 06 → 07 am Stück durch, und 04 kam vor
+07 statt danach. Für den Rest gilt sie unverändert.
 
 | Schritt | Plan | Warum hier |
 |---|---|---|

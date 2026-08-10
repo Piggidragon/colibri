@@ -7966,6 +7966,11 @@ int coli_v4_prompt_build(char **output, size_t *output_length,
 #include <sys/resource.h>                         /* getrusage/RUSAGE_SELF for v4_serve_rss_gb;
                                                    * on Windows compat.h supplies the shim. */
 #endif
+#ifdef _OPENMP
+#include <omp.h>   /* omp_set_num_threads/omp_get_max_threads for omp_tune.h */
+#endif
+/* Ahead of the `#define main` below: the header must not be rewritten by it. */
+#include "omp_tune.h"
 
 #define main coli_v4_first_token_legacy_main
 /* ---- begin include tools/deepseek_v4_first_token.c ---- */
@@ -8275,6 +8280,7 @@ static int has_sentence_end(const char *text, int length) {
 }
 
 int main(int argc, char **argv) {
+    coli_omp_tune_threads("deepseek_v4");   /* team on physical cores: see omp_tune.h */
     if (argc < 3 || argc > 6) {
         fprintf(stderr, "usage: %s MODEL_DIR INPUT_TOKEN_ID [TOKEN_COUNT]\n"
                         "       %s MODEL_DIR --prompt TEXT [MAX_NEW_TOKENS] [--stop-sentence]\n",
@@ -9800,6 +9806,7 @@ static void v4_serve_one(ColiV4Engine *engine, ColiV4Session *session,
 }
 
 static int v4_serve_main(void) {
+    coli_omp_tune_threads("deepseek_v4");   /* team on physical cores: see omp_tune.h */
     const char *model_dir = getenv("SNAP");
     if (!model_dir || !*model_dir) {
         fprintf(stderr, "set SNAP=<DeepSeek V4 model directory>\n");
@@ -9863,6 +9870,7 @@ static int v4_serve_main(void) {
 int main(int argc, char **argv) {
     if (getenv("SERVE") && getenv("SERVE")[0] == '1')
         return v4_serve_main();
+    coli_omp_tune_threads("deepseek_v4");   /* team on physical cores: see omp_tune.h */
     double process_started = spec_now();
     int result = 1;
     V4CliOptions cli;
