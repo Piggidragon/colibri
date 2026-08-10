@@ -6,14 +6,20 @@
 
 | Doc | Source of truth | What to scan for |
 |---|---|---|
-| `ENVIRONMENT.md` | `c/glm.c` (and other `c/*.c`) | every `getenv("...")` call — the default and the trailing `/* comment */` |
+| `ENVIRONMENT.md` | `c/colibri.c` (and the other `c/*.c`) | every `getenv("...")` call — the default and the trailing `/* comment */` |
 | `SETTINGS.md` | `c/coli`, `c/openai_server.py` | every `add_parser(...)` and `add_argument(...)` |
+
+The main engine source is `c/colibri.c`; it was called `c/glm.c` before the #391
+rename, and older revisions of this file still say so.
 
 Nothing else defines these. If a knob isn't at one of those call sites, it isn't real.
 
 ## Step 1 — extract the current state
 
-Run against the commit you're documenting (use `upstream/dev`, not a local branch):
+Run against the commit you're documenting. The commands below say `upstream/dev`,
+which is the upstream repository's integration branch — a fork that only has
+`origin` should substitute its own ref (`origin/main` here) or drop the ref to
+scan the working tree.
 
 ```bash
 cd <repo>
@@ -38,10 +44,11 @@ git grep -hoE '(compat_)?getenv(_utf8)?\("[A-Z0-9_]+"' upstream/dev -- 'c/*.c' '
   | grep -oE '"[A-Z0-9_]+"' | tr -d '"' | sort -u | wc -l
 ```
 
-**Which engine reads it matters.** There are four binaries (`colibri`,
-`kimi_k3`, `inkling`, `olmoe`) and they do NOT share a knob set -- `K3_*` is
-kimi_k3-only, `INK_*` is inkling-only, and a variable set for the wrong engine
-is silently ignored. Record the owner when you add a row:
+**Which engine reads it matters.** There are five binaries (`colibri`,
+`deepseek_v4`, `kimi_k3`, `inkling`, `olmoe`) and they do NOT share a knob set --
+`K3_*` is kimi_k3-only, `INK_*` is inkling-only, `V4_*`/`COLI_V4_*` is
+deepseek_v4-only, and a variable set for the wrong engine is silently ignored.
+Record the owner when you add a row:
 
 ```bash
 # who reads $V ?
@@ -77,7 +84,7 @@ doc, not variables. Only a name that no program reads should actually go.
 
 Paste the Step-1 output to Claude with a prompt like:
 
-> Here are all the `getenv()` sites in `c/glm.c` at commit `<hash>`, and the current `ENVIRONMENT.md`.
+> Here are all the `getenv()` sites in `c/colibri.c` at commit `<hash>`, and the current `ENVIRONMENT.md`.
 > For each variable: confirm the **default** and **effect** from the code (the ternary default and the `/* comment */`).
 > Update the tables in place — keep the existing grouping (Common / Performance / CUDA / Advanced / Set-by-CLI), add any new variables to the right group, remove any that no longer exist, and fix any default that changed.
 > Do **not** invent behavior: if the comment is thin, describe only what the code literally does. Update the "Generated from" hash to `<hash>`.
@@ -98,4 +105,8 @@ Rules that keep it honest:
 
 ## Cadence
 
-Refresh when: a release is cut, or `git grep -c 'getenv(' c/glm.c` changes, or someone reports a knob that isn't documented. A one-line CI check (compare the code-var count to a committed number) can flag drift automatically.
+Refresh when: a release is cut, or `git grep -c 'getenv(' c/colibri.c` changes, or someone reports a knob that isn't documented. A one-line CI check (compare the code-var count to a committed number) can flag drift automatically.
+
+**Known drift in this fork:** `ENVIRONMENT.md` still carries `dev @ 7fb1159`, and
+the inherited `V4_MTP*`, `V4_DRAFT`, `V4_NGRAM`, `V4_PREFIX_LOG` and `COLI_V4_*`
+knobs have never been documented, although `deepseek_v4` reads all of them.

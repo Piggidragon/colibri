@@ -229,7 +229,7 @@ stattdessen spezialisierte Kernel. Kein Heap und kein kontextgroßer f32-Puffer.
 
 ## RoPE-Schwanz
 
-Dims 448–511 sind der RoPE-rotierte Teil ([c/deepseek_v4.c:1652](../c/deepseek_v4.c)):
+Dims 448–511 sind der RoPE-rotierte Teil ([c/deepseek_v4.c:2342](../c/deepseek_v4.c)):
 
 ```c
 float *kv_rope = kv + head_dim - rope_dim;      /* rope_dim = 64 */
@@ -276,7 +276,7 @@ zurückzudrehen:
    Pfad aus Plan 03 bleibt das Referenzorakel.
 3. Der spezialisierte Pfad akkumuliert im rotierten Raum.
 4. **Eine** inverse WHT auf `head_output`, *danach* `coli_bf16_round`, *danach* das
-   RoPE-Inverse ([:1720](../c/deepseek_v4.c)).
+   RoPE-Inverse ([:2423](../c/deepseek_v4.c)).
 
 Die Reihenfolge in 4 ist zwingend: `coli_v4_rope_apply(..., 1)` adressiert konkrete
 Dimensionen und braucht den Originalraum.
@@ -332,4 +332,4 @@ greift der f32-Fallback, das ist der Punkt: der Test belegt, dass er greift.
   nicht als Default anbieten.
 - **`_Float16`-Verfügbarkeit** variiert über die unterstützten Targets
   (x86-64 und aarch64, gcc). Wenn nicht verfügbar: eigene Bit-Manipulation, wie
-  `coli_e4m3fn_encode` ([c/deepseek_v4.c:9999](../c/deepseek_v4.c)) es für fp8 vormacht.
+  `coli_e4m3fn_encode` ([c/deepseek_v4.c:11376](../c/deepseek_v4.c)) es für fp8 vormacht.

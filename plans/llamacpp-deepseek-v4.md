@@ -83,7 +83,7 @@ inner loop.
 
 **Relevanz:** colibris `coli_v4_indexer_step` ist eine skalare Schleife über alle
 `state->count` Kandidaten mit `qsort` am Ende
-([c/deepseek_v4.c:2827](../c/deepseek_v4.c)). Bei 1M Kontext sind das 250k
+([c/deepseek_v4.c:3604](../c/deepseek_v4.c)). Bei 1M Kontext sind das 250k
 Kandidaten × 64 Heads × 128 Dims **pro Token und pro CSA-Layer**. Das ist neben
 den HCA-Layern der zweite große Posten — und der llama.cpp-Kernel ist eine
 direkte Vorlage. Gehört zu [05-cuda-attention.md](05-cuda-attention.md).

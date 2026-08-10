@@ -30,16 +30,16 @@ niemand für dieses Setup eingestellt hat.
 
 ## Commit 1 — Die Pin-Obergrenze
 
-`V4HotPolicy` ([c/deepseek_v4.c:5446](../c/deepseek_v4.c)) pinnt Experten nach
+`V4HotPolicy` ([c/deepseek_v4.c:6688](../c/deepseek_v4.c)) pinnt Experten nach
 gemessener Nutzungshäufigkeit, mit persistierter Historie in
 `<model_dir>/.coli_usage`:
 
 | Knopf | Wo | Heute |
 |---|---|---|
 | `COLI_V4_AUTOPIN` | [:6030](../c/deepseek_v4.c) | an, sofern nicht `0` |
-| `COLI_V4_SAVE_USAGE` | [:5546](../c/deepseek_v4.c) | schreibt die Historie zurück |
-| `COLI_V4_PREWARM` | [:6048](../c/deepseek_v4.c) | wärmt den Cache aus der Historie |
-| `history_seeded` | [:6035](../c/deepseek_v4.c) | erst ab **5000** beobachteten Requests |
+| `COLI_V4_SAVE_USAGE` | [:6788](../c/deepseek_v4.c) | schreibt die Historie zurück |
+| `COLI_V4_PREWARM` | [:7290](../c/deepseek_v4.c) | wärmt den Cache aus der Historie |
+| `history_seeded` | [:7277](../c/deepseek_v4.c) | erst ab **5000** beobachteten Requests |
 
 **Der Deckel ist eine Compile-Zeit-Konstante** ([:5994](../c/deepseek_v4.c)):
 
@@ -92,7 +92,7 @@ Erstinbetriebnahme-Hinweis — sonst wundert man sich, warum Pinning „nichts t
 ## Commit 2 — Die Indexer-Bewertungsschleife
 
 `coli_v4_indexer_step` steht **zweimal** im Amalgam
-([c/deepseek_v4.c:2827](../c/deepseek_v4.c) und [:4390](../c/deepseek_v4.c), Units
+([c/deepseek_v4.c:3604](../c/deepseek_v4.c) und [:5409](../c/deepseek_v4.c), Units
 `INDEXER` und `INDEXER_SNAPSHOT` — siehe [00-reference.md](00-reference.md)).
 Beide Kopien ändern, sonst driften sie.
 
@@ -189,8 +189,8 @@ Damit sie nicht vergessen, aber auch nicht ungeprüft eingebaut werden:
 
 - **Fusionierte mHC-Ops.** llama.cpp hat sie (`0dc74e332 DeepseekV4: Add fused
   hyper-connection ops`). colibri rechnet 20 Sinkhorn-Iterationen pro Layer und
-  Token in `coli_v4_hc_pre` ([c/deepseek_v4.c:1159](../c/deepseek_v4.c),
-  aufgerufen ab [:3081](../c/deepseek_v4.c) ff.). 43 × 20 pro Token ist
+  Token in `coli_v4_hc_pre` ([c/deepseek_v4.c:1760](../c/deepseek_v4.c),
+  aufgerufen ab [:4115](../c/deepseek_v4.c) ff.). 43 × 20 pro Token ist
   nicht nichts. **Erst messen, ob es im Profil auftaucht.**
 - ~~**AVX-512**~~ — **erledigt, entfällt.** Der i5-13400F (Raptor Lake) hat kein
   AVX-512; Intel hat es auf den Consumer-Hybrid-Chips deaktiviert, und die

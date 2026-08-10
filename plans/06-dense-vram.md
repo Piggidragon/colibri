@@ -90,8 +90,10 @@ Laufzeitwirkung auf den Default-Pfad:
 - **Sechs Kopien von `static int fp8_view(...)` waren tot** und nur durch
   `-Wno-unused-function` unsichtbar. Gelöscht. `coli_v4_shared_expert_forward_ref`
   und `coli_fp8_dual_matvec_ref` sind entgegen dem Review **nicht** tot: der
-  Drafter ruft sie über [`deepseek_v4_dspark.inc:793`](../c/deepseek_v4_dspark.inc),
-  und der wiederhergestellte CPU-Pfad oben ruft sie ebenfalls.
+  Drafter ruft `coli_v4_shared_expert_forward_ref`
+  ([`deepseek_v4_dspark.inc:1015`](../c/deepseek_v4_dspark.inc)), und die ruft
+  ihrerseits `coli_fp8_dual_matvec_ref` ([c/deepseek_v4.c:7366](../c/deepseek_v4.c)).
+  Der wiederhergestellte CPU-Pfad oben nimmt denselben Weg.
 
 Abnahme dieser Runde: `make -C c test`, `make -C c check` und
 `make -C c deepseek-v4-tiny-check` grün, das Tiny-Fixture tokenidentisch;
@@ -139,7 +141,7 @@ durchgängig auf dem Gerät.
 
 ### Was „dense" hier heißt
 
-`v5_dense_inventory` ([c/deepseek_v4.c:981](../c/deepseek_v4.c)) summiert
+`v5_dense_inventory` ([c/deepseek_v4.c:1276](../c/deepseek_v4.c)) summiert
 `stats.total_bytes` über alle Layer — die **komplette Layer-Inventur ohne geroutete
 Experten**: Attention-Projektionen, Compressor, Indexer, Router-Gate, Shared Expert,
 Norms, HC-Parameter. Laut Checkpoint-Inventur 6.267 GiB insgesamt. Davon sind
@@ -147,7 +149,7 @@ Norms, HC-Parameter. Laut Checkpoint-Inventur 6.267 GiB insgesamt. Davon sind
 Tensoren bleiben CPU-seitig.
 
 Die fp8-Tensoren pro Layer, aus `coli_v4_layer_plan`
-([c/deepseek_v4.c:355](../c/deepseek_v4.c) ff.), alle mit `.scale` als
+([c/deepseek_v4.c:359](../c/deepseek_v4.c) ff.), alle mit `.scale` als
 `[ceil(rows/128), ceil(cols/128)]` E8M0:
 
 | Tensor | Shape |
@@ -162,7 +164,7 @@ Die fp8-Tensoren pro Layer, aus `coli_v4_layer_plan`
 
 ### Wie sie geladen werden
 
-`coli_v4_layer_load` ([c/deepseek_v4.c:512](../c/deepseek_v4.c)) liest jeden Tensor
+`coli_v4_layer_load` ([c/deepseek_v4.c:594](../c/deepseek_v4.c)) liest jeden Tensor
 in `weights->data[i]`. E8M0-Scales werden dabei über `st_read_scale_f32` auf **f32
 expandiert** (`resident_bytes = numel * sizeof(float)`, [:527](../c/deepseek_v4.c)) —
 das muss in der VRAM-Bilanz mitgezählt werden, ist aber klein (bei `wq_b`: 2048
@@ -171,7 +173,7 @@ Scales gegen 33.5 MB Gewichte).
 Residenz entscheidet `coli_v4_resident_tier_plan`
 ([:763](../c/deepseek_v4.c)) — heute binär: passt Dense komplett in den RAM-Plan
 oder nicht. `COLI_V4_RESIDENT_MAX_LAYERS = 128`
-([c/deepseek_v4_internal.h:628](../c/deepseek_v4_internal.h)) ist reichlich für 43
+([c/deepseek_v4_internal.h:742](../c/deepseek_v4_internal.h)) ist reichlich für 43
 Layer.
 
 Verbraucht werden sie über `fp8_view` → `ColiTensorView` → `coli_fp8_matvec_ref` /
@@ -185,7 +187,7 @@ GPU spiegelt.
 Ein früher Verdacht war, `packed_rows8` beschreibe eine feinere Scale-Granularität
 (8×128 statt 128×128), die der CUDA-Kernel nicht kann. **Das stimmt nicht.**
 
-`v4_fp8_pack_rows8_inplace` ([c/deepseek_v4.c:488](../c/deepseek_v4.c)) ist eine
+`v4_fp8_pack_rows8_inplace` ([c/deepseek_v4.c:496](../c/deepseek_v4.c)) ist eine
 reine **Byte-Layout-Transposition innerhalb von 8-Zeilen-Kacheln**, nach dem Laden
 in-place angewandt, ausschließlich unter `__AVX2__`:
 
@@ -241,9 +243,9 @@ Der Skizze oben fehlt, wo `gpu_resident` überhaupt herkommen kann. Im Amalgam:
 
 | Zeile | Symbol | Repack? | Rolle |
 |---|---|---|---|
-| [:512](../c/deepseek_v4.c) | `coli_v4_layer_resident_reference_load` (per `#define` umbenannt) | **ja**, bei [:543](../c/deepseek_v4.c) | liest die Tensoren wirklich |
-| [:583](../c/deepseek_v4.c) | `coli_v4_layer_load` (Unit `LAYER_RESIDENT`) | nein | exportierter Wrapper, cached pro Layer |
-| [:9678](../c/deepseek_v4.c) | `coli_v4_layer_load` (Unit `LAYER`) | **nein** | zweite Übersetzungseinheit, ohne Repack |
+| [:594](../c/deepseek_v4.c) | `coli_v4_layer_resident_reference_load` (per `#define` umbenannt) | **ja**, bei [:630](../c/deepseek_v4.c) | liest die Tensoren wirklich |
+| [:701](../c/deepseek_v4.c) | `coli_v4_layer_load` (Unit `LAYER_RESIDENT`) | nein | exportierter Wrapper, cached pro Layer |
+| [:11043](../c/deepseek_v4.c) | `coli_v4_layer_load` (Unit `LAYER`) | **nein** | zweite Übersetzungseinheit, ohne Repack |
 
 Zwei Dinge folgen daraus, die die Skizze oben so nicht hergibt:
 

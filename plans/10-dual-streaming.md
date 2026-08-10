@@ -59,7 +59,7 @@ zu trennen.
 
 `c/colibri.c` (GLM) hat die komplette Multi-SSD-Maschinerie. `c/deepseek_v4.c`
 hat **nichts davon** und liest mit einfachem `pread` auf eine einzige Kopie
-([c/deepseek_v4.c:100](../c/deepseek_v4.c), [:5644](../c/deepseek_v4.c)).
+([c/deepseek_v4.c:104](../c/deepseek_v4.c), [:6886](../c/deepseek_v4.c)).
 
 Vorhanden in colibri.c:
 
@@ -108,7 +108,7 @@ und die Statistikzähler. Alles hängt nur an `shards *` aus `st.h`, nicht an
 
 Anzubinden in V4:
 
-- `coli_st_index_open` ([:27](../c/deepseek_v4.c)) ruft nach dem Öffnen
+- `coli_st_index_open` ([c/st.h](../c/st.h)) ruft nach dem Öffnen
   `st_mirror_add` für jeden Eintrag aus `COLI_MODEL_MIRROR`. Ist die Variable
   ungesetzt oder zeigt sie auf ein Verzeichnis ohne passende Shards, bleibt es bei
   einer Replik — **ohne Fehler und ohne Probe**, nur mit einer Zeile im Log.
@@ -202,7 +202,7 @@ Vor Änderungen an der Lesekoaleszenz also prüfen, dass sie erhalten bleibt.
 brechen bei hoher Queue-Tiefe mit verstreuten Zugriffen deutlich ein, weil
 FTL-Misses über PCIe nachgeladen werden. Der persistente Lookup-Pipeline-Pfad
 (`COLI_V4_EXPERIMENTAL_DUAL_EXPERT_LOADER`, drei Worker,
-[c/deepseek_v4.c:3005](../c/deepseek_v4.c)) sollte deshalb **messbar** eingestellt
+[c/deepseek_v4.c:4289](../c/deepseek_v4.c)) sollte deshalb **messbar** eingestellt
 werden statt auf gut Glück:
 
 - `COLI_V4_EXPERT_PREFETCH` ([:3251](../c/deepseek_v4.c)) und die Workerzahl gegen
@@ -325,7 +325,7 @@ weggelassen und nicht geschätzt.
   `lspci -tv | grep -i nvme` und `ls -l /sys/block/nvme*n1/device`.
 - **Page-Cache-Doppelung** im gepufferten Modus, falls das deterministische
   Routing bricht. `DIRECT=1` umgeht das; die V4-Entsprechung ist
-  `COLI_V4_DIRECT` ([:112](../c/deepseek_v4.c)). Im Profil setzen.
+  `COLI_V4_DIRECT` ([:116](../c/deepseek_v4.c)). Im Profil setzen.
 - **Der gemeinsame Header ist ein Refactor an laufendem Code.** colibri.c ist
   ~9500 Zeilen und der GLM-Pfad ist nicht Ziel dieses Branches — wenn der Schnitt
   zu teuer wird, ist eine V4-lokale Kopie mit Verweis auf das Original die

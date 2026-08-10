@@ -106,7 +106,7 @@ bf16_round( e4m3_decode(q) · e8m0_decode(s) )
 ```
 
 also aus `(q, s)` **bit-exakt** rekonstruierbar
-([c/deepseek_v4.c:10096](../c/deepseek_v4.c)).
+([c/deepseek_v4.c:11475](../c/deepseek_v4.c)).
 
 | Strom | heute | nativ | Faktor | verlustfrei |
 |---|---|---|---|---|
@@ -127,7 +127,7 @@ Drei Puffer halten KV-Zeilen, alle `float *`:
 
 | Puffer | Ort | Größe | wächst mit |
 |---|---|---|---|
-| `state->kv` | [c/deepseek_v4.c:1400](../c/deepseek_v4.c) ff. | `window_size × head_dim` | — (Ring) |
+| `state->kv` | [c/deepseek_v4.c:2010](../c/deepseek_v4.c) ff. | `window_size × head_dim` | — (Ring) |
 | `state->compressed` | dito | `compressed_count × head_dim` | `ctx / ratio` |
 | Indexer `state->compressed` | [:2687](../c/deepseek_v4.c) | `count × index_head_dim` | `ctx / 4` |
 
@@ -217,7 +217,7 @@ for (int i = 0; i < 64; i++) dst[448 + i] = coli_bf16_decode(row->rope[i]);
 ```
 
 Die Encode-Seite ist ein Umweg, keine Neuquantisierung: `coli_fp8_activation_qdq_ref`
-([c/deepseek_v4.c:10076](../c/deepseek_v4.c)) liefert schon **heute** das
+([c/deepseek_v4.c:11455](../c/deepseek_v4.c)) liefert schon **heute** das
 dequantisierte `output` und den `scales`-Byte zurück, wirft aber den fp8-Code `q`
 selbst weg — der lebt nur als lokale Variable im Loop-Body
 ([:10096](../c/deepseek_v4.c)). Der Codec braucht ihn trotzdem nicht neu zu
@@ -235,8 +235,8 @@ Compressor, der Codec sieht nur das Ergebnis.
 
 ### `ColiDeepSeekV4WindowAttentionState` umstellen
 
-In **allen drei Kopien** ([:1400](../c/deepseek_v4.c), [:1798](../c/deepseek_v4.c),
-[:4572](../c/deepseek_v4.c)):
+In **allen drei Kopien** ([:2010](../c/deepseek_v4.c), [:2494](../c/deepseek_v4.c),
+[:5637](../c/deepseek_v4.c)):
 
 ```c
 struct ColiDeepSeekV4WindowAttentionState {
@@ -285,10 +285,10 @@ die Tabelle in [00-reference.md](00-reference.md)):
 
 | Funktion | Kopie 1 | Kopie 2 | Warum dieser Plan sie anfasst |
 |---|---|---|---|
-| `coli_v4_compressor_step` | [:2538](../c/deepseek_v4.c) | [:4042](../c/deepseek_v4.c) | Zwischenpuffer statt Direkt-Write |
-| Der QDQ-Block darin | [:2643](../c/deepseek_v4.c) | [:4147](../c/deepseek_v4.c) | liefert `(q, scales)` an den Codec |
-| `coli_v4_indexer_step` | [:2827](../c/deepseek_v4.c) | [:4390](../c/deepseek_v4.c) | `state->compressed` wird `void *` |
-| Wachstums-`realloc` darin | [:2837](../c/deepseek_v4.c) | [:4400](../c/deepseek_v4.c) | `× dimension` wird `× row_bytes` |
+| `coli_v4_compressor_step` | [:3322](../c/deepseek_v4.c) | [:5068](../c/deepseek_v4.c) | Zwischenpuffer statt Direkt-Write |
+| Der QDQ-Block darin | [:3442](../c/deepseek_v4.c) | [:5188](../c/deepseek_v4.c) | liefert `(q, scales)` an den Codec |
+| `coli_v4_indexer_step` | [:3604](../c/deepseek_v4.c) | [:5409](../c/deepseek_v4.c) | `state->compressed` wird `void *` |
+| Wachstums-`realloc` darin | [:3614](../c/deepseek_v4.c) | [:5419](../c/deepseek_v4.c) | `× dimension` wird `× row_bytes` |
 
 Eine frühere Fassung dieses Plans nannte nur die jeweils erste Spalte. Der
 Source-Sync-Test aus [02-flash-attention.md](02-flash-attention.md) deckt diese
@@ -335,7 +335,7 @@ if (ratio == 4) total += compressed * index_row;
 ```
 
 Die Codec-Wahl muss dafür **vor** `build_runtime_plan` feststehen. Sie hängt nur an
-Env und `config`, also in `coli_v4_engine_open` ([:6504](../c/deepseek_v4.c) ff.)
+Env und `config`, also in `coli_v4_engine_open` ([:7748](../c/deepseek_v4.c) ff.)
 auflösen und in `ColiDeepSeekV4RuntimeOptions` ablegen — dort liegen
 `context_tokens`, `memory_limit_bytes` und `dspark_reserve_bytes` schon.
 

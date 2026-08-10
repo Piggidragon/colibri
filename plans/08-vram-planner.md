@@ -21,12 +21,12 @@ muss **degradieren, nicht scheitern**.
 
 Der RAM-Planner ist zweistufig und sauber getrennt:
 
-- `coli_v4_resource_plan_compute` ([c/deepseek_v4.c:693](../c/deepseek_v4.c)) —
+- `coli_v4_resource_plan_compute` ([c/deepseek_v4.c:877](../c/deepseek_v4.c)) —
   Systemreserve, Runtime-Reserve, Mindest-Expert-Cache, Slots.
-- `coli_v4_resident_tier_plan` ([:763](../c/deepseek_v4.c)) — entscheidet
+- `coli_v4_resident_tier_plan` ([:947](../c/deepseek_v4.c)) — entscheidet
   Dense-Residenz gegen das verbleibende Budget, über den Helfer
-  `resident_tiers_fit` ([:756](../c/deepseek_v4.c)).
-- `coli_v4_expert_store_open_planned` ([:1001](../c/deepseek_v4.c)) — setzt beides
+  `resident_tiers_fit` ([:940](../c/deepseek_v4.c)).
+- `coli_v4_expert_store_open_planned` ([:1358](../c/deepseek_v4.c)) — setzt beides
   zusammen, entscheidet zusätzlich die Head-Residenz und druckt `ram_tiers`.
 
 Die Head-Entscheidung dort ist bemerkenswert direkt ([:1033](../c/deepseek_v4.c)):
@@ -127,7 +127,7 @@ planen die beiden Dokumente gegeneinander.
 Was auf der GPU liegt, darf im RAM-Plan nicht mehr auftauchen. Phase 06 hat dafür
 bereits Device- und verbleibende Hostbytes getrennt; Plan 08 darf also nur die
 gemessenen 5.456 GiB abziehen, nicht das 6.267-GiB-Gesamtinventar. In
-`coli_v4_expert_store_open_planned` ([:1001](../c/deepseek_v4.c)):
+`coli_v4_expert_store_open_planned` ([:1358](../c/deepseek_v4.c)):
 
 ```c
 uint64_t safe_payload = plan.planner_available_bytes - fixed
@@ -220,7 +220,7 @@ V4_VRAM_FAIL_AT=<stufe> lässt den Upload dieser Stufe absichtlich scheitern
 auf einer kleineren Karte durchspielen, ohne eine zu besitzen.
 `V4_VRAM_FAIL_AT` folgt dem Muster der vorhandenen Fehlerinjektion
 (`coli_v4_test_fail_expert_store_open`,
-[c/deepseek_v4_internal.h:716](../c/deepseek_v4_internal.h)) und ist in
+[c/deepseek_v4_internal.h:837](../c/deepseek_v4_internal.h)) und ist in
 Produktionsobjekten nicht einkompiliert.
 
 **Abnahme dafür:** Für **jede** der vier Stufen einmal den Laufzeitfehler

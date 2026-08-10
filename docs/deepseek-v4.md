@@ -1,20 +1,23 @@
-# DeepSeek V4 target engine (colibri CPU)
+# DeepSeek V4 engine
 
-This is the target-only DeepSeek V4 Flash engine for the first PR of the V4
-split. DSpark speculative decoding is intentionally excluded and belongs in a
-separate stacked follow-up.
+The DeepSeek V4 Flash engine, target path plus the DSpark drafter.
 
 ## Scope
 
 - Production code is in `c/deepseek_v4.c`; the experimental public engine and
-  session API is in `c/deepseek_v4.h`.
+  session API is in `c/deepseek_v4.h`. The drafter lives in
+  `c/deepseek_v4_dspark.inc`.
 - Official sharded safetensors checkpoints load through shared `st.h`.
 - Standard MXFP4 matrix multiplication uses shared `quant.h`.
 - Unified `c/coli` routes `run`, `chat`, `serve`, and `web` to V4. Serving keeps
   the engine and caches warm across requests.
-- `--no-dspark` is a compatibility no-op. This PR has no DSpark model, memory
-  tier, or speculative loop.
-- Build targets are x86-64/aarch64 Linux and Windows/MSYS2.
+- **DSpark speculative decoding is built in** — three drafter stages read from
+  the `mtp.<stage>.` tensors of the same checkpoint, verified against the exact
+  target. It is opt-in: `c/coli` starts it disabled (`V4_MTP=0`, `V4_DRAFT=0`),
+  and `--no-dspark` switches it off explicitly. Drafting is output-preserving
+  within one backend; the acceptance rate is reported per run.
+- Build targets are x86-64/aarch64 Linux and Windows/MSYS2. This fork only
+  maintains **Linux x86-64**; see `AGENTS.md`.
 
 Destroy every session before destroying its engine.
 
@@ -42,8 +45,12 @@ streamed and cached according to the RAM budget.
 
 The planner reserves workspace and a minimum expert working set, then enables
 dense/head residency and grows the expert cache when memory permits. Dense
-residency is independent of DSpark and works in this target-only build,
-including with the legacy `--no-dspark` option.
+residency is independent of DSpark and works with `--no-dspark` as well.
+
+With the full drafter enabled, the planner books a DSpark reserve of
+`V4_MTP_GB × 1e9 + 768 MiB` — 1.169 GiB at the `0.45` default — *before* it
+sizes the expert cache, because the lazy first draft must not borrow its upload
+peak from that cache. On the target machine that costs two expert-cache slots.
 
 `--ram GiB` is a planner budget, not an OS-enforced limit. Without it, the
 budget is derived from currently available OS memory.
@@ -91,7 +98,9 @@ make deepseek-v4-tiny-check
 
 This covers loading, teacher forcing, greedy decode, long/repeated sessions,
 `--no-dspark` compatibility, and two requests through the persistent
-`SUBMIT`/`DATA`/`DONE` protocol.
+`SUBMIT`/`DATA`/`DONE` protocol. The fixture contains **no `mtp.*` tensors**, so
+it cannot exercise any DSpark path — a drafter change that is only green here is
+untested.
 
 For a real checkpoint:
 
@@ -100,12 +109,14 @@ make deepseek-v4-oracle MODEL=/path/to/DeepSeek-V4-Flash \
   MEMORY_GB=32 ORACLE_TEACHER_FORCING=32 ORACLE_GREEDY=20
 ```
 
-The oracle is target-only. DSpark on/off speed, acceptance, and token identity
-evidence belong to the stacked DSpark PR.
+The oracle is target-only. DSpark on/off speed, acceptance and token-identity
+evidence are measured separately with `c/tools/bench_v4.py --dspark`; the
+current numbers are in [plans/07-head-dspark-vram.md](../plans/07-head-dspark-vram.md).
 
 ## Follow-ups
 
 - Add non-greedy sampling and more serving slots.
 - Add shared replacements for the two temporary private quant paths above.
-- In the stacked PR, restore DSpark without changing target tokens and report
-  DSpark on/off performance and acceptance data.
+- DSpark does not yet pay for itself in throughput — it loses against
+  target-only on both the CPU and the CUDA path. That is a property of the
+  drafter, not of its placement, and needs its own plan.

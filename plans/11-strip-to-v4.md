@@ -106,7 +106,7 @@ von Commit 3 mit „behalten" — das war ein Widerspruch. Wer 2b **nicht** ausf
 `compat_aligned_free`, `compat_open_direct` und einiges mehr auf Windows ab.
 Nach dem Rückbau bleiben die POSIX-Definitionen — aber **`compat_aligned_free`
 muss bleiben**, auch wenn es unter POSIX nur `free()` ist. Der Kommentar bei
-[c/deepseek_v4.c:5341](../c/deepseek_v4.c) erinnert daran, dass genau diese
+[c/deepseek_v4.c:6583](../c/deepseek_v4.c) erinnert daran, dass genau diese
 Asymmetrie schon einmal einen Bug produziert hat (`63a2c8d`). Ein
 Suchen-und-Ersetzen von `compat_aligned_free` → `free` ist die naheliegende und
 falsche Vereinfachung.
