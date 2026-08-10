@@ -5,10 +5,16 @@ Format follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## Unreleased
 
+> This is the `Piggidragon/colibri` fork, which specialises on DeepSeek V4 Flash
+> for a single machine. It does **not** maintain this changelog — its history
+> lives in [`plans/`](plans/), one plan per phase, each with a measured
+> `## Ergebnis` block. Entries below `Unreleased` are upstream's.
+
 ### Removed
 
-- Removed the stale Simplified Chinese DeepSeek V4 documentation; the English
-  `docs/deepseek-v4.md` is the maintained source of truth.
+- Removed the localized READMEs (`README.it.md`, `README.zh-CN.md`,
+  `README.zh-TW.md`, `docker/README.IT.md`) and the stale localized DeepSeek V4
+  documentation; the English originals are the maintained sources of truth.
 
 ## [1.1.1] — 2026-07-23
 
