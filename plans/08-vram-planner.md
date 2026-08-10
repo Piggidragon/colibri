@@ -170,7 +170,7 @@ V4_KV=native \
 V4_KV_INDEX=native \
 V4_VRAM=1 \
 V4_MTP=1 V4_DRAFT=3 \
-SNAP=/pfad/DeepSeek-V4-Flash ./deepseek_v4
+SNAP=~/Services/models/colibri/deepseek-v4-flash ./deepseek_v4
 ```
 
 Mit Begründung pro Knopf und einer Tabelle „was passiert, wenn du X weglässt".

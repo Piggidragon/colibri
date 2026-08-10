@@ -27,14 +27,9 @@ der WebUI — das ist die tägliche Bedienung, siehe [Plan 13](plans/13-frontend
 **Optimiere für diese Hardware**, nicht für Allgemeingültigkeit — aber ohne die
 Semantik des Modells zu ändern (siehe Regeln).
 
-**Ein** Checkpoint:
-[deepseek-ai/DeepSeek-V4-Flash-0731](https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash-0731).
-
-```bash
-hf download deepseek-ai/DeepSeek-V4-Flash-0731 --local-dir /pfad/DeepSeek-V4-Flash
-```
-
-**Auf dieser Maschine liegt der Checkpoint schon da** — nichts nachladen:
+**Ein** Checkpoint —
+[deepseek-ai/DeepSeek-V4-Flash-0731](https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash-0731) —
+und er **liegt auf dieser Maschine vollständig vor**:
 
 ```
 ~/Services/models/colibri/deepseek-v4-flash    161 GB, 48 Shards, 72 317 Tensoren
@@ -133,7 +128,6 @@ sich darum, *was* im Cache liegt.
 **Ein Plan, ein Branch, ein PR.** Keine Sammel-PRs über mehrere Phasen.
 
 ```
-planning              ← die Pläne selbst und diese Datei
 phase-01-ram-budget
 phase-02-flash-attention
 phase-03-kv-codec
@@ -151,6 +145,9 @@ phase-13-frontend
 
 - Branch von `main`, außer der Plan hängt an einem anderen — dann von dessen
   Branch, und der PR nennt die Abhängigkeit in der ersten Zeile.
+- **Es gibt keinen eigenen Doku-Branch.** Änderungen an `plans/` und an dieser
+  Datei laufen auf dem Phasenbranch mit, zu dem sie gehören; rein
+  übergreifende Doku geht als eigener kleiner PR direkt gegen `main`.
 - Die Commits innerhalb eines PRs folgen der Commit-Liste im Plan. Jeder Commit
   baut und ist grün. Kein „fixup später".
 - PR-Beschreibung: Link auf den Plan, die Abnahmekriterien als Checkliste, die
@@ -219,8 +216,8 @@ das ein Befund und gehört in den PR-Text — nicht weggedrückt.
 
 Für die erzwungene Neugenerierung braucht der Check die exakt gepinnten
 CPU-Pakete aus `c/tools/requirements-deepseek-v4-tiny.txt`. Auf dieser Maschine
-ist dafür `.venv-v4-tiny` eingerichtet; sie braucht weder CUDA noch den
-167-GB-Checkpoint. Reproduzierbar neu anlegen und verwenden:
+ist dafür `.venv-v4-tiny` eingerichtet; sie braucht weder CUDA noch den vollen
+Checkpoint. Reproduzierbar neu anlegen und verwenden:
 
 ```bash
 uv venv .venv-v4-tiny --python /usr/bin/python3
