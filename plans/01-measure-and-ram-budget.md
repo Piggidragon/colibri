@@ -16,14 +16,14 @@ folgenden Phasen ihren Nutzen belegen.
 
 ## Ausgangslage
 
-Der Planner rechnet in `build_runtime_plan` ([c/deepseek_v4.c:924](../c/deepseek_v4.c)):
+Der Planner rechnet in `build_runtime_plan` ([c/deepseek_v4.c:1207](../c/deepseek_v4.c)):
 
 ```c
 uint64_t hidden  = context * config.hc_mult * config.hidden_size
                    * sizeof(float) * 2;
 uint64_t scratch = coli_v4_scratch_bytes();
 uint64_t runtime_other = context_bytes(&config, context) + hidden + scratch;
-runtime_other += runtime->dspark_reserve_bytes;                  // :967
+runtime_other += runtime->dspark_reserve_bytes;                  // :1262
 ```
 
 Die Kontext-Skalierung ist Teil dieses Commits: `coli_v4_session_create`
@@ -32,16 +32,16 @@ das auf den geplanten Kontext. Die frühere 64-Token-Konstante unterschlug bei
 128k je nach Geometrie 4 bis 16 GiB und durfte nicht dem Expert-Cache zugeteilt
 werden.
 
-und in `coli_v4_resource_plan_compute` ([:693](../c/deepseek_v4.c)):
+und in `coli_v4_resource_plan_compute` ([:877](../c/deepseek_v4.c)):
 
 ```c
 int explicit_process_limit = inputs->user_limit_bytes &&
-    inputs->user_limit_bytes < available;                        // :705
-uint64_t system = explicit_process_limit ? 0 : available / 8;    // :713
+    inputs->user_limit_bytes < available;                        // :889
+uint64_t system = explicit_process_limit ? 0 : available / 8;    // :897
 if (!explicit_process_limit && system < 512 * MIB) system = 512 * MIB;
 if (system > 4096 * MIB) system = 4096 * MIB;
 
-multiply_u64(inputs->maximum_layer_bytes, 2, &layers_twice);     // :719
+multiply_u64(inputs->maximum_layer_bytes, 2, &layers_twice);     // :903
 add_u64(layers_twice, inputs->runtime_other_bytes,
         &plan->runtime_reserve_bytes);
 ```
@@ -49,12 +49,12 @@ add_u64(layers_twice, inputs->runtime_other_bytes,
 **Die letzten zwei Zeilen sind die, die man beim Nachrechnen vergisst.** Die
 Runtime-Reserve ist `2 × maximum_layer_bytes + runtime_other`, nicht bloß
 `runtime_other`. `maximum_layer_bytes` ist der größte Einzel-Layer aus der
-Dense-Inventur ([:947](../c/deepseek_v4.c)), hier ~0.162 GiB — also ~0.32 GiB, die
+Dense-Inventur ([:1230](../c/deepseek_v4.c)), hier ~0.162 GiB — also ~0.32 GiB, die
 in **keinem** der Hebel unten auftauchen und von keiner späteren Phase verschwinden.
 Sie stehen jetzt in der RAM-Bilanz in [00-reference.md](00-reference.md); die
 Messaufgabe unten soll sie am echten Planner bestätigen.
 
-Der bestehende Report ([:1057](../c/deepseek_v4.c)) druckt bereits alles Nötige:
+Der bestehende Report ([:1472](../c/deepseek_v4.c)) druckt bereits alles Nötige:
 
 ```
 ram_tiers available=%.2fGiB dense=%s(%.2fGiB) target_slots=%d
@@ -80,7 +80,7 @@ automatisch. **+2.6 GiB.**
 
 ## Hebel 2 — `V4_SCRATCH_MB`
 
-Die 512 MiB in `:961` sind eine feste Annahme. Bei Decode mit Batch 1 und
+Die 512 MiB in `:1243` sind eine feste Annahme. Bei Decode mit Batch 1 und
 `hc_mult=4` ist der tatsächliche Arbeitsspeicherbedarf ein Bruchteil davon.
 
 ```c
@@ -99,8 +99,8 @@ static uint64_t v4_scratch_bytes(void) {
 }
 ```
 
-Aufrufstelle `:961`. Der Clamp folgt dem Muster von `coli_v4_dspark_cache_gb`
-([:6288](../c/deepseek_v4.c)). Anders als `atol` lässt die vollständige
+Aufrufstelle `:1243`. Der Clamp folgt dem Muster von `coli_v4_dspark_cache_gb`
+([:7540](../c/deepseek_v4.c)). Anders als `atol` lässt die vollständige
 `strtol`-Prüfung Müll, Suffixe und Überläufe auf den Default zurückfallen; erst
 gültige Zahlen werden geklemmt.
 

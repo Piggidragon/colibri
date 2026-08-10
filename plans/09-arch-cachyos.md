@@ -42,14 +42,14 @@ grep -rln "omp_tune.h" c/          # → omp_tune.h, Makefile, colibri.c, kimi_k
 grep -n "omp_set_num_threads\|OMP_NUM_THREADS" c/deepseek_v4.c   # → leer
 ```
 
-Dabei hat V4 **18** `#pragma omp parallel for`-Stellen, darunter die heißen:
-`head_argmax` ([:6795](../c/deepseek_v4.c)), der Batch-Head ([:6874](../c/deepseek_v4.c),
-[:6910](../c/deepseek_v4.c)), die fp8-Matmul-Kernel ([:10228](../c/deepseek_v4.c),
-[:10356](../c/deepseek_v4.c), [:10451](../c/deepseek_v4.c)) und das
-Expert-Warmup ([:5945](../c/deepseek_v4.c)).
+Dabei hat V4 **18** `#pragma omp parallel for`-Stellen
+(`grep -n '#pragma omp' c/deepseek_v4.c`), darunter die heißen: `head_argmax`,
+`head_argmax_batch`, `dspark_markov_argmax`, die fp8-Kernel
+`coli_fp8_matvec_ref`, `coli_fp8_dual_matvec_ref` und `coli_fp8_matmul_batch_ref`
+sowie das Expert-Warmup in `hot_prewarm_history`.
 
 **Eine heiße Schleife fehlt in dieser Liste**, und zwar nicht zufällig: die
-Bewertungsschleife in `coli_v4_indexer_step` ([:2893](../c/deepseek_v4.c)) hat
+Bewertungsschleife in `coli_v4_indexer_step` ([:3694](../c/deepseek_v4.c)) hat
 **kein** Pragma, kostet aber bei 128k rund 5.6 G MAC pro Token (Herleitung im
 Indexer-Abschnitt von [00-reference.md](00-reference.md)). Sie zu parallelisieren
 gehört zu [12-expert-cache-policy.md](12-expert-cache-policy.md) Commit 2, nicht
@@ -96,8 +96,8 @@ bis 3.3 GHz)**, 16 logische Threads. Die Linux-Zählung in `coli_physical_cores`
 
 Also ein Team aus **10 Threads über zwei ungleiche Kernklassen**. Und V4 nutzt in
 den heißen Schleifen `schedule(static)` — `head_argmax`
-([c/deepseek_v4.c:6795](../c/deepseek_v4.c)), die fp8-Matmuls
-([:10228](../c/deepseek_v4.c), [:10356](../c/deepseek_v4.c),
+([c/deepseek_v4.c:8130](../c/deepseek_v4.c)), die fp8-Matmuls
+([:11607](../c/deepseek_v4.c), [:12056](../c/deepseek_v4.c),
 [:10451](../c/deepseek_v4.c)). Statische Aufteilung über ungleiche Kerne heißt:
 **die E-Cores geben das Tempo vor.**
 
@@ -194,7 +194,7 @@ will, misst es; die Voreinstellung bleibt „nicht setzen".
 ## Commit 2 — Transparent Hugepages für die Expert-Slabs
 
 Die Expert-Slabs werden 4-KiB-aligned angefordert
-([c/deepseek_v4.c:5861](../c/deepseek_v4.c)):
+([c/deepseek_v4.c:7103](../c/deepseek_v4.c)):
 
 ```c
 if (posix_memalign((void **)&slot->slab, 4096, capacity)) {
@@ -291,7 +291,7 @@ Ein Abschnitt „Arch / CachyOS" in `docs/deepseek-v4-tuning-32gb.md` (aus
 - Build-Zeile mit `CUDA_HOME` und `NVCC_CCBIN`
 - die Spin-Wait-Warnung aus Commit 1b
 - **zram**: CachyOS aktiviert zram meist per Default. `coli_v4_os_available_memory`
-  liest `MemAvailable` aus `/proc/meminfo` ([c/deepseek_v4.c:678](../c/deepseek_v4.c)).
+  liest `MemAvailable` aus `/proc/meminfo` ([c/deepseek_v4.c:855](../c/deepseek_v4.c)).
   Unter zram/zswap ist dieser Wert optimistischer, als er für eine Arbeitslast
   taugt, die ihn tatsächlich anfassen will — komprimierbarer Swap hilft einem
   Expert-Cache nicht, er kostet CPU. Das macht das explizite `RAM_GB` aus Plan 01
@@ -309,9 +309,9 @@ Ein Abschnitt „Arch / CachyOS" in `docs/deepseek-v4-tuning-32gb.md` (aus
 
 `c/uring.h` existiert und wird **nur von `colibri.c`** benutzt
 (`grep -rln "uring.h" c/*.c` → `colibri.c`). V4 liest über `pread`
-([:100](../c/deepseek_v4.c), [:5644](../c/deepseek_v4.c)) mit optionalem O_DIRECT
-(`COLI_V4_DIRECT`, [:112](../c/deepseek_v4.c)) und `posix_fadvise(WILLNEED)` als
-Prefetch ([:194](../c/deepseek_v4.c)).
+([:104](../c/deepseek_v4.c), [:6886](../c/deepseek_v4.c)) mit optionalem O_DIRECT
+(`COLI_V4_DIRECT`, [:116](../c/deepseek_v4.c)) und `posix_fadvise(WILLNEED)` als
+Prefetch ([:198](../c/deepseek_v4.c)).
 
 Bei ~10 % Expert-Residenz ist Storage-I/O **die** dominante Kostenstelle, und ein
 aktueller Arch-Kernel bringt ausgereiftes io_uring mit. Batched Submission über

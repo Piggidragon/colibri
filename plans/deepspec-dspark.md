@@ -33,7 +33,7 @@ Drafter. Der *Algorithmus* ist derselbe.
 **Wo der Drafter herkommt.** Nicht aus einem eigenen Repo — er liegt im
 Hauptcheckpoint [DeepSeek-V4-Flash-0731](https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash-0731)
 unter dem Präfix `mtp.<stage>.` und wird aus `engine->target_index` gelesen
-([c/deepseek_v4.c:6325](../c/deepseek_v4.c)). DeepSpec ist die Referenz für den
+([c/deepseek_v4.c:7571](../c/deepseek_v4.c)). DeepSpec ist die Referenz für den
 *Algorithmus*, nicht die Bezugsquelle für Gewichte.
 
 ## Was `draft_ops.py` über den Algorithmus verrät

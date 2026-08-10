@@ -65,8 +65,8 @@ Parameter werden dynamisch erzeugt: pro Layer aus dem RMS-normalisierten,
 geflatteten Eingangszustand, aufgeteilt in eine eingabeabhängige und eine
 statische Komponente.
 
-> Bezug zum Code: `coli_v4_hc_pre` ([c/deepseek_v4.c:1159](../c/deepseek_v4.c)),
-> aufgerufen aus der Runtime ab [:3081](../c/deepseek_v4.c) ff.
+> Bezug zum Code: `coli_v4_hc_pre` ([c/deepseek_v4.c:1760](../c/deepseek_v4.c)),
+> aufgerufen aus der Runtime ab [:4115](../c/deepseek_v4.c) ff.
 
 ---
 
@@ -95,7 +95,7 @@ die von `C^b` für Eintrag `i` benutzten Indizes überlappen mit denen von `C^a`
 Eintrag `i−1`. Netto komprimiert CSA die Sequenzlänge trotzdem auf `1/m`.
 
 > Bezug zum Code: `coff = ratio == 4 ? 2 : 1` im Layer-Plan
-> ([c/deepseek_v4.c:394](../c/deepseek_v4.c)) — die `2` ist genau diese
+> ([c/deepseek_v4.c:398](../c/deepseek_v4.c)) — die `2` ist genau diese
 > Doppelserie. `attn.compressor.ape` hat Shape `[ratio, coff·head_dim]`.
 
 **Lightning Indexer.** Dieselbe Kompressionsoperation erzeugt komprimierte
@@ -111,7 +111,7 @@ I_{t,s} = Σ_h  w^I_{t,h} · ReLU( q^I_{t,h} · K^{IComp}_s )
 Ein Top-k-Selektor behält daraus die `k` besten komprimierten Einträge.
 
 > Der **ReLU** und die gelernten Head-Gewichte `w^I` finden sich 1:1 in
-> `coli_v4_indexer_step` ([c/deepseek_v4.c:2900](../c/deepseek_v4.c)):
+> `coli_v4_indexer_step` ([c/deepseek_v4.c:3694](../c/deepseek_v4.c)):
 > `score += fmaxf(dot, 0.0f) * head_weights[head]`.
 
 **Shared-KV MQA.** Die ausgewählten komprimierten Einträge dienen **gleichzeitig
@@ -147,8 +147,8 @@ RoPE mit Position **−i** auf die letzten 64 Dimensionen jeder Ausgabe `o_{t,i}
 Dadurch wird die Positionsinformation wieder relativ.
 
 > Genau die beiden `coli_v4_rope_apply`-Aufrufe in colibri: vorwärts auf `kv`
-> ([:1652](../c/deepseek_v4.c)), invers auf `head_output`
-> ([:1720](../c/deepseek_v4.c)).
+> ([:2341](../c/deepseek_v4.c)), invers auf `head_output`
+> ([:2423](../c/deepseek_v4.c)).
 
 **Sliding-Window-Zweig.** Weil ein Query aus Kausalitätsgründen nur *vorangehende*
 komprimierte Blöcke sehen darf, fehlt ihm der eigene Block. Deshalb zusätzlich
@@ -186,7 +186,7 @@ Und als Vergleichsmaßstab:
 **Konsequenz für colibri:** Das Zielformat des Modells ist fp8 (nope) + bf16
 (RoPE). colibri rechnet diese Quantisierung bereits — `coli_fp8_activation_qdq_ref`
 auf die ersten 448 Dimensionen und `coli_bf16_round_array` auf die letzten 64
-([c/deepseek_v4.c:1655](../c/deepseek_v4.c)) — **speichert das Ergebnis aber als
+([c/deepseek_v4.c:2342](../c/deepseek_v4.c)) — **speichert das Ergebnis aber als
 f32**. Siehe [03-kv-codec.md](03-kv-codec.md).
 
 ---
@@ -348,7 +348,7 @@ wies diese Zeiten in Sekunden statt Millisekunden aus — Faktor 1000 zu hoch.)
 
 Sie zählt nur die Zeilen, die der Attention-Kernel liest — also *nach* der
 Top-k-Auswahl. Die Auswahl selbst kostet mehr: `coli_v4_indexer_step`
-([c/deepseek_v4.c:2893](../c/deepseek_v4.c)) bewertet pro Token und pro CSA-Layer
+([c/deepseek_v4.c:3604](../c/deepseek_v4.c)) bewertet pro Token und pro CSA-Layer
 **alle** `ctx/4` komprimierten Indexer-Einträge gegen 64 Heads × 128 Dims.
 
 | Kontext | Einträge | gelesen f32 | gelesen fp4 (Paper-Format) | MAC/Token |

@@ -81,7 +81,7 @@ Expert-Cache mehr.
 
 ### Ausgangslage
 
-`head_argmax` ([c/deepseek_v4.c:6774](../c/deepseek_v4.c)):
+`head_argmax` ([c/deepseek_v4.c:8097](../c/deepseek_v4.c)):
 
 ```c
 const uint16_t *resident = coli_v4_head_cache_data(engine, shard, head->off, resident_bytes);
@@ -153,7 +153,7 @@ Damit bleibt der Unterschied auf Rundung beschränkt und ist messbar statt still
 ### Kopplung mit DSpark
 
 `v4_ds_...` liest den Head über `coli_v4_head_cache_data`
-([c/deepseek_v4_dspark.inc:980](../c/deepseek_v4_dspark.inc)):
+([c/deepseek_v4_dspark.inc:1206](../c/deepseek_v4_dspark.inc)):
 
 ```c
 const uint16_t *resident = coli_v4_head_cache_data(...);
@@ -176,8 +176,8 @@ liegen unter `mtp.<stage>.` in
 [DeepSeek-V4-Flash-0731](https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash-0731)
 und werden aus `engine->target_index` gelesen — `mtp.0.main_proj.weight`,
 `mtp.2.markov_head.markov_w1.weight` und so weiter
-([c/deepseek_v4.c:6325](../c/deepseek_v4.c),
-[c/deepseek_v4_dspark.inc:243](../c/deepseek_v4_dspark.inc)).
+([c/deepseek_v4.c:7571](../c/deepseek_v4.c),
+[c/deepseek_v4_dspark.inc:193](../c/deepseek_v4_dspark.inc)).
 
 Kein zweiter Modellpfad, keine zweite Index-Instanz. Für Plan 10 (Dual-Streaming)
 heißt das: die DSpark-Tensoren liegen auf denselben Shards und profitieren
@@ -187,7 +187,7 @@ Nebenbei: das Paper nennt `num_nextn_predict_layers = 1`, der Drafter fährt abe
 drei Stufen (`V4_DSPARK_STAGES 3`, geprobt `mtp.0`–`mtp.2`). MTP-Tiefe und
 Drafter-Stufen sind verschiedene Dinge — kein Widerspruch, aber eine Stolperstelle.
 
-Reserve: `v4_dspark_full_reserve_bytes` ([c/deepseek_v4.c:6306](../c/deepseek_v4.c)):
+Reserve: `v4_dspark_full_reserve_bytes` ([c/deepseek_v4.c:7558](../c/deepseek_v4.c)):
 
 ```c
 double cache = coli_v4_dspark_cache_gb() * 1e9;   /* Default 0.45, clamp 0.15..4.0 */
@@ -203,7 +203,7 @@ Aktiv nur wenn `V4_MTP` und `V4_DRAFT` gesetzt sind
 Expert-Cache.
 
 Die residenten Tensoren, aus `g_v4ds_core`
-([c/deepseek_v4_dspark.inc:64](../c/deepseek_v4_dspark.inc)):
+([c/deepseek_v4_dspark.inc:78](../c/deepseek_v4_dspark.inc)):
 
 | Tensor | Typ | Größe |
 |---|---|---|

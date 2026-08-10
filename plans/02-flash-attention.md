@@ -66,7 +66,7 @@ Flash und TurboQuant sind hier dasselbe Feature. Deshalb kommt Flash zuerst.
 
 ### Der heutige Kernel
 
-`coli_v4_sparse_attention_ref` ([c/deepseek_v4.c:2934](../c/deepseek_v4.c)):
+`coli_v4_sparse_attention_ref` ([c/deepseek_v4.c:3728](../c/deepseek_v4.c)):
 
 ```c
 float *scores = malloc((size_t)topk * sizeof(*scores));      /* pro Aufruf */
