@@ -504,7 +504,7 @@ static int v4_ds_gpu_upload(const ColiDeepSeekV4Config *config) {
      * for the rest of the run -- exact target verification means every
      * token still matches a plain CPU/no-drafter run, just without the
      * speculative speedup. */
-    if (coli_v4_vram_fail_at() == COLI_V4_VRAM_FAIL_DSPARK) return 0;
+    if (coli_v4_vram_fail_at() == COLI_V4_VRAM_FAIL_DSPARK) goto gpu_fail;
     V4_DS_UPLOAD(&g_v4ds_core, main_proj, g_v4ds_core.main_proj_rows,
                  g_v4ds_core.main_proj_cols);
     for (int i = 0; i < V4_DSPARK_STAGES; i++) {
@@ -548,7 +548,12 @@ static int v4_ds_load_all(ColiV4Engine *engine,
                           const ColiDeepSeekV4Config *config) {
     if (!g_v4ds_core.ready) {
 #ifdef COLI_V4_CUDA
-        g_v4ds_gpu_prepare = engine && engine->runtime.vram_enabled;
+        /* plans/08-vram-planner.md: gate on the planner's verdict for this
+         * tier, not the bare vram_enabled flag -- KV, dense, or head may
+         * already have claimed the budget dspark needed, and a plan that
+         * fell the drafter back to RAM/host must not still attempt (and
+         * OOM on) the GPU upload. */
+        g_v4ds_gpu_prepare = engine && engine->runtime.dspark_vram_enabled;
 #else
         (void)engine;
 #endif

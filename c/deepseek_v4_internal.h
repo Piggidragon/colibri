@@ -692,8 +692,9 @@ uint64_t coli_v4_os_available_memory(void);
 uint64_t coli_v4_scratch_bytes(void);
 int coli_v4_context_tokens(void);
 /* V4_VRAM_LIMIT_MB: caps what the planner believes is free, without owning a
- * smaller card.  Clamps down only -- a value above `free_bytes` never grows
- * it.  0/unset/malformed leaves `free_bytes` unchanged. */
+ * smaller card.  Clamps down only -- a value at or above `free_bytes`, or
+ * malformed/unset input, leaves `free_bytes` unchanged.  `0` is a valid
+ * clamp-down value (not malformed) and forces the result to zero. */
 uint64_t coli_v4_vram_limit_bytes(uint64_t free_bytes);
 int coli_v4_session_state_bytes(int context_tokens, int hc_mult,
                                 int hidden_size, uint64_t *bytes);
@@ -802,6 +803,13 @@ typedef struct {
      * dense/head/dspark's earlier device claims cannot silently starve every
      * session's KV mirror of the budget the planner meant to give it. */
     int kv_vram_enabled;
+    /* plans/08-vram-planner.md: whether the VRAM tier plan actually admitted
+     * the DSpark backbone to the device (vram_plan.dspark == VRAM).  The
+     * lazy loader (v4_ds_load_all) gates its GPU upload on this instead of
+     * the bare vram_enabled flag, so a plan that had to fall the drafter
+     * back to RAM/host -- because KV, dense, or head already claimed the
+     * budget it needed -- does not still attempt (and OOM on) the upload. */
+    int dspark_vram_enabled;
 } ColiDeepSeekV4RuntimeOptions;
 
 enum { COLI_V4_RESIDENT_MAX_LAYERS = 128 };

@@ -851,7 +851,8 @@ uint64_t coli_v4_vram_limit_bytes(uint64_t free_bytes) {
         char *end = NULL;
         errno = 0;
         long parsed = strtol(setting, &end, 10);
-        if (!errno && end != setting && !*end && parsed >= 0) {
+        if (!errno && end != setting && !*end && parsed >= 0 &&
+            (uint64_t)parsed <= UINT64_MAX / MIB) {
             uint64_t limit = (uint64_t)parsed * MIB;
             if (limit < free_bytes) return limit;
         }
@@ -1471,9 +1472,10 @@ int coli_v4_expert_store_open_planned(
         dense.fp8_weight_bytes + dense.fp8_scale_bytes;
     tier_inputs.minimum_expert_bytes = plan.minimum_expert_bytes;
     runtime->kv_vram_enabled = 0;
-    uint64_t base_vram_reserve = 0, kv_device_bytes = 0, dspark_bytes = 0;
+    runtime->dspark_vram_enabled = 0;
     int dspark_wanted = coli_v4_full_dspark_wanted && runtime->vram_enabled;
 #ifdef COLI_V4_CUDA
+    uint64_t base_vram_reserve = 0, kv_device_bytes = 0, dspark_bytes = 0;
     tier_inputs.vram_enabled = runtime->vram_enabled;
     tier_inputs.vram_available_bytes = runtime->vram_enabled
         ? coli_v4_vram_limit_bytes(v4_cuda_free_bytes()) : 0;
@@ -1529,6 +1531,8 @@ int coli_v4_expert_store_open_planned(
     runtime->kv_vram_enabled = runtime->vram_enabled &&
         vram_plan.kv == COLI_V4_TIER_VRAM;
     coli_v4_kv_vram_enabled = runtime->kv_vram_enabled;
+    runtime->dspark_vram_enabled = runtime->vram_enabled &&
+        vram_plan.dspark == COLI_V4_TIER_VRAM;
     head_device = runtime->vram_enabled && vram_plan.head == COLI_V4_TIER_VRAM;
 #endif
     int resident_head = head_device ||
@@ -1597,18 +1601,25 @@ int coli_v4_expert_store_open_planned(
         dspark_wanted && vram_plan.dspark == COLI_V4_TIER_VRAM ? "vram-lazy" :
         (coli_v4_full_dspark_wanted ? "ram-lazy" : "off"),
         plan.projected_bytes / (double)GIB);
-    fprintf(stderr,
-        "vram_tiers free=%.2fGiB reserve=%.2fGiB kv=%s(%.2fGiB) "
-        "dense=%s(%.2fGiB) head=%s(%.2fGiB) dspark=%s(%.2fGiB) used=%.2fGiB\n",
-        tier_inputs.vram_available_bytes / (double)GIB,
-        base_vram_reserve / (double)GIB,
-        runtime->kv_vram_enabled ? "vram" : "ram", kv_device_bytes / (double)GIB,
-        tiers.dense_location == COLI_V4_DENSE_VRAM ? "vram" : "ram",
-        tiers.dense_device_bytes / (double)GIB,
-        head_device ? "vram" : "ram", head_bytes / (double)GIB,
-        dspark_wanted && vram_plan.dspark == COLI_V4_TIER_VRAM ? "vram" : "ram",
-        dspark_bytes / (double)GIB,
-        vram_plan.vram_used_bytes / (double)GIB);
+#ifdef COLI_V4_CUDA
+    /* Only a runtime.vram_enabled build actually ran the VRAM tier planner
+     * above; a plain CPU build or a V4_VRAM=0 run left every input at its
+     * zero-initialized default, and printing this line for those would read
+     * as a planner decision instead of the "not attempted" it actually is. */
+    if (runtime->vram_enabled)
+        fprintf(stderr,
+            "vram_tiers free=%.2fGiB reserve=%.2fGiB kv=%s(%.2fGiB) "
+            "dense=%s(%.2fGiB) head=%s(%.2fGiB) dspark=%s(%.2fGiB) used=%.2fGiB\n",
+            tier_inputs.vram_available_bytes / (double)GIB,
+            base_vram_reserve / (double)GIB,
+            runtime->kv_vram_enabled ? "vram" : "ram", kv_device_bytes / (double)GIB,
+            tiers.dense_location == COLI_V4_DENSE_VRAM ? "vram" : "ram",
+            tiers.dense_device_bytes / (double)GIB,
+            head_device ? "vram" : "ram", head_bytes / (double)GIB,
+            dspark_wanted && vram_plan.dspark == COLI_V4_TIER_VRAM ? "vram" : "ram",
+            dspark_bytes / (double)GIB,
+            vram_plan.vram_used_bytes / (double)GIB);
+#endif
     ColiDeepSeekV4ExpertStoreOptions automatic = *options;
     automatic.cache_bytes = plan.expert_cache_bytes;
     automatic.pin_slots_per_layer = runtime->pin_slots_per_layer;
@@ -7864,6 +7875,17 @@ void coli_v4_engine_destroy(ColiV4Engine *engine) {
 #ifdef COLI_V4_CUDA
     v4_cuda_kv_free(engine->head_cache.device);
     coli_v4_dspark_gpu_release();
+    /* coli_v4_kv_vram_enabled is a process global (coli_v4_window_attention_
+     * create takes only a config, not an engine -- see plans/08-vram-planner.md,
+     * Commit 1).  Only clear it if this engine was the one that last set it,
+     * so a destroyed engine cannot turn off the mirror a still-live sibling
+     * engine is using; this does not make genuinely concurrent engines with
+     * different VRAM plans fully safe, but it closes the common leak where a
+     * closed engine's "on" state lingers for whatever opens next. */
+    extern int coli_v4_kv_vram_enabled;
+    if (engine->runtime.kv_vram_enabled && coli_v4_kv_vram_enabled)
+        coli_v4_kv_vram_enabled = 0;
+    engine->runtime.kv_vram_enabled = 0;
 #endif
     engine->head_cache.device = NULL;
     if (engine->owns_experts && engine->experts && engine->experts->ops &&
@@ -12107,6 +12129,23 @@ uint64_t coli_v4_kv_context_bytes(
     return total;
 }
 
+/* The device compressed-KV buffer (grow_compressed_state, all three
+ * ATTENTION copies) starts at capacity 16 and doubles in place whenever the
+ * next insert would overflow the current capacity, so the live allocation
+ * for `rows` entries is the smallest 16*2^k at or above `rows`, not `rows`
+ * itself.  Reserving the exact row count under-books by up to ~2x right
+ * after a context size crosses a doubling threshold, and the CUDA-side
+ * grow allocates the larger buffer before freeing the smaller one, so the
+ * transient peak is closer to ~3x. */
+static uint64_t v4_kv_compressed_capacity_rows(uint64_t rows) {
+    uint64_t capacity = 16;
+    while (capacity < rows) {
+        if (capacity > UINT64_MAX / 2) return UINT64_MAX;
+        capacity *= 2;
+    }
+    return capacity;
+}
+
 uint64_t coli_v4_kv_device_bytes(
     int layers, int sliding_window, int head_dim, int rope_dim,
     const int *compress_ratios, int context, ColiV4KVCodec codec) {
@@ -12122,6 +12161,7 @@ uint64_t coli_v4_kv_device_bytes(
         if (!ratio) continue;
         uint64_t compressed = ((uint64_t)context + (uint64_t)ratio - 1) /
                               (uint64_t)ratio;
+        compressed = v4_kv_compressed_capacity_rows(compressed);
         if (compressed > (UINT64_MAX - total) / kv_row) return UINT64_MAX;
         total += compressed * kv_row;
     }
