@@ -49,8 +49,9 @@ Drafter nur gegen Tiny grün bekommt, hat den Drafter nicht getestet.
 
 **DSpark steckt darin.** Die Drafter-Tensoren liegen im selben Checkpoint unter dem
 Präfix `mtp.<stage>.` — colibri sucht sie in `engine->target_index`, nicht in einem
-zweiten Modellverzeichnis
-([c/deepseek_v4.c:6325](c/deepseek_v4.c), [c/deepseek_v4_dspark.inc:243](c/deepseek_v4_dspark.inc)).
+zweiten Modellverzeichnis (`v4_dspark_markov_probe`,
+[c/deepseek_v4.c:7571](c/deepseek_v4.c); `v4_ds_name`,
+[c/deepseek_v4_dspark.inc:193](c/deepseek_v4_dspark.inc)).
 Es gibt kein separates DSpark-Repo zu laden; ein solcher Link führt nur in die Irre.
 
 ## Die Pläne
@@ -69,7 +70,7 @@ und nicht wiederholen.
 | 04 | [TurboQuant](plans/04-turboquant.md) | fertig (#6) |
 | 05 | [CUDA-Attention](plans/05-cuda-attention.md) | fertig (#7) |
 | 06 | [Dense in VRAM](plans/06-dense-vram.md) | fertig (#8) |
-| 07 | [Head und DSpark in VRAM](plans/07-head-dspark-vram.md) | offen |
+| 07 | [Head und DSpark in VRAM](plans/07-head-dspark-vram.md) | fertig (#9) |
 | 08 | [VRAM-Planner](plans/08-vram-planner.md) | offen |
 | 09 | [Arch / CachyOS](plans/09-arch-cachyos.md) | offen |
 | 10 | [Dual-Streaming](plans/10-dual-streaming.md) | offen |
@@ -86,6 +87,11 @@ Referenzdokumente ohne Nummer:
 ### Empfohlene Reihenfolge
 
 Die Nummern sind Kennungen, keine Reihenfolge. So wird gearbeitet:
+
+**Stand:** 01–07 sind fertig, als nächstes steht **08** an. Die Tabelle unten ist
+die ursprüngliche Empfehlung und wurde nicht buchstäblich befolgt: 09 Commit 1+1b
+und 12 wurden übersprungen, dafür lief 02 → 05 → 06 → 07 am Stück durch, und 04
+kam vor 07 statt danach. Für den Rest gilt sie unverändert.
 
 | Schritt | Plan | Warum hier |
 |---|---|---|
@@ -185,12 +191,16 @@ Default zurück, und ein Eintrag in `docs/ENVIRONMENT.md`.
 im Repo — die committete Datei ist Source of Truth. **Vier** Quelldateien stehen
 mehrfach darin, jeweils unter `#define`-Umbenennungen:
 
-| Quelle | Kopien | Beispiel-Definition |
+| Quelle | Kopien | Units (`#ifdef COLI_V4_UNIT_…`) |
 |---|---|---|
-| `deepseek_v4_attention.c` | **3** | Struct bei 1400 / 1798 / 4572 |
-| `deepseek_v4_compressor.c` | **2** | `coli_v4_compressor_step` 2538 / 4042 |
-| `deepseek_v4_indexer.c` | **2** | `coli_v4_indexer_step` 2827 / 4390 |
-| `deepseek_v4_layer.c` | **2** | `coli_v4_layer_plan` 355 / 9548 |
+| `deepseek_v4_attention.c` | **3** | `ATTENTION`, `ATTENTION_BATCH`, `ATTENTION_TRANSACTION` |
+| `deepseek_v4_compressor.c` | **2** | `COMPRESSOR`, `COMPRESSOR_SNAPSHOT` |
+| `deepseek_v4_indexer.c` | **2** | `INDEXER`, `INDEXER_SNAPSHOT` |
+| `deepseek_v4_layer.c` | **2** | `LAYER_RESIDENT`, `LAYER` |
+
+Die Units stehen als `#ifdef`-Blöcke in der Datei — `grep -n 'COLI_V4_UNIT' c/deepseek_v4.c`
+gibt die aktuellen Grenzen. Zeilennummern hier zu notieren lohnt nicht; sie
+verschieben sich bei jedem Commit, der die Datei anfasst.
 
 Jede Änderung muss in **alle** Kopien der betroffenen Quelle, **plus** in den
 Batch-Pfad `coli_v4_attention_window_batch_ref`, der die Attention-Logik nochmal
@@ -198,9 +208,12 @@ als eigenen Text enthält. Der Compressor/Indexer-Fall ist der, der übersehen w
 `plans/03-kv-codec.md` und `plans/12-expert-cache-policy.md` fassen beide genau
 diese zwei Funktionen an.
 
-`plans/02-flash-attention.md` führt einen Test ein, der die Gleichheit erzwingt —
-über alle vier Quellen, nicht nur die Attention. Ist der noch nicht da, prüfe von
-Hand mit `diff` (die Zeilenbereiche stehen in `plans/00-reference.md`).
+**Der Test dafür existiert:** `c/tests/test_v4_attention_source.py` vergleicht die
+Kopien aller vier Quellen markerbasiert — Attention 3×, Compressor 2×, Indexer 2×,
+und für `deepseek_v4_layer.c` die vier gemeinsamen Definitionen, weil
+`LAYER_RESIDENT` bewusst den Rows8-Block dazu hat. Dazu prüft
+`c/tests/test_deepseek_v4_dspark_source.py` die Drafter-Invarianten. Beide laufen
+in `make -C c check`; wer eine Kopie vergisst, wird dort rot.
 
 ### 4. Tests sind Teil des Commits
 
@@ -287,8 +300,8 @@ Agent nichts wieder.
 ## Bekannte Fallstricke
 
 - **`packed_rows8`** ist kein Checkpoint-Format, sondern ein AVX2-Repack nach dem
-  Laden ([c/deepseek_v4.c:488](c/deepseek_v4.c)). Die Scales bleiben 128×128. Für
-  GPU-Tensoren einfach überspringen.
+  Laden (`v4_fp8_pack_rows8_inplace`, [c/deepseek_v4.c:496](c/deepseek_v4.c)). Die
+  Scales bleiben 128×128. Für GPU-Tensoren einfach überspringen.
 - **Der Indexer-Cache ist nicht gedeckelt.** Der `capacity > 128`-Deckel gilt nur
   der Erstallokation; `coli_v4_indexer_step` verdoppelt danach unbegrenzt.
 - **Der Indexer-Scan ist der größte übersehene Posten.** `coli_v4_indexer_step`

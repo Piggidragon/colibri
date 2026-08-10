@@ -43,7 +43,9 @@ lokal vorhanden unter
 
 Das ist das **einzige** Modellverzeichnis. DSpark liegt im selben Checkpoint unter dem
 Präfix `mtp.<stage>.` — colibri sucht die Drafter-Tensoren in
-`engine->target_index` ([c/deepseek_v4.c:6325](../c/deepseek_v4.c)), nicht in einem
+`engine->target_index` (`v4_dspark_markov_probe`,
+[c/deepseek_v4.c:7571](../c/deepseek_v4.c); Namensbau `v4_ds_name`,
+[c/deepseek_v4_dspark.inc:193](../c/deepseek_v4_dspark.inc)), nicht in einem
 zweiten Verzeichnis. Ein separates DSpark-Repo gibt es nicht zu laden.
 
 Andere Modelle sind in diesem Fork ausdrücklich kein Ziel; der Rückbau steht in
@@ -71,8 +73,8 @@ Haupthebel.**
 
 ## RAM-Bilanz
 
-Abgeleitet aus `build_runtime_plan` ([c/deepseek_v4.c:924](../c/deepseek_v4.c))
-und `coli_v4_resource_plan_compute` ([:693](../c/deepseek_v4.c)). Alle Zahlen bei
+Abgeleitet aus `build_runtime_plan` ([c/deepseek_v4.c:1207](../c/deepseek_v4.c))
+und `coli_v4_resource_plan_compute` ([:877](../c/deepseek_v4.c)). Alle Zahlen bei
 `CTX=131072` (128k) — derselbe Kontext, den Plan 03/05/08 für ihre Deltas
 verwenden, damit Baseline und Phasen-Gewinne vergleichbar bleiben.
 
@@ -108,7 +110,7 @@ nicht zulässig. Plan 01 muss die tatsächliche `ram_tiers`-Entscheidung messen.
 
 **Die `2 × maximum_layer_bytes`-Zeile wird leicht übersehen.**
 `coli_v4_resource_plan_compute` addiert sie in die Runtime-Reserve
-([:719](../c/deepseek_v4.c)), *zusätzlich* zu `runtime_other`:
+([:903](../c/deepseek_v4.c)), *zusätzlich* zu `runtime_other`:
 
 ```c
 if (multiply_u64(inputs->maximum_layer_bytes, 2, &layers_twice) ||
@@ -116,7 +118,7 @@ if (multiply_u64(inputs->maximum_layer_bytes, 2, &layers_twice) ||
 ```
 
 `maximum_layer_bytes` ist der größte Einzel-Layer aus der Dense-Inventur
-([:947](../c/deepseek_v4.c)) — auf dieser Konfiguration Layer 2 (CSA **und**
+([:1230](../c/deepseek_v4.c)) — auf dieser Konfiguration Layer 2 (CSA **und**
 Hash-Router, also `ffn.gate.tid2eid` statt `.bias`) mit ~0.162 GiB. Zwei davon
 sind ~0.32 GiB, die keiner Phase gehören und in keiner Phase verschwinden. Eine
 frühere Fassung dieser Bilanz ließ sie ganz weg.
@@ -169,15 +171,15 @@ dense fp8          5.456  Phase 6 — Checkpoint-Inventur: 5.455 GiB Weights
                            + 0.001 GiB expandierte Scales; 0.810 GiB sonstige
                            Dense-Tensoren bleiben im RAM
 head bf16          0.99   Phase 7 — 129280 × 4096 × 2 B = 1.059 GB = 0.986 GiB
-DSpark             0.56   Phase 7 — nur der residente Teil (markov_w1/w2,
-                           main_proj_w); die 768-MiB-Marge in der RAM-Reserve
+DSpark             0.32   Phase 7 — **gemessen** 330 MiB für den Backbone beim
+                           Lazy-Upload; die 768-MiB-Marge in der RAM-Reserve
                            deckt Head-/Scratch-Bedarf ab, ist kein VRAM-Tensor
 workspace         ~0.30
                   ─────
-Fixkosten          7.31 GiB   → ~3.39 GiB bleiben für den KV
+Fixkosten          7.07 GiB   → ~3.63 GiB bleiben für den KV
 ```
 
-**Drei Korrekturen gegenüber früheren Fassungen, alle nach unten.**
+**Vier Korrekturen gegenüber früheren Fassungen, alle nach unten.**
 
 1. Die **Planner-Reserve aus Plan 08** (`free/8`, geklemmt auf 256 MiB…1 GiB)
    fehlte hier ganz. Auf einer 11.7-GiB-Karte greift der obere Clamp, also volle
@@ -193,6 +195,10 @@ Fixkosten          7.31 GiB   → ~3.39 GiB bleiben für den KV
 3. Die echte Phase-06-Inventur trennt **5.456 GiB verschiebbare FP8-Weights und
    Scales** von **0.810 GiB BF16/f32/i64**, die auf dem Host bleiben. Die frühere
    Bilanz behandelte fälschlich alle 6.267 GiB als CUDA-Tensoren.
+4. Der **DSpark-Posten war mit 0.56 GiB geschätzt; Phase 07 hat 330 MiB
+   gemessen** (0.32 GiB). Die Differenz geht direkt in das KV-Budget: ~3.63
+   statt ~3.39 GiB. Die Planner-Reserve wächst mit aktivem Drafter entsprechend
+   von 1.00 auf 1.32 GiB, siehe [07-head-dspark-vram.md](07-head-dspark-vram.md).
 
 Der **Attention-KV auf dem Gerät** entscheidet damit die erreichbare
 Kontextlänge. Die bislang hier geführten Gesamt-KV-Zahlen enthielten fälschlich
@@ -408,9 +414,9 @@ colibri **rechnet genau das schon**:
 
 | Strom | Code | Tatsächliche Präzision |
 |---|---|---|
-| Fenster-KV | [c/deepseek_v4.c:1655](../c/deepseek_v4.c) | fp8-QDQ Dims 0–447 (Block 64, E8M0), bf16 Dims 448–511 |
-| CSA/HCA komprimiert | [:2643](../c/deepseek_v4.c) ff. | dasselbe |
-| Indexer komprimiert | [:2654](../c/deepseek_v4.c) | Hadamard-Rotation + fp4-QDQ über alle 128 Dims (Block 32) |
+| Fenster-KV | `coli_v4_kv_encode_row` [c/deepseek_v4.c:11843](../c/deepseek_v4.c) | fp8-QDQ Dims 0–447 (Block 64, E8M0), bf16 Dims 448–511 |
+| CSA/HCA komprimiert | [:3427](../c/deepseek_v4.c) ff. | dasselbe |
+| Indexer komprimiert | [:3437](../c/deepseek_v4.c) | Hadamard-Rotation + fp4-QDQ über alle 128 Dims (Block 32) |
 
 Die letzten beiden Zeilen sind **eine** Codestelle, kein Paar: `coli_v4_compressor_step`
 verzweigt über `state->rotate_fp4` zwischen fp8/64 und Hadamard+fp4/32 und wählt
@@ -421,7 +427,7 @@ Zeile ändert, ändert beide Ströme.
 output[base + i] = coli_e4m3fn_decode(coli_e4m3fn_encode(normalized)) * scale;
 scales[base / block_size] = encoded_scale;        /* E8M0-Byte */
 ```
-([:10096](../c/deepseek_v4.c))
+([:11475](../c/deepseek_v4.c))
 
 …und legt das Ergebnis dann in `float`-Arrays ab. Der gespeicherte Wert ist exakt
 `bf16_round(e4m3_decode(q) · e8m0_decode(s))` — aus `(q, s)` **bit-exakt**
@@ -442,15 +448,16 @@ V4 ist **absorbierte MLA mit hybridem Cache**:
 
 - **Ein** KV-Vektor pro Position, `head_dim=512`, von allen 64 Heads geteilt.
   `coli_v4_sparse_attention_ref` liest `kv + index * head_dim` als **Key und Value
-  zugleich** ([c/deepseek_v4.c:2934](../c/deepseek_v4.c)).
+  zugleich** ([c/deepseek_v4.c:3728](../c/deepseek_v4.c)).
 - **Sliding-Window-Ring** `state->kv`, `sliding_window × head_dim` f32, konstant groß.
 - **Komprimierter Cache** `state->compressed`, wächst mit `ctx/ratio`.
 - **Indexer** wählt per Top-k, welche komprimierten Zeilen überhaupt gesehen werden
-  (Struct [:2687](../c/deepseek_v4.c), Bewertung und Auswahl [:2893](../c/deepseek_v4.c) ff.).
+  (Struct [:3471](../c/deepseek_v4.c), Bewertung und Auswahl in
+  `coli_v4_indexer_step` [:3604](../c/deepseek_v4.c) ff.).
 - **Attention-Sinks** pro Head, `attn.attn_sink`, gehen in den Softmax-Nenner.
 
 ```
-ColiDeepSeekV4WindowAttentionState        c/deepseek_v4.c:1400
+ColiDeepSeekV4WindowAttentionState        c/deepseek_v4.c:2010
   int    window_size, head_dim, layer, ratio
   float *kv                    [window_size × head_dim]   Ring
   float *compressed            [compressed_count × head_dim]
@@ -460,7 +467,7 @@ ColiDeepSeekV4WindowAttentionState        c/deepseek_v4.c:1400
 ```
 
 Pro Layer eine Instanz, `session->attention[layer]`
-([c/deepseek_v4_internal.h:673](../c/deepseek_v4_internal.h)).
+([c/deepseek_v4_internal.h:789](../c/deepseek_v4_internal.h)).
 
 ## Die duplizierten Units
 
@@ -474,54 +481,40 @@ Quelldateien stehen **byte-identisch mehrfach** darin, jeweils unter
 Abschnitts nannte nur sie; damit fehlten genau die Funktionen, die Plan 03 und
 Plan 12 anfassen wollen. Vollständig:
 
-| Quelle | Kopien | Units | Definitionen |
+| Quelle | Kopien | Units (`#ifdef COLI_V4_UNIT_…`) | Anker-Definition |
 |---|---|---|---|
-| `deepseek_v4_attention.c` | **3** | `ATTENTION`, `ATTENTION_BATCH`, `ATTENTION_TRANSACTION` | Struct 1400 / 1798 / 4572 |
-| `deepseek_v4_compressor.c` | **2** | `COMPRESSOR`, `COMPRESSOR_SNAPSHOT` | `coli_v4_compressor_step` 2538 / 4042 |
-| `deepseek_v4_indexer.c` | **2** | `INDEXER`, `INDEXER_SNAPSHOT` | `coli_v4_indexer_step` 2827 / 4390 |
-| `deepseek_v4_layer.c` | **2** | `LAYER_RESIDENT`, `LAYER` | `coli_v4_layer_plan` 355 / 9548 |
+| `deepseek_v4_attention.c` | **3** | `ATTENTION`, `ATTENTION_BATCH`, `ATTENTION_TRANSACTION` | `struct ColiDeepSeekV4WindowAttentionState {` |
+| `deepseek_v4_compressor.c` | **2** | `COMPRESSOR`, `COMPRESSOR_SNAPSHOT` | `int coli_v4_compressor_step(` |
+| `deepseek_v4_indexer.c` | **2** | `INDEXER`, `INDEXER_SNAPSHOT` | `int coli_v4_indexer_step(` |
+| `deepseek_v4_layer.c` | **2** | `LAYER_RESIDENT`, `LAYER` | `int coli_v4_layer_plan(` |
 
-Die Attention-Kopien im Detail:
+**Hier stehen bewusst keine Zeilennummern.** Sie waren in früheren Fassungen mit
+`sed -n 'A,Bp' | diff`-Rezepten hinterlegt und nach den Phasen 05–07 sämtlich
+falsch — die Datei ist allein dort um rund 1400 Zeilen gewachsen. Die Grenzen
+stehen ohnehin in der Datei selbst:
 
-| Unit | Zeilen | Struct | `all_kv` | Fenster-Write | Compressor-Write |
-|---|---|---|---|---|---|
-| `COLI_V4_UNIT_ATTENTION` | 1398–1770 | 1400 | 1676 | 1670 | 1597 |
-| `COLI_V4_UNIT_ATTENTION_BATCH` | 1796–2168 | 1798 | 2074 | 2068 | 1995 |
-| `COLI_V4_UNIT_ATTENTION_TRANSACTION` | 4570–4942 | 4572 | 4848 | 4842 | 4769 |
-
-Verifiziert identisch:
 ```bash
-sed -n '1398,1770p' c/deepseek_v4.c > /tmp/a1; sed -n '1796,2168p' c/deepseek_v4.c > /tmp/a2
-sed -n '4570,4942p' c/deepseek_v4.c > /tmp/a3; diff /tmp/a1 /tmp/a2 && diff /tmp/a1 /tmp/a3
-```
-
-Compressor und Indexer genauso — die `_SNAPSHOT`-Units bestehen aus dem
-umbenannten Original plus dem Snapshot-Code dahinter. Die Rename-Makros der
-Snapshot-Units liegen bewusst außerhalb der verglichenen Bereiche:
-```bash
-sed -n '2418,2668p' c/deepseek_v4.c > /tmp/c1; sed -n '3922,4172p' c/deepseek_v4.c > /tmp/c2
-diff /tmp/c1 /tmp/c2
-
-sed -n '2674,2920p' c/deepseek_v4.c > /tmp/i1; sed -n '4237,4483p' c/deepseek_v4.c > /tmp/i2
-diff /tmp/i1 /tmp/i2
+grep -n 'COLI_V4_UNIT' c/deepseek_v4.c        # alle Unit-Grenzen
+grep -n 'struct ColiDeepSeekV4WindowAttentionState {' c/deepseek_v4.c   # die 3 Kopien
 ```
 
 `LAYER_RESIDENT` ist der einzige Fall, der **kein** exaktes Duplikat ist: es ist
-`deepseek_v4_layer.c` **plus** `v4_fp8_pack_rows8_inplace` ([:488](../c/deepseek_v4.c)).
-`coli_v4_layer_plan`, `coli_v4_layer_validate` und `coli_v4_layer_load` stehen
-trotzdem zweimal da — relevant für Plan 06, der `coli_v4_layer_load` ändert.
-Für einen sauberen Diff werden der zusätzliche Helfer und der resident-spezifische
-Rows8-Block ausgelassen; der übrige Unit-Text ist identisch:
+`deepseek_v4_layer.c` **plus** `v4_fp8_pack_rows8_inplace`
+([:496](../c/deepseek_v4.c)) und den resident-spezifischen Rows8-Block in
+`coli_v4_layer_load`. `coli_v4_layer_plan`, `coli_v4_layer_validate`,
+`coli_v4_layer_free` und `coli_v4_layer_data` stehen trotzdem zweimal da.
 
-```bash
-sed -n '297,484p;512,541p;553,569p' c/deepseek_v4.c > /tmp/l1
-sed -n '9490,9724p' c/deepseek_v4.c > /tmp/l2
-diff /tmp/l1 /tmp/l2
-```
+Dazu kommt der **Batch-Pfad** `coli_v4_attention_window_batch_ref`
+([:2959](../c/deepseek_v4.c)), der dieselbe Attention-Logik pro Item nochmal
+enthält — und der ist kein Duplikat, sondern eigener Text.
 
-Dazu kommt der **Batch-Pfad** `coli_v4_attention_window_batch_ref` ([:2180](../c/deepseek_v4.c)),
-der dieselbe Attention-Logik pro Item nochmal enthält (`all_kv` bei 2335,
-Fenster-Write 2328) — und der ist kein Duplikat, sondern eigener Text.
+**Prüfen muss man das nicht von Hand.** `c/tests/test_v4_attention_source.py`
+vergleicht alle vier Quellen markerbasiert (Attention 3×, Compressor 2×,
+Indexer 2×, für Layer die vier gemeinsamen Definitionen mit der bewussten
+Rows8-Ausnahme) und hält zusätzlich fest, dass alle Attention-Aufrufer denselben
+Zwei-Quellen-Codec-Pfad und denselben CUDA-Einsprung haben.
+`c/tests/test_deepseek_v4_dspark_source.py` tut dasselbe für die
+Drafter-Invarianten. Beide laufen in `make -C c check`.
 
 **Nichts erzwingt diese Gleichheit heute.** Der Source-Sync-Test aus Plan 02 ist
 deshalb Voraussetzung für alles Weitere, nicht Beiwerk — und er muss **alle vier
@@ -614,7 +607,7 @@ Wiederverwendbar aus [c/backend_cuda.h](../c/backend_cuda.h):
 - **`coli_cuda_matmul` mit `fmt=8`** = fp8-e4m3, ein Byte pro Gewicht, Scales pro
   **128×128**-Block ([c/backend_cuda.cu:1066](../c/backend_cuda.cu)) — genau V4s
   Dense-Format. V4 dispatcht seine fp8-Matmuls ohnehin durch dasselbe shared
-  `matmul_fp8` aus `quant.h` ([c/deepseek_v4.c:9946](../c/deepseek_v4.c)).
+  `matmul_fp8` aus `quant.h` ([c/deepseek_v4.c:11630](../c/deepseek_v4.c)).
 - `coli_cuda_fp8_set_lut` muss vor jedem fmt=8-Upload aufgerufen sein.
 
 **Nicht** wiederverwendbar: `coli_cuda_attention_absorb*` — auf GLMs Geometrie
@@ -668,22 +661,22 @@ nicht identisch — Referenz, keine Spezifikation.
 ### `packed_rows8` — kein Hindernis
 
 Naheliegender Verdacht: `packed_rows8`
-([c/deepseek_v4_internal.h:153](../c/deepseek_v4_internal.h)) beschreibe eine
+([c/deepseek_v4_internal.h:179](../c/deepseek_v4_internal.h)) beschreibe eine
 feinere Scale-Granularität (8×128 statt 128×128), die `coli_cuda_matmul` nicht kann.
 **Stimmt nicht.**
 
-`v4_fp8_pack_rows8_inplace` ([c/deepseek_v4.c:488](../c/deepseek_v4.c)) ist eine
+`v4_fp8_pack_rows8_inplace` ([c/deepseek_v4.c:496](../c/deepseek_v4.c)) ist eine
 reine **Byte-Layout-Transposition innerhalb von 8-Zeilen-Kacheln**, nach dem Laden
 in-place angewandt, ausschließlich unter `__AVX2__`, für den AVX2-Zielkernel. Die
 Scales werden getrennt über `st_read_scale_f32` gelesen und behalten ihre
-128×128-Granularität aus `add_fp8` ([:343](../c/deepseek_v4.c)). `block_rows = 8`
+128×128-Granularität aus `add_fp8` ([:347](../c/deepseek_v4.c)). `block_rows = 8`
 in der `ColiTensorView` beschreibt die *Gewichtskachelung*, nicht die
 Scale-Auflösung.
 
 Für GPU-Tensoren wird der Repack schlicht **übersprungen** — dann liegt row-major
 fp8 mit 128×128-f32-Scales vor, exakt das fmt=8-Format. Kein Sonderkernel, kein
 Präzisionsverlust. Gilt genauso für DSpark, dessen `v4_ds_pack_rows8`
-([c/deepseek_v4_dspark.inc:113](../c/deepseek_v4_dspark.inc)) dieselbe
+([c/deepseek_v4_dspark.inc:130](../c/deepseek_v4_dspark.inc)) dieselbe
 Transposition mit demselben Kommentar ist.
 
 ## Konventionen
@@ -692,20 +685,26 @@ Transposition mit demselben Kommentar ist.
 `COLI_V4_*` für Engine-Interna (`COLI_V4_DIRECT`, `COLI_V4_AUTOPIN`).
 Neue Knöpfe dieses Branches:
 
-| Variable | Default | Phase |
-|---|---|---|
-| `V4_SCRATCH_MB` | 512 | 01 |
-| `V4_FLASH` | 1 | 02 |
-| `V4_KV` | `native` | 03 |
-| `V4_KV_INDEX` | `native` | 03 |
-| `V4_VRAM` | 0 | 05–08 |
-| `V4_VRAM_RESERVE_MB` | `free/8`, geklemmt 256…1024 | 06 (vorgezogen), 08 |
-| `V4_VRAM_LIMIT_MB` | aus (kappt das gemeldete freie VRAM) | 08 |
-| `V4_VRAM_FAIL_AT` | aus, nur unter `COLI_V4_TEST_HOOKS` | 08 |
-| `V4_OMP_CORES` | `perf`, wenn erkennbar; sonst `all` | 09 |
-| `V4_PIN_SLOTS` | 16 | 12 |
-| `V4_PIN_FRACTION` | aus (Alternative zu `V4_PIN_SLOTS`) | 12 |
-| `V4_PIN_RAMP_REQUESTS` | 24 | 12 |
+| Variable | Default | Phase | Stand |
+|---|---|---|---|
+| `V4_SCRATCH_MB` | 512 | 01 | gebaut |
+| `V4_FLASH` | 1 | 02 | gebaut |
+| `V4_KV` | `native` | 03 | gebaut |
+| `V4_KV_INDEX` | `native` | 03 | gebaut |
+| `V4_VRAM` | 0 | 05–08 | gebaut |
+| `V4_VRAM_RESERVE_MB` | `free/8`, geklemmt 256…1024 | 06 (vorgezogen), 08 | gebaut |
+| `V4_VRAM_LIMIT_MB` | aus (kappt das gemeldete freie VRAM) | 08 | geplant |
+| `V4_VRAM_FAIL_AT` | aus, nur unter `COLI_V4_TEST_HOOKS` | 08 | geplant |
+| `V4_OMP_CORES` | `perf`, wenn erkennbar; sonst `all` | 09 | geplant |
+| `V4_PIN_SLOTS` | 16 | 12 | geplant |
+| `V4_PIN_FRACTION` | aus (Alternative zu `V4_PIN_SLOTS`) | 12 | geplant |
+| `V4_PIN_RAMP_REQUESTS` | 24 | 12 | geplant |
+
+Die sechs `gebaut`-Knöpfe stehen in `docs/ENVIRONMENT.md`. Die geerbten
+Upstream-Knöpfe (`V4_MTP*`, `V4_DRAFT`, `V4_NGRAM`, `V4_PREFIX_LOG`,
+`COLI_V4_*`) stehen dort **nicht** — sie werden vom Code gelesen, sind aber nie
+dokumentiert worden. Wer einen davon anfasst, dokumentiert ihn bei der
+Gelegenheit nach.
 
 **Diese Tabelle ist die Liste, nicht die Phasenpläne.** Wer einen Knopf einführt
 und ihn hier vergisst, hat ihn nur halb eingeführt — die Pflegeregel in
@@ -727,7 +726,7 @@ daraus automatisch Gates. Keine zentrale Liste, kein Merge-Konflikt.
 
 - Der **Indexer** entscheidet per Top-k, *welche* Tokens gesehen werden — das ist
   Router-Semantik. Quantisierung dort ist immer opt-in und getrennt schaltbar.
-- Der `head_argmax`-Kommentar ([c/deepseek_v4.c:6774](../c/deepseek_v4.c)) hält
+- Der `head_argmax`-Kommentar ([c/deepseek_v4.c:8097](../c/deepseek_v4.c)) hält
   ausdrücklich fest, dass Akkumulationsreihenfolge und Vokabularordnung erhalten
   bleiben, damit Logits und Tie-Breaking sich nicht ändern. Eine GPU-Reduktion
   ändert das — deshalb Toleranz und opt-in.
@@ -742,7 +741,7 @@ daraus automatisch Gates. Keine zentrale Liste, kein Merge-Konflikt.
 | 04 | [TurboQuant](04-turboquant.md) | turbo2/3/4 als verlustbehafteter Tier | +0.27 GiB vor 08; +0.012 danach³ | −2.0 bei 1M |
 | 05 | [CUDA-Attention](05-cuda-attention.md) | `backend_cuda_v4`, Flash-Kernel, Attention-KV-Spiegel | 0 (Host-Shadow) | −0.39 |
 | 06 | [Dense in VRAM](06-dense-vram.md) | fp8-Residenz + Matmuls auf GPU | +5.456 GiB | −5.456 |
-| 07 | [Head und DSpark in VRAM](07-head-dspark-vram.md) | Head-Matvec + Drafter auf GPU | +2.16 GiB | −1.55² |
+| 07 | [Head und DSpark in VRAM](07-head-dspark-vram.md) | Head-Matvec + Drafter auf GPU | +2.16 GiB | −1.31² |
 | 08 | [VRAM-Planner](08-vram-planner.md) | Stufenplanung, exklusive KV-Eigentümerschaft, 4070-Profil | +0.39 GiB¹ | — |
 | 09 | [Arch / CachyOS](09-arch-cachyos.md) | `omp_tune.h`, THP, CUDA-Pfade | — | — |
 | 10 | [Dual-Streaming](10-dual-streaming.md) | Mirror-Maschinerie nach V4, gewichtete Stripes | — | — |
@@ -754,9 +753,9 @@ daraus automatisch Gates. Keine zentrale Liste, kein Merge-Konflikt.
 ¹ 03 hat den gesamten KV bereits von 1.68 auf 0.43 GiB (128k) gesenkt. 05 spiegelt
 den 0.388-GiB-Attention-Anteil, 08 entfernt erst dessen Host-Shadow; 0.044 GiB
 nativer Indexer-KV bleiben im RAM.
-² 0.99 GiB Head + ~0.56 GiB DSpark-Tensoren gehen tatsächlich auf die GPU (siehe
-VRAM-Budget oben); die restlichen ~0.61 GiB der DSpark-RAM-Reserve waren Marge für
-Head/Scratch, kein eigener VRAM-Posten.
+² 0.99 GiB Head + **gemessene 0.32 GiB** DSpark-Backbone gehen tatsächlich auf die
+GPU (siehe VRAM-Budget oben); die restlichen ~0.85 GiB der 1.17-GiB-DSpark-RAM-Reserve
+waren Marge für Head/Scratch, kein eigener VRAM-Posten.
 ³ Vor 08 komprimiert 04 auch den Host-Shadow. Danach bleibt als RAM-Gewinn nur
 der Indexer (0.044 → 0.032 GiB bei 128k); Attention-KV zahlt im VRAM ein. Bei 1M
 passt `native` (3.08 GiB) nach der Phase-06-Inventur nominell in das ~3.39-GiB-
