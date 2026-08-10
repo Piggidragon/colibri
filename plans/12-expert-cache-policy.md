@@ -69,6 +69,51 @@ Praxis heißt das: `bench_v4.py`s `medium`/`long`-Profile brauchen auf dieser
 Maschine mehrere Minuten pro Konfiguration, nicht die im Plan angenommenen
 „paar Minuten".
 
+## Ergebnis Commit 2
+
+Gebaut: die Bewertungsschleife (1) in `coli_v4_indexer_step` (`#pragma omp
+parallel for`, mit `reduction(|:decode_failed)` statt eines direkten
+Schreibzugriffs auf `result` aus der parallelen Region — letzteres wäre ein
+Datenrennen) und der Sort (2) (`qsort` → `coli_v4_indexer_select`, Min-Heap-
+basierter Partial-Select, O(count log topk) statt O(count log count)) — in
+**beiden** Kopien (`INDEXER`, `INDEXER_SNAPSHOT`), identisch, wie
+[AGENTS.md](../AGENTS.md) für die duplizierten Units verlangt.
+
+`coli_v4_indexer_select` liegt als `static inline` in
+`deepseek_v4_internal.h` (Typ `ColiV4IndexScore`, geteilt von beiden Kopien
+über einen Type-Alias `typedef ColiV4IndexScore IndexScore;`) statt in einer
+der beiden Units: die Funktion ist reine Array-Logik ohne V4-Zustand, und eine
+unit-lokale Definition hätte in `INDEXER_SNAPSHOT` denselben Rename-Trick
+gebraucht wie jedes andere dortige Symbol (`#define coli_v4_indexer_step
+snapshot_copy_indexer_step` etc.) — für keinen Gewinn. So bekommt jede
+Übersetzungseinheit, die den Header includet, ihre eigene private Kopie, und
+der Test braucht kein `deepseek_v4.c` und keinen Unit-Define.
+
+**Getestet:** `c/tests/test_v4_indexer_select.c` vergleicht
+`coli_v4_indexer_select` gegen eine Referenz-`qsort` mit demselben
+Tie-Break (aufsteigender Index bei Score-Gleichstand) für `count` ∈ {1, 512,
+513, 250000}, `topk` ∈ {1, count/2, count, count+37}, und drei
+Score-Verteilungen (alle verschieden, viele Gleichstände, alle gleich) —
+identische Indexliste in identischer Reihenfolge in jedem Fall, plus die
+Randfälle `count=0` und `topk≤0`. Läuft in <0.4 s, keine Abhängigkeit auf
+`deepseek_v4.c`.
+
+**Verifiziert gegen den echten Checkpoint:** `make -C c test`, `make -C c
+check` und `make -C c deepseek-v4-tiny-check` (Token-identisch) sind grün mit
+Commit 1+2 zusammen. Ein manueller Lauf gegen den vollen Checkpoint
+(`CTX=4096`, `V4_VRAM=1`, Prompt „Say hi", `--max-tokens 8`) liefert exakt
+denselben Text (`Hi! How can I help you today`) wie derselbe Lauf auf dem
+Commit-1-only-Stand — die Parallelisierung und der Partial-Select ändern die
+Token-Ausgabe nicht.
+
+**Nicht gemessen:** der behauptete Geschwindigkeitsgewinn der
+Bewertungsschleife selbst (skaliert sie tatsächlich mit der Teamgröße, oder
+ist sie speicherbandbreitengebunden wie in der Abnahme als mögliches Ergebnis
+vorgesehen?) — dafür bräuchte es einen Lauf mit großem `state->count`
+(langer Kontext), und genau der ist der Lauf, der in dieser Sitzung am
+kalten Cache scheiterte (siehe Commit 1 oben). Offen für eine Folge-Messung,
+sobald ein Lauf mit warmem Cache oder viel mehr Zeitbudget möglich ist.
+
 ## Warum dieser Plan überhaupt existiert
 
 **Das war die größte Lücke im Planset.** Die Pläne 01–11 machen alle dasselbe:

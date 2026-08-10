@@ -3689,7 +3689,11 @@ struct ColiDeepSeekV4Indexer {
     float *compressor_scratch;
 };
 
-typedef struct { float score; int index; } IndexScore;
+/* Alias, not a redefinition: the type moved to deepseek_v4_internal.h
+ * (ColiV4IndexScore) so coli_v4_indexer_select() can be a single static
+ * inline shared by both indexer copies and their test -- see
+ * plans/12-expert-cache-policy.md Commit 2. */
+typedef ColiV4IndexScore IndexScore;
 
 static int set_error(char *error, size_t size, const char *format, ...) {
     if (error && size) {
@@ -3707,13 +3711,6 @@ static const void *value(const ColiDeepSeekV4LayerWeights *weights,
     char name[COLI_V4_MAX_TENSOR_NAME];
     snprintf(name, sizeof(name), "layers.%d.%s", weights->plan.layer, suffix);
     return coli_v4_layer_data(weights, name, spec);
-}
-
-static int descending_score(const void *left, const void *right) {
-    const IndexScore *a = left, *b = right;
-    if (a->score < b->score) return 1;
-    if (a->score > b->score) return -1;
-    return a->index - b->index;
 }
 
 int coli_v4_indexer_create(ColiDeepSeekV4Indexer **output,
@@ -3880,33 +3877,46 @@ int coli_v4_indexer_step(ColiDeepSeekV4Indexer *state, int *indices,
             sum += coli_bf16_decode(row[column]) * input[column];
         head_weights[head] = sum * weight_scale;
     }
-    for (int candidate = 0; !result && candidate < state->count; candidate++) {
-        const void *key = (const unsigned char *)state->compressed +
-                          (size_t)candidate * state->row_bytes;
-        /* Keep decode storage candidate-local so a future OpenMP scan gets a
-         * private buffer per worker instead of sharing compressor scratch. */
-        float decoded[dimension];
-        const float *values = key;
-        if (state->codec != COLI_V4_KV_F32) {
-            result = coli_v4_kv_decode_row(
-                state->codec, COLI_V4_KV_INDEX,
-                decoded, key, dimension, 0);
-            values = decoded;
+    /* The scan is read-only except for each candidate's own scores[] slot
+     * and a decode buffer that is already stack-local per iteration, so it
+     * parallelizes without changing which candidate wins -- see
+     * plans/12-expert-cache-policy.md Commit 2. decode_failed uses a
+     * bitwise-or reduction instead of writing `result` directly from inside
+     * the parallel region, which would be a data race. Skipped entirely
+     * (not just no-op per-iteration) when an earlier stage already failed,
+     * matching the original `!result &&` loop guard without breaking the
+     * canonical-loop form #pragma omp for requires. */
+    int decode_failed = 0;
+    if (!result) {
+        #pragma omp parallel for reduction(|:decode_failed)
+        for (int candidate = 0; candidate < state->count; candidate++) {
+            const void *key = (const unsigned char *)state->compressed +
+                              (size_t)candidate * state->row_bytes;
+            float decoded[dimension];
+            const float *values = key;
+            if (state->codec != COLI_V4_KV_F32) {
+                if (coli_v4_kv_decode_row(
+                        state->codec, COLI_V4_KV_INDEX,
+                        decoded, key, dimension, 0))
+                    decode_failed = 1;
+                values = decoded;
+            }
+            float score = 0.0f;
+            for (int head = 0; head < heads; head++) {
+                const float *query = queries + (size_t)head * dimension;
+                float dot = 0.0f;
+                for (int column = 0; column < dimension; column++)
+                    dot += query[column] * values[column];
+                score += fmaxf(dot, 0.0f) * head_weights[head];
+            }
+            scores[candidate] = (IndexScore){score, candidate};
         }
-        float score = 0.0f;
-        for (int head = 0; head < heads; head++) {
-            const float *query = queries + (size_t)head * dimension;
-            float dot = 0.0f;
-            for (int column = 0; column < dimension; column++)
-                dot += query[column] * values[column];
-            score += fmaxf(dot, 0.0f) * head_weights[head];
-        }
-        scores[candidate] = (IndexScore){score, candidate};
+        if (decode_failed) result = -1;
     }
-    if (!result) qsort(scores, (size_t)state->count, sizeof(*scores), descending_score);
     int selected = state->count;
     if (selected > state->config->index_topk) selected = state->config->index_topk;
     if (selected > index_capacity) selected = index_capacity;
+    if (!result) coli_v4_indexer_select(scores, state->count, selected);
     for (int i = 0; !result && i < selected; i++) indices[i] = scores[i].index;
     free(qdq); free(scales); free(scores); free(head_weights); free(queries);
     return result ? set_error(error, error_size, "indexer scoring failed") : selected;
@@ -5494,7 +5504,11 @@ struct ColiDeepSeekV4Indexer {
     float *compressor_scratch;
 };
 
-typedef struct { float score; int index; } IndexScore;
+/* Alias, not a redefinition: the type moved to deepseek_v4_internal.h
+ * (ColiV4IndexScore) so coli_v4_indexer_select() can be a single static
+ * inline shared by both indexer copies and their test -- see
+ * plans/12-expert-cache-policy.md Commit 2. */
+typedef ColiV4IndexScore IndexScore;
 
 static int set_error(char *error, size_t size, const char *format, ...) {
     if (error && size) {
@@ -5512,13 +5526,6 @@ static const void *value(const ColiDeepSeekV4LayerWeights *weights,
     char name[COLI_V4_MAX_TENSOR_NAME];
     snprintf(name, sizeof(name), "layers.%d.%s", weights->plan.layer, suffix);
     return coli_v4_layer_data(weights, name, spec);
-}
-
-static int descending_score(const void *left, const void *right) {
-    const IndexScore *a = left, *b = right;
-    if (a->score < b->score) return 1;
-    if (a->score > b->score) return -1;
-    return a->index - b->index;
 }
 
 int coli_v4_indexer_create(ColiDeepSeekV4Indexer **output,
@@ -5685,33 +5692,46 @@ int coli_v4_indexer_step(ColiDeepSeekV4Indexer *state, int *indices,
             sum += coli_bf16_decode(row[column]) * input[column];
         head_weights[head] = sum * weight_scale;
     }
-    for (int candidate = 0; !result && candidate < state->count; candidate++) {
-        const void *key = (const unsigned char *)state->compressed +
-                          (size_t)candidate * state->row_bytes;
-        /* Keep decode storage candidate-local so a future OpenMP scan gets a
-         * private buffer per worker instead of sharing compressor scratch. */
-        float decoded[dimension];
-        const float *values = key;
-        if (state->codec != COLI_V4_KV_F32) {
-            result = coli_v4_kv_decode_row(
-                state->codec, COLI_V4_KV_INDEX,
-                decoded, key, dimension, 0);
-            values = decoded;
+    /* The scan is read-only except for each candidate's own scores[] slot
+     * and a decode buffer that is already stack-local per iteration, so it
+     * parallelizes without changing which candidate wins -- see
+     * plans/12-expert-cache-policy.md Commit 2. decode_failed uses a
+     * bitwise-or reduction instead of writing `result` directly from inside
+     * the parallel region, which would be a data race. Skipped entirely
+     * (not just no-op per-iteration) when an earlier stage already failed,
+     * matching the original `!result &&` loop guard without breaking the
+     * canonical-loop form #pragma omp for requires. */
+    int decode_failed = 0;
+    if (!result) {
+        #pragma omp parallel for reduction(|:decode_failed)
+        for (int candidate = 0; candidate < state->count; candidate++) {
+            const void *key = (const unsigned char *)state->compressed +
+                              (size_t)candidate * state->row_bytes;
+            float decoded[dimension];
+            const float *values = key;
+            if (state->codec != COLI_V4_KV_F32) {
+                if (coli_v4_kv_decode_row(
+                        state->codec, COLI_V4_KV_INDEX,
+                        decoded, key, dimension, 0))
+                    decode_failed = 1;
+                values = decoded;
+            }
+            float score = 0.0f;
+            for (int head = 0; head < heads; head++) {
+                const float *query = queries + (size_t)head * dimension;
+                float dot = 0.0f;
+                for (int column = 0; column < dimension; column++)
+                    dot += query[column] * values[column];
+                score += fmaxf(dot, 0.0f) * head_weights[head];
+            }
+            scores[candidate] = (IndexScore){score, candidate};
         }
-        float score = 0.0f;
-        for (int head = 0; head < heads; head++) {
-            const float *query = queries + (size_t)head * dimension;
-            float dot = 0.0f;
-            for (int column = 0; column < dimension; column++)
-                dot += query[column] * values[column];
-            score += fmaxf(dot, 0.0f) * head_weights[head];
-        }
-        scores[candidate] = (IndexScore){score, candidate};
+        if (decode_failed) result = -1;
     }
-    if (!result) qsort(scores, (size_t)state->count, sizeof(*scores), descending_score);
     int selected = state->count;
     if (selected > state->config->index_topk) selected = state->config->index_topk;
     if (selected > index_capacity) selected = index_capacity;
+    if (!result) coli_v4_indexer_select(scores, state->count, selected);
     for (int i = 0; !result && i < selected; i++) indices[i] = scores[i].index;
     free(qdq); free(scales); free(scores); free(head_weights); free(queries);
     return result ? set_error(error, error_size, "indexer scoring failed") : selected;
