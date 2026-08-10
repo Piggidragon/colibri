@@ -27,6 +27,11 @@ static float decode(uint16_t value) {
     return result;
 }
 
+/* The real vocabulary needs 1.06 GiB on the device and as much again on the
+ * host.  A machine that cannot spare it has not found a kernel defect, so the
+ * case reports a skip and main propagates the harness's 77. */
+enum { CASE_OK = 0, CASE_FAIL = -1, CASE_SKIP = 77 };
+
 static int run_case(int vocab) {
     enum { DIMENSION = 4096 };
     size_t weights_bytes = (size_t)vocab * DIMENSION * sizeof(uint16_t);
@@ -34,18 +39,25 @@ static int run_case(int vocab) {
     float *hidden = (float *)malloc((size_t)DIMENSION * sizeof(*hidden));
     float *cpu = (float *)malloc((size_t)vocab * sizeof(*cpu));
     float *gpu = (float *)malloc((size_t)vocab * sizeof(*gpu));
-    if (!weights || !hidden || !cpu || !gpu) return -1;
+    if (!weights || !hidden || !cpu || !gpu) {
+        free(gpu); free(cpu); free(hidden); free(weights);
+        return CASE_SKIP;
+    }
     for (int column = 0; column < DIMENSION; column++) hidden[column] = sample();
     for (size_t item = 0; item < (size_t)vocab * DIMENSION; item++)
         weights[item] = bf16(sample());
+    void *device = v4_cuda_kv_alloc(weights_bytes);
+    if (!device) {
+        free(gpu); free(cpu); free(hidden); free(weights);
+        return CASE_SKIP;
+    }
     for (int row = 0; row < vocab; row++) {
         float sum = 0.0f;
         for (int column = 0; column < DIMENSION; column++)
             sum += decode(weights[(size_t)row * DIMENSION + column]) * hidden[column];
         cpu[row] = sum;
     }
-    void *device = v4_cuda_kv_alloc(weights_bytes);
-    int result = !device || v4_cuda_copy_to_device(device, 0, weights, weights_bytes)
+    int result = v4_cuda_copy_to_device(device, 0, weights, weights_bytes)
         || v4_cuda_head_logits(gpu, device, hidden, 1, vocab, DIMENSION);
     float max_abs = 0.0f;
     double dot = 0.0, cpu2 = 0.0, gpu2 = 0.0;
@@ -70,7 +82,7 @@ static int run_case(int vocab) {
     }
     v4_cuda_kv_free(device);
     free(gpu); free(cpu); free(hidden); free(weights);
-    return result;
+    return result ? CASE_FAIL : CASE_OK;
 }
 
 static int tie_breaks_to_lower_token(void) {
@@ -78,7 +90,10 @@ static int tie_breaks_to_lower_token(void) {
     size_t bytes = (size_t)VOCAB * DIMENSION * sizeof(uint16_t);
     uint16_t *weights = (uint16_t *)calloc(1, bytes);
     float *hidden = (float *)calloc(DIMENSION, sizeof(*hidden));
-    if (!weights || !hidden) return -1;
+    if (!weights || !hidden) {
+        free(hidden); free(weights);
+        return CASE_FAIL;
+    }
     for (int column = 0; column < DIMENSION; column++) hidden[column] = 1.0f;
     for (int column = 0; column < DIMENSION; column++) {
         weights[(size_t)17 * DIMENSION + column] = bf16(1.0f);
@@ -100,9 +115,27 @@ int main(void) {
         puts("test_v4_head_cuda: skipped (no CUDA device)");
         return 77;
     }
-    int result = run_case(128) || run_case(129280) || tie_breaks_to_lower_token();
+    static const int vocabularies[] = {128, 129280};
+    int result = CASE_OK;
+    int skipped = 0;
+    for (size_t i = 0; result == CASE_OK &&
+                       i < sizeof(vocabularies) / sizeof(*vocabularies); i++) {
+        int status = run_case(vocabularies[i]);
+        if (status == CASE_SKIP) {
+            fprintf(stderr, "test_v4_head_cuda: vocab=%d does not fit\n",
+                    vocabularies[i]);
+            skipped = 1;
+        } else {
+            result = status;
+        }
+    }
+    if (result == CASE_OK) result = tie_breaks_to_lower_token();
     v4_cuda_shutdown();
     if (result) return 1;
+    if (skipped) {
+        puts("test_v4_head_cuda: skipped (head does not fit this device)");
+        return 77;
+    }
     puts("test_v4_head_cuda: ok");
     return 0;
 }

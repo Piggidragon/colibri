@@ -56,6 +56,16 @@ class DeepSeekV4DSparkSourceTest(unittest.TestCase):
         self.assertIn("static int v4_ds_pack_rows8(", self.drafter)
         self.assertIn("view->block_rows = 8", self.drafter)
 
+    def test_cuda_matvec_quantizes_the_activation_like_the_reference(self):
+        start = self.drafter.index("static int v4_ds_mm(")
+        end = self.drafter.index("static int v4_ds_core_load(", start)
+        body = self.drafter[start:end]
+        self.assertIn(
+            "coli_fp8_activation_qdq_ref(qdq, scales, input, count, 128)", body
+        )
+        self.assertIn("coli_cuda_matmul(&cached, out, qdq,", body)
+        self.assertNotIn("coli_cuda_matmul(&cached, out, input,", body)
+
     def test_cuda_shared_expert_keeps_reference_swiglu_boundaries(self):
         cuda = self.drafter.index("if (g_v4ds_gpu_active)")
         cpu = self.drafter.index("ColiTensorView shared_gate", cuda)

@@ -244,10 +244,22 @@ static int v4_ds_mm(float *out, const uint8_t *weight, const float *scale,
                     int64_t rows, int64_t columns, const float *input) {
 #ifdef COLI_V4_CUDA
     if (device) {
+        /* quant_matmul dequantizes the weight only, so the activation has to
+         * arrive already quantized or the device would answer a different
+         * product than the reference below.  One allocation carries both
+         * halves; the kernel never reads the block scales the quantizer
+         * insists on writing. */
+        size_t count = (size_t)columns;
+        float *qdq = malloc(count * sizeof(*qdq) + (count + 127) / 128);
+        if (!qdq) return -1;
+        uint8_t *scales = (uint8_t *)(qdq + count);
         ColiCudaTensor *cached = device;
-        if (!coli_cuda_matmul(&cached, out, input, NULL, NULL, 8, 1,
-                               (int)columns, (int)rows, 0, 0))
-            return -1;
+        int computed =
+            !coli_fp8_activation_qdq_ref(qdq, scales, input, count, 128) &&
+            coli_cuda_matmul(&cached, out, qdq, NULL, NULL, 8, 1,
+                             (int)columns, (int)rows, 0, 0);
+        free(qdq);
+        if (!computed) return -1;
         v4_ds_bf16(out, (size_t)rows);
         return 0;
     }
