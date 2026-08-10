@@ -9,8 +9,7 @@
 
 <p align="center">
   <a href="https://justvugg.github.io/colibri"><b>Website</b></a> ·
-  <a href="https://discord.gg/fpQxKnRb"><b>Discord</b></a> ·
-  English · <a href="README.zh-CN.md">简体中文</a> · <a href="README.zh-TW.md">繁體中文</a> · <a href="README.it.md">Italiano</a>
+  <a href="https://discord.gg/fpQxKnRb"><b>Discord</b></a>
 </p>
 
 **Tiny engine, immense model.** Run **frontier MoE models — 744B to 2.8T

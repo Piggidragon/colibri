@@ -57,9 +57,8 @@ auf CUDA baut; der generische Decode-zurück-in-den-Originalraum-Pfad bleibt das
 Testorakel dafür. Phase 05 setzt den rotierten Modus deshalb nicht voraus und
 beginnt mit direkter Turbo-Dequantisierung im Originalraum. Entsprechend sind
 die beiden nicht implementierten Variablen aus der Referenztabelle entfernt
-worden. Ein Full-Checkpoint-Durchsatz- und
-Tokenqualitätstest steht aus, weil der 167-GB-Checkpoint in der
-Entwicklungsumgebung nicht vorhanden ist. `make test` und `make check` sind
+worden. Ein Full-Checkpoint-Durchsatz- und Tokenqualitätstest gegen den lokalen
+Checkpoint steht noch aus. `make test` und `make check` sind
 grün. Das vorhandene Tiny-Fixture besteht Oracle und Prefix-Reuse mit Defaults
 und mit `V4_KV{,_INDEX}=turbo2|turbo3|turbo4`; alle drei Einstellungen warnen
 wie vorgesehen und fallen wegen der 32er-Dimension token-identisch auf `native`

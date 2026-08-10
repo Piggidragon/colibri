@@ -27,9 +27,12 @@ PROFILE_SPECS = {
 
 RAM_RE = re.compile(
     r"ram_tiers available=(?P<available>[\d.]+)GiB "
-    r"dense=(?P<dense_state>[^ (]+)\((?P<dense>[\d.]+)GiB\) "
+    r"(?:vram=[\d.]+GiB\(reserve=[\d.]+GiB\) )?"
+    r"dense=(?P<dense_state>[^ (]+)"
+    r"(?:\(host=(?P<dense_host>[\d.]+)GiB device=[\d.]+GiB\)|"
+    r"\((?P<dense_legacy>[\d.]+)GiB\)) "
     r"target_slots=(?P<slots>\d+) target_cache=(?P<cache>[\d.]+)GiB "
-    r"head=(?P<head>\S+) projected=(?P<projected>[\d.]+)GiB"
+    r"head=(?P<head>\S+)(?: dspark=\S+)? projected=(?P<projected>[\d.]+)GiB"
 )
 TOKENS_RE = re.compile(
     r"v4_tokens prompt=(?P<prompt>\d+) generated=(?P<generated>\d+) "
@@ -118,7 +121,7 @@ def parse_engine_output(stderr: str, config: dict[str, object], context: int) ->
         "disk_gb_per_token": int(tokens["bytes"]) / forward_tokens / 1e9,
         "ram_available_gib": float(ram["available"]),
         "dense_state": ram["dense_state"],
-        "dense_gib": float(ram["dense"]),
+        "dense_gib": float(ram["dense_host"] or ram["dense_legacy"]),
         "target_slots": int(ram["slots"]),
         "ram_cache_gib": float(ram["cache"]),
         "head_state": ram["head"],

@@ -27,12 +27,25 @@ der WebUI — das ist die tägliche Bedienung, siehe [Plan 13](plans/13-frontend
 **Optimiere für diese Hardware**, nicht für Allgemeingültigkeit — aber ohne die
 Semantik des Modells zu ändern (siehe Regeln).
 
-**Ein** Checkpoint:
-[deepseek-ai/DeepSeek-V4-Flash-0731](https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash-0731).
+**Ein** Checkpoint —
+[deepseek-ai/DeepSeek-V4-Flash-0731](https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash-0731) —
+und er **liegt auf dieser Maschine vollständig vor**:
+
+```
+~/Services/models/colibri/deepseek-v4-flash    161 GB, 48 Shards, 72 317 Tensoren
+```
+
+Das ist das Modellverzeichnis für jeden Test gegen echte Gewichte. Das Binary
+nimmt es als erstes Positionsargument:
 
 ```bash
-hf download deepseek-ai/DeepSeek-V4-Flash-0731 --local-dir /pfad/DeepSeek-V4-Flash
+c/deepseek_v4 ~/Services/models/colibri/deepseek-v4-flash "prompt" --max-tokens 64
 ```
+
+Die 4 705 `mtp.0`–`mtp.2`-Tensoren sind darin enthalten, also ist es zugleich
+das **einzige** Fixture, mit dem DSpark-Pfade überhaupt laufen: das
+Tiny-Fixture aus Regel 4 hat null `mtp.*`-Tensoren. Wer eine Änderung am
+Drafter nur gegen Tiny grün bekommt, hat den Drafter nicht getestet.
 
 **DSpark steckt darin.** Die Drafter-Tensoren liegen im selben Checkpoint unter dem
 Präfix `mtp.<stage>.` — colibri sucht sie in `engine->target_index`, nicht in einem
@@ -63,6 +76,7 @@ und nicht wiederholen.
 | 11 | [Rückbau auf V4](plans/11-strip-to-v4.md) | offen, **zuletzt** |
 | 12 | [Expert-Cache-Politik](plans/12-expert-cache-policy.md) | offen |
 | 13 | [Frontend V4-only](plans/13-frontend-v4.md) | offen, optional |
+| 14 | [Chunked Prefill + DSpark](plans/14-chunked-prefill-dspark.md) | offen |
 
 Referenzdokumente ohne Nummer:
 [Paper](plans/paper-deepseek-v4.md) ·
@@ -84,18 +98,22 @@ Die Nummern sind Kennungen, keine Reihenfolge. So wird gearbeitet:
 | 7 | **06** | Dense in VRAM — der größte RAM-Einzelposten. |
 | 8 | **07** | Head und DSpark in VRAM. |
 | 9 | **08** | VRAM-Planner, der 05–07 zu einer Entscheidung zusammenfasst. |
-| 10 | **10** | Dual-Streaming. Unabhängig, kann ab Schritt 2 jederzeit dazwischen. Das zweite Laufwerk ist **optional** — Einzellaufwerk bleibt Default und Pflicht-Abnahme. |
-| 11 | **09 Rest** | THP, CUDA-Pfade, Tuning-Doku. |
-| 12 | **04** | TurboQuant — fürs 1M-Profil empfohlen; `native` passt nach der gemessenen Dense-Korrektur nominell mit nur ~0.31 GiB Luft (siehe VRAM-Budget in 00). |
-| 13 | **13** | Frontend. |
-| 14 | **11** | Rückbau. |
+| 10 | **04** | TurboQuant — Pflicht für das 256k-/1M-Langkontextprofil. |
+| 11 | **14** | Macht 256k mit TurboQuant und DSpark ohne Voll-Prefill-Buffer möglich; vor jedem 1M-Versuch. |
+| 12 | **10** | Dual-Streaming. Unabhängig, kann ab Schritt 2 jederzeit dazwischen. Das zweite Laufwerk ist **optional** — Einzellaufwerk bleibt Default und Pflicht-Abnahme. |
+| 13 | **09 Rest** | THP, CUDA-Pfade, Tuning-Doku. |
+| 14 | **13** | Frontend. |
+| 15 | **11** | Rückbau. |
 
 **Harte Abhängigkeiten**, die man nicht umstellen darf:
 
 - **01 vor allem** — ohne Baseline ist keine Behauptung prüfbar
 - **02 vor 05** — der CPU-Flash-Kernel ist Vorlage und Testorakel für den CUDA-Kernel
 - **03 vor 04** — Turbo hängt am Codec-Interface
+- **04 vor 14** — das tägliche 256k-Profil und das 1M-Experiment verwenden Turbo3
 - **05 Commit 1 vor 06/07** — dort entsteht der CUDA-Build für V4
+- **07 und 08 vor 14** — Chunked Prefill muss den verifizierten DSpark-Decode
+  und dessen endgültige VRAM-Planung übernehmen, nicht eine Zwischenform
 - **13 vor 11** — sonst ist der Launcher zwischenzeitlich kaputt
 - **10 vor 11** — 11 löscht den Mirror-Code, den 10 als Vorlage braucht
 - **11 zuletzt**, immer
@@ -115,7 +133,6 @@ sich darum, *was* im Cache liegt.
 **Ein Plan, ein Branch, ein PR.** Keine Sammel-PRs über mehrere Phasen.
 
 ```
-planning              ← die Pläne selbst und diese Datei
 phase-01-ram-budget
 phase-02-flash-attention
 phase-03-kv-codec
@@ -129,10 +146,14 @@ phase-10-dual-streaming
 phase-11-strip-to-v4
 phase-12-expert-cache
 phase-13-frontend
+phase-14-chunked-prefill
 ```
 
 - Branch von `main`, außer der Plan hängt an einem anderen — dann von dessen
   Branch, und der PR nennt die Abhängigkeit in der ersten Zeile.
+- **Es gibt keinen eigenen Doku-Branch.** Änderungen an `plans/` und an dieser
+  Datei laufen auf dem Phasenbranch mit, zu dem sie gehören; rein
+  übergreifende Doku geht als eigener kleiner PR direkt gegen `main`.
 - Die Commits innerhalb eines PRs folgen der Commit-Liste im Plan. Jeder Commit
   baut und ist grün. Kein „fixup später".
 - PR-Beschreibung: Link auf den Plan, die Abnahmekriterien als Checkliste, die
@@ -201,8 +222,8 @@ das ein Befund und gehört in den PR-Text — nicht weggedrückt.
 
 Für die erzwungene Neugenerierung braucht der Check die exakt gepinnten
 CPU-Pakete aus `c/tools/requirements-deepseek-v4-tiny.txt`. Auf dieser Maschine
-ist dafür `.venv-v4-tiny` eingerichtet; sie braucht weder CUDA noch den
-167-GB-Checkpoint. Reproduzierbar neu anlegen und verwenden:
+ist dafür `.venv-v4-tiny` eingerichtet; sie braucht weder CUDA noch den vollen
+Checkpoint. Reproduzierbar neu anlegen und verwenden:
 
 ```bash
 uv venv .venv-v4-tiny --python /usr/bin/python3

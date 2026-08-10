@@ -3,8 +3,9 @@
 Übergeordnetes Dokument. Hier stehen Zielbild, Hardware-Budget, Codekarte und
 Konventionen; die Phasenpläne `01`–`13` setzen das voraus und wiederholen es nicht.
 
-- Pläne auf Branch `planning`; jede Phase bekommt einen eigenen Branch und PR
-  (Schema und Reihenfolge in [AGENTS.md](../AGENTS.md))
+- Jede Phase bekommt einen eigenen Branch und PR; Planänderungen laufen auf dem
+  Branch der zugehörigen Phase mit (Schema und Reihenfolge in
+  [AGENTS.md](../AGENTS.md))
 - Lizenz: Repo ist Apache-2.0, der TurboQuant-Referenz-Fork MIT → Attribution im
   portierten Header plus vollständiger Lizenztext in `THIRD_PARTY_NOTICES`.
   `reference/` selbst wird **nicht** committet.
@@ -33,13 +34,14 @@ alles unverändert, nur mit ~7 statt ~10 GB/s Lesebandbreite. Kein Plan außer 1
 kennt es, und auch 10 hat den Einzellaufwerk-Betrieb als Default und als
 Pflicht-Abnahme.
 
-**Checkpoint:** [deepseek-ai/DeepSeek-V4-Flash-0731](https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash-0731)
+**Checkpoint:** [deepseek-ai/DeepSeek-V4-Flash-0731](https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash-0731),
+lokal vorhanden unter
 
-```bash
-hf download deepseek-ai/DeepSeek-V4-Flash-0731 --local-dir /pfad/DeepSeek-V4-Flash
+```
+~/Services/models/colibri/deepseek-v4-flash
 ```
 
-Das ist der **einzige** Download. DSpark liegt im selben Checkpoint unter dem
+Das ist das **einzige** Modellverzeichnis. DSpark liegt im selben Checkpoint unter dem
 Präfix `mtp.<stage>.` — colibri sucht die Drafter-Tensoren in
 `engine->target_index` ([c/deepseek_v4.c:6325](../c/deepseek_v4.c)), nicht in einem
 zweiten Verzeichnis. Ein separates DSpark-Repo gibt es nicht zu laden.
@@ -747,6 +749,7 @@ daraus automatisch Gates. Keine zentrale Liste, kein Merge-Konflikt.
 | 11 | [Rückbau auf V4](11-strip-to-v4.md) | andere Motoren + Windows raus | — | — |
 | 12 | [Expert-Cache-Politik](12-expert-cache-policy.md) | Pin-Deckel, Indexer (Scan + Select), Prefill | — | — |
 | 13 | [Frontend V4-only](13-frontend-v4.md) | WebUI, CLI, Serve auf V4 | — | — |
+| 14 | [Chunked Prefill + DSpark](14-chunked-prefill-dspark.md) | 256k-Aktivierungsfenster und MTP-Handoff | spart bis zu `CTX/chunk`-fachen State | — |
 
 ¹ 03 hat den gesamten KV bereits von 1.68 auf 0.43 GiB (128k) gesenkt. 05 spiegelt
 den 0.388-GiB-Attention-Anteil, 08 entfernt erst dessen Host-Shadow; 0.044 GiB
@@ -825,13 +828,13 @@ make -C c PYTHON="$PWD/.venv-v4-tiny/bin/python" deepseek-v4-tiny-check
 
 Der Generator baut ein deterministisches Drei-Layer-Modell von unter 1 MiB mit
 der offiziellen `DeepseekV4ForCausalLM`-Implementierung. Das deckt das lokale
-Oracle ab, nicht Durchsatz oder Qualität des 167-GB-Checkpoints.
+Oracle ab, nicht Durchsatz oder Qualität des vollen Checkpoints.
 
-Sobald der Checkpoint da ist (`hf download deepseek-ai/DeepSeek-V4-Flash-0731`,
-~167 GB) greift zusätzlich:
+Gegen den lokalen Checkpoint greift zusätzlich:
 
 ```bash
-make -C c deepseek-v4-oracle MODEL=/pfad/DeepSeek-V4-Flash MEMORY_GB=28
+make -C c deepseek-v4-oracle \
+  MODEL=~/Services/models/colibri/deepseek-v4-flash MEMORY_GB=28
 ```
 
 ## Was dieser Branch nicht macht

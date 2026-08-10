@@ -963,8 +963,37 @@ $(V4_OWN_DIR)/COLI_V4_UNIT_NATIVE_QUANT.o: deepseek_v4.c deepseek_v4.h deepseek_
 $(V4_OWN_DIR)/COLI_V4_UNIT_KV_CODEC.o: deepseek_v4.c deepseek_v4.h deepseek_v4_internal.h v4_kv_codec.h native_quant.h turbo_quant.h | $(V4_OWN_DIR)
 	$(CC) $(V4_OWN_CFLAGS) -DCOLI_V4_UNIT_KV_CODEC -c deepseek_v4.c -o $@
 
-tests/test_v4_ownership$(EXE): tests/test_v4_ownership.c $(V4_OWNERSHIP_OBJS)
+tests/test_v4_ownership$(EXE): tests/test_v4_ownership.c \
+		tests/v4_engine_fixture.h $(V4_OWNERSHIP_OBJS)
 	$(CC) $(V4_OWN_CFLAGS) $< $(V4_OWNERSHIP_OBJS) -o $@ -pthread $(LDFLAGS)
+
+tests/test_v4_dspark_reserve$(EXE): tests/test_v4_dspark_reserve.c \
+		tests/v4_engine_fixture.h $(V4_OWNERSHIP_OBJS)
+	$(CC) $(V4_OWN_CFLAGS) $< $(V4_OWNERSHIP_OBJS) -o $@ -pthread $(LDFLAGS)
+
+V4_HEAD_TIER_DIR = build/v4-head-tier
+
+$(V4_HEAD_TIER_DIR):
+	mkdir -p $(V4_HEAD_TIER_DIR)
+
+$(V4_HEAD_TIER_DIR)/head_cache.o: deepseek_v4.c deepseek_v4.h \
+		deepseek_v4_internal.h | $(V4_HEAD_TIER_DIR)
+	$(CC) $(CFLAGS) -DCOLI_V4_UNIT_HEAD_CACHE -c deepseek_v4.c -o $@
+
+# The head-cache unit reaches into the safetensors reader for its load path.
+$(V4_HEAD_TIER_DIR)/st.o: deepseek_v4.c deepseek_v4.h deepseek_v4_internal.h \
+		st.h | $(V4_HEAD_TIER_DIR)
+	$(CC) $(CFLAGS) -DCOLI_V4_UNIT_ST -c deepseek_v4.c -o $@
+
+# ... which in turn wants the BF16 decoder from the quant unit.
+$(V4_HEAD_TIER_DIR)/native_quant.o: deepseek_v4.c deepseek_v4.h \
+		deepseek_v4_internal.h quant.h | $(V4_HEAD_TIER_DIR)
+	$(CC) $(CFLAGS) -DCOLI_V4_UNIT_NATIVE_QUANT -c deepseek_v4.c -o $@
+
+tests/test_v4_head_tier$(EXE): tests/test_v4_head_tier.c \
+		$(V4_HEAD_TIER_DIR)/head_cache.o $(V4_HEAD_TIER_DIR)/st.o \
+		$(V4_HEAD_TIER_DIR)/native_quant.o
+	$(CC) $(CFLAGS) $^ -o $@ $(LDFLAGS)
 
 V4_ROWS8_DIR = build/v4-rows8
 V4_ROWS8_CFLAGS = $(CFLAGS) -DCOLI_V4_TEST_HOOKS

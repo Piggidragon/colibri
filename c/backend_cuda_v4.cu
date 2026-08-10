@@ -1,4 +1,5 @@
 #include <cuda_runtime.h>
+#include <float.h>
 
 #include "backend_cuda_v4.h"
 #include "backend_cuda.h"
@@ -67,6 +68,16 @@ extern "C" int v4_cuda_kv_write_row(void *base, int slot, const void *row,
                                  (size_t)slot * row_bytes;
     return coli_cuda_pipe_upload(
         g_v4_cuda_device, destination, row, row_bytes) ? 0 : -1;
+}
+
+extern "C" int v4_cuda_copy_to_device(void *base, size_t offset,
+                                        const void *source, size_t bytes) {
+    if (g_v4_cuda_device < 0 || !base || !source || !bytes ||
+        offset > SIZE_MAX - bytes)
+        return -1;
+    unsigned char *destination = static_cast<unsigned char *>(base) + offset;
+    return coli_cuda_pipe_upload(g_v4_cuda_device, destination, source, bytes)
+        ? 0 : -1;
 }
 
 extern "C" int v4_cuda_publish_tables(void) {
@@ -143,6 +154,129 @@ __device__ static float v4_e4m3_decode(unsigned char value) {
         bits |= (unsigned int)(mantissa - (1 << leading)) << (23 - leading);
     }
     return v4_bits_float(bits);
+}
+
+/* One block per output row.  This deliberately uses f32 accumulation, like
+ * the CPU head reference; only the reduction tree changes. */
+__global__ static void v4_head_logits_kernel(
+    float *logits, const unsigned short *head, const float *hidden,
+    int count, int vocab, int dimension) {
+    int row = (int)blockIdx.x;
+    int item = (int)blockIdx.y;
+    if (row >= vocab || item >= count) return;
+    const unsigned short *weight = head + (size_t)row * dimension;
+    const float *input = hidden + (size_t)item * dimension;
+    __shared__ float sums[256];
+    float sum = 0.0f;
+    for (int column = threadIdx.x; column < dimension; column += blockDim.x)
+        sum += v4_bf16_decode(weight[column]) * input[column];
+    sums[threadIdx.x] = sum;
+    __syncthreads();
+    for (int width = blockDim.x / 2; width; width >>= 1) {
+        if (threadIdx.x < width) sums[threadIdx.x] += sums[threadIdx.x + width];
+        __syncthreads();
+    }
+    if (!threadIdx.x) logits[(size_t)item * vocab + row] = sums[0];
+}
+
+/* The strict comparison is intentional: equal scores retain the lower
+ * vocabulary index, exactly like the CPU's ordered final scan. */
+__global__ static void v4_head_argmax_kernel(
+    const float *scores, float *best_logit, int *best_token, int vocab) {
+    __shared__ float values[256];
+    __shared__ int tokens[256];
+    float value = -FLT_MAX;
+    int token = -1;
+    for (int row = threadIdx.x; row < vocab; row += blockDim.x) {
+        float score = scores[row];
+        if (score > value || (score == value && (token < 0 || row < token))) {
+            value = score;
+            token = row;
+        }
+    }
+    values[threadIdx.x] = value;
+    tokens[threadIdx.x] = token;
+    __syncthreads();
+    for (int width = blockDim.x / 2; width; width >>= 1) {
+        if (threadIdx.x < width) {
+            float right = values[threadIdx.x + width];
+            int right_token = tokens[threadIdx.x + width];
+            if (right > values[threadIdx.x] ||
+                (right == values[threadIdx.x] && right_token >= 0 &&
+                 (tokens[threadIdx.x] < 0 || right_token < tokens[threadIdx.x]))) {
+                values[threadIdx.x] = right;
+                tokens[threadIdx.x] = right_token;
+            }
+        }
+        __syncthreads();
+    }
+    if (!threadIdx.x) {
+        *best_logit = values[0];
+        *best_token = tokens[0];
+    }
+}
+
+extern "C" int v4_cuda_head_logits(float *logits, const void *head,
+                                    const float *hidden, int count, int vocab,
+                                    int dimension) {
+    if (g_v4_cuda_device < 0 || !logits || !head || !hidden || count < 1 ||
+        vocab < 1 || dimension < 1)
+        return -1;
+    size_t hidden_bytes = (size_t)count * dimension * sizeof(*hidden);
+    size_t logits_bytes = (size_t)count * vocab * sizeof(*logits);
+    if (hidden_bytes / sizeof(*hidden) != (size_t)count * dimension ||
+        logits_bytes / sizeof(*logits) != (size_t)count * vocab)
+        return -1;
+    float *device_hidden = static_cast<float *>(v4_cuda_kv_alloc(hidden_bytes));
+    float *device_logits = static_cast<float *>(v4_cuda_kv_alloc(logits_bytes));
+    int result = -1;
+    if (device_hidden && device_logits &&
+        !v4_cuda_copy_to_device(device_hidden, 0, hidden, hidden_bytes)) {
+        v4_head_logits_kernel<<<dim3((unsigned)vocab, (unsigned)count), 256>>>(
+            device_logits, static_cast<const unsigned short *>(head), device_hidden,
+            count, vocab, dimension);
+        if (cudaGetLastError() == cudaSuccess &&
+            coli_cuda_pipe_download(g_v4_cuda_device, device_logits, logits,
+                                    logits_bytes))
+            result = 0;
+    }
+    v4_cuda_kv_free(device_logits);
+    v4_cuda_kv_free(device_hidden);
+    return result;
+}
+
+extern "C" int v4_cuda_head_argmax(float *best_logit, int *best_token,
+                                    const void *head, const float *hidden,
+                                    int vocab, int dimension) {
+    if (g_v4_cuda_device < 0 || !best_logit || !best_token || !head || !hidden ||
+        vocab < 1 || dimension < 1)
+        return -1;
+    size_t hidden_bytes = (size_t)dimension * sizeof(*hidden);
+    size_t scores_bytes = (size_t)vocab * sizeof(float);
+    /* Slots 6--9 belong to the V4 head path; attention owns 0--5.  Scratch is
+     * persistent per (device, slot), so decode never synchronizes on a fresh
+     * cudaFree after every generated token. */
+    float *device_hidden = coli_cuda_pipe_scratch(g_v4_cuda_device, 6, hidden_bytes);
+    float *device_scores = coli_cuda_pipe_scratch(g_v4_cuda_device, 7, scores_bytes);
+    float *device_logit = coli_cuda_pipe_scratch(g_v4_cuda_device, 8, sizeof(float));
+    int *device_token = reinterpret_cast<int *>(
+        coli_cuda_pipe_scratch(g_v4_cuda_device, 9, sizeof(int)));
+    int result = -1;
+    if (device_hidden && device_scores && device_logit && device_token &&
+        !v4_cuda_copy_to_device(device_hidden, 0, hidden, hidden_bytes)) {
+        v4_head_logits_kernel<<<(unsigned)vocab, 256>>>(
+            device_scores, static_cast<const unsigned short *>(head), device_hidden,
+            1, vocab, dimension);
+        v4_head_argmax_kernel<<<1, 256>>>(device_scores, device_logit,
+                                           device_token, vocab);
+        if (cudaGetLastError() == cudaSuccess &&
+            coli_cuda_pipe_download(g_v4_cuda_device, device_logit, best_logit,
+                                    sizeof(*best_logit)) &&
+            coli_cuda_pipe_download(g_v4_cuda_device, device_token, best_token,
+                                    sizeof(*best_token)))
+            result = *best_token < 0 ? -1 : 0;
+    }
+    return result;
 }
 
 template<int Codec>

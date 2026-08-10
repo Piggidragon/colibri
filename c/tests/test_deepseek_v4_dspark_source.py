@@ -56,6 +56,49 @@ class DeepSeekV4DSparkSourceTest(unittest.TestCase):
         self.assertIn("static int v4_ds_pack_rows8(", self.drafter)
         self.assertIn("view->block_rows = 8", self.drafter)
 
+    def test_full_reserve_is_the_same_in_both_placement_modes(self):
+        start = self.engine.index("static uint64_t v4_dspark_full_reserve_bytes")
+        body = self.engine[start:self.engine.index("\n}", start)]
+        # The upload is transactional, so the host peak is mode-independent;
+        # a VRAM-mode discount would be borrowed from the target cache.
+        self.assertIn("(void)gpu_resident;", body)
+        self.assertIn("768.0 * 1024.0 * 1024.0", body)
+        self.assertNotIn("if (gpu_resident)", body)
+
+    def test_cuda_matvec_quantizes_the_activation_like_the_reference(self):
+        start = self.drafter.index("static int v4_ds_mm(")
+        end = self.drafter.index("static int v4_ds_core_load(", start)
+        body = self.drafter[start:end]
+        self.assertIn(
+            "coli_fp8_activation_qdq_ref(qdq, scales, input, count, 128)", body
+        )
+        self.assertIn("coli_cuda_matmul(&cached, out, qdq,", body)
+        self.assertNotIn("coli_cuda_matmul(&cached, out, input,", body)
+
+    def test_cuda_shared_expert_keeps_reference_swiglu_boundaries(self):
+        cuda = self.drafter.index("if (g_v4ds_gpu_active)")
+        cpu = self.drafter.index("ColiTensorView shared_gate", cuda)
+        branch = self.drafter[cuda:cpu]
+        self.assertIn("v4_ds_bf16(gate", branch)
+        self.assertIn("v4_ds_bf16(up", branch)
+        self.assertIn("coli_v4_swiglu(activated, gate, up, intermediate,", branch)
+        self.assertIn("config->swiglu_limit", branch)
+        self.assertIn("v4_ds_bf16(activated", branch)
+        self.assertIn("v4_ds_bf16(out", branch)
+        self.assertNotIn("expf(-value)", branch)
+
+    def test_cuda_upload_failure_and_release_drop_all_global_state(self):
+        stage_release = self.drafter.index("static void v4_ds_stage_release")
+        release = self.drafter.index("static void v4_ds_release_all(void)")
+        upload = self.drafter.index("static int v4_ds_gpu_upload", release)
+        failure = self.drafter.index("gpu_fail:", upload)
+        failure_end = self.drafter.index("return 0;", failure)
+        self.assertIn("memset(&g_v4ds_core, 0", self.drafter[release:upload])
+        self.assertIn("memset(stage, 0", self.drafter[stage_release:release])
+        self.assertIn("v4_ds_release_all();", self.drafter[failure:failure_end])
+        self.assertNotIn("v4_ds_pack_rows8", self.drafter[failure:failure_end])
+        self.assertIn("v4_dspark warning=upload-failed", self.drafter)
+
     def test_chat_keeps_all_speculation_opt_in(self):
         for setting in (
             'env.setdefault("V4_DRAFT", "0")',

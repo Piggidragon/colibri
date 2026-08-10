@@ -39,9 +39,8 @@ aus drei Läufen zu je zehn Wiederholungen **33,397 → 23,548 ms/Layer (1,42×)
 diesen Attention-Anteil. Der Legacy-Arm enthält dabei die reale, zuvor pro Token
 ausgeführte 67-MB-Staging-Kopie; die **1,42× messen deren Eliminierung**, nicht
 einen isolierten Gewinn des Online-Softmax gegenüber dem zweistufigen Softmax.
-Der 167-GB-Checkpoint und die Zielmaschine waren in der Entwicklungsumgebung
-nicht vorhanden; das ist daher eine isolierte Staging-/Kernel-Messung, keine
-End-to-End-tok/s-Zahl.
+Das ist eine isolierte Staging-/Kernel-Messung, keine End-to-End-tok/s-Zahl;
+die steht gegen den lokalen Checkpoint noch aus.
 
 Verifikation: `make -C c test`, `make -C c check` und beide Tiny-Modi grün.
 

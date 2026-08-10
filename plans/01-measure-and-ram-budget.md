@@ -143,7 +143,7 @@ c=json.load(open(sys.argv[1]+'/config.json'))
 r=c['compress_ratios']
 print('layers', len(r), collections.Counter(r))
 print('sliding_window', c['sliding_window'], 'head_dim', c['head_dim'])
-" /pfad/DeepSeek-V4-Flash
+" ~/Services/models/colibri/deepseek-v4-flash
 ```
 
 **Erwartet wird** (Paper 4.2.1, siehe [00-reference.md](00-reference.md)):
@@ -152,8 +152,8 @@ print('sliding_window', c['sliding_window'], 'head_dim', c['head_dim'])
 KV-Rechnungen in 00, 03 und 04 anzupassen; dann gilt die Pflegeregel aus
 [AGENTS.md](../AGENTS.md) (Korrektur in 00, nicht nur hier).
 
-Ohne Checkpoint ersatzweise die Ist-Zeile des Planners aufnehmen — sie genügt für
-den Vorher/Nachher-Vergleich der Hebel 1 und 2.
+Zusätzlich die Ist-Zeile des Planners aufnehmen — sie genügt für den
+Vorher/Nachher-Vergleich der Hebel 1 und 2.
 
 ## Der Benchmark-Harness — wichtiger als die zwei Hebel
 
@@ -248,5 +248,5 @@ Planner-Budget erklärt wird.
   `docs/deepseek-v4.md` ausdrücklich „a planner budget, not an OS-enforced limit".
   Zu klein gewählt macht den Plan optimistisch, nicht kaputt; das gehört in die
   Doku, damit niemand es für eine harte Schranke hält.
-- Ohne Checkpoint bleibt die `compress_ratios`-Messung offen. Die Hebel 1 und 2
-  wirken unabhängig davon.
+- Die `compress_ratios`-Messung gegen den lokalen Checkpoint steht noch aus. Die
+  Hebel 1 und 2 wirken unabhängig davon.

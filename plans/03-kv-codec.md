@@ -56,9 +56,8 @@ Die Planner-Messung mit der Paper-Geometrie bei 128k ergibt
 **1,690 GiB f32 → 0,431 GiB native**, also **1,259 GiB** zusätzliche
 Planner-Reserve. Der Test berechnet dieselben Bytes unabhängig aus Zeilenzahlen
 und -größen und verhindert damit, dass `context_bytes` wieder auf f32 zurückfällt.
-Der vollständige 167-GB-Checkpoint war in der Entwicklungsumgebung nicht
-vorhanden; deshalb konnte die nachfolgende Rundung auf echte `target_cache`-Slots
-im `ram_tiers`-Log nicht gemessen werden. Das Tiny-Fixture wurde mit den gepinnten
+Die nachfolgende Rundung auf echte `target_cache`-Slots im `ram_tiers`-Log ist
+gegen den vollen Checkpoint noch nicht gemessen. Das Tiny-Fixture wurde mit den gepinnten
 CPU-Abhängigkeiten neu erzeugt; Oracle und Prefix-Reuse liefen mit
 `V4_KV{,_INDEX}=native` und `f32` jeweils token-identisch.
 

@@ -18,6 +18,16 @@ void *v4_cuda_kv_alloc(size_t bytes);
 void v4_cuda_kv_free(void *base);
 int v4_cuda_kv_write_row(void *base, int slot, const void *row,
                          size_t row_bytes);
+int v4_cuda_copy_to_device(void *base, size_t offset, const void *source,
+                           size_t bytes);
+
+/* The output head is deliberately kept outside ColiCudaTensor: it is BF16,
+ * whereas the generic tensor backend only owns quantized resident weights. */
+int v4_cuda_head_logits(float *logits, const void *head, const float *hidden,
+                        int count, int vocab, int dimension);
+int v4_cuda_head_argmax(float *best_logit, int *best_token,
+                         const void *head, const float *hidden,
+                         int vocab, int dimension);
 
 /* Publish TurboQuant tables from turbo_quant.h.  Attention calls are refused
  * until this succeeds, so a device never decodes against zeroed constants. */
