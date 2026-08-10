@@ -691,6 +691,11 @@ typedef struct {
 uint64_t coli_v4_os_available_memory(void);
 uint64_t coli_v4_scratch_bytes(void);
 int coli_v4_context_tokens(void);
+/* V4_VRAM_LIMIT_MB: caps what the planner believes is free, without owning a
+ * smaller card.  Clamps down only -- a value at or above `free_bytes`, or
+ * malformed/unset input, leaves `free_bytes` unchanged.  `0` is a valid
+ * clamp-down value (not malformed) and forces the result to zero. */
+uint64_t coli_v4_vram_limit_bytes(uint64_t free_bytes);
 int coli_v4_session_state_bytes(int context_tokens, int hc_mult,
                                 int hidden_size, uint64_t *bytes);
 int coli_v4_resource_plan_compute(
@@ -701,6 +706,60 @@ int coli_v4_resident_tier_plan(
     ColiDeepSeekV4ResidentTierPlan *plan,
     const ColiDeepSeekV4ResidentTierInputs *inputs,
     char *error, size_t error_size);
+
+/* plans/08-vram-planner.md: which of the four VRAM-eligible tiers actually
+ * fit the card, in fixed priority order.  This is the VRAM-side counterpart
+ * to coli_v4_resident_tier_plan above -- it never decides RAM-vs-streamed,
+ * only VRAM-vs-not-VRAM, because the RAM fallback for each tier is already
+ * decided elsewhere (coli_v4_resident_tier_plan for dense, the 256 MiB head
+ * margin check for head, the RAM-lazy path for DSpark). RAM is always a
+ * legal fallback for kv/dense/head; dspark's "not VRAM" location means the
+ * existing RAM-lazy path, not an error. */
+typedef enum {
+    COLI_V4_TIER_VRAM = 0,
+    COLI_V4_TIER_RAM = 1,
+} ColiV4TierLocation;
+
+typedef struct {
+    uint64_t vram_available_bytes;   /* raw coli_cuda_mem_info free bytes */
+    uint64_t vram_reserve_bytes;     /* driver/allocator headroom, off the top */
+    uint64_t kv_bytes;               /* attention main+compressed rows only */
+    uint64_t dense_bytes;            /* device-eligible FP8 weights+scales */
+    uint64_t head_bytes;
+    uint64_t dspark_bytes;
+    int dspark_wanted;               /* 0: dspark is off, never claims VRAM */
+} ColiV4VramTierInputs;
+
+typedef struct {
+    ColiV4TierLocation kv, dense, head, dspark;
+    uint64_t vram_used_bytes;        /* sum of what actually landed on the card */
+} ColiV4VramTierPlan;
+
+int coli_v4_vram_tier_plan(
+    ColiV4VramTierPlan *plan, const ColiV4VramTierInputs *inputs,
+    char *error, size_t error_size);
+
+/* V4_VRAM_FAIL_AT=kv|dense|head|dspark: force that stage's device upload to
+ * fail, so the plan's runtime-degrade path (planning said VRAM, the upload
+ * fails anyway) can be exercised without owning a card small enough to fail
+ * for real.  Not compiled into production objects: outside COLI_V4_TEST_HOOKS
+ * this is a constant fold to "never", so it costs nothing and cannot be
+ * reached via the environment in a release build. */
+typedef enum {
+    COLI_V4_VRAM_FAIL_NONE = 0,
+    COLI_V4_VRAM_FAIL_KV,
+    COLI_V4_VRAM_FAIL_DENSE,
+    COLI_V4_VRAM_FAIL_HEAD,
+    COLI_V4_VRAM_FAIL_DSPARK,
+} ColiV4VramFailStage;
+
+#ifdef COLI_V4_TEST_HOOKS
+ColiV4VramFailStage coli_v4_vram_fail_at(void);
+#else
+static inline ColiV4VramFailStage coli_v4_vram_fail_at(void) {
+    return COLI_V4_VRAM_FAIL_NONE;
+}
+#endif
 /* ==== end deepseek_v4_resource_plan.h ==== */
 
 /* ==== begin deepseek_v4_head_cache.h ==== */
@@ -737,6 +796,20 @@ typedef struct {
     ColiV4KVCodec kv_codec;
     ColiV4KVCodec index_codec;
     int vram_enabled;
+    /* plans/08-vram-planner.md: whether the KV tier plan (computed once, at
+     * expert-store-open time) admitted the attention main+compressed rows to
+     * the device.  window_attention_create gates its device mirror on this
+     * instead of the bare v4_cuda_ready() check phase 05 shipped with, so
+     * dense/head/dspark's earlier device claims cannot silently starve every
+     * session's KV mirror of the budget the planner meant to give it. */
+    int kv_vram_enabled;
+    /* plans/08-vram-planner.md: whether the VRAM tier plan actually admitted
+     * the DSpark backbone to the device (vram_plan.dspark == VRAM).  The
+     * lazy loader (v4_ds_load_all) gates its GPU upload on this instead of
+     * the bare vram_enabled flag, so a plan that had to fall the drafter
+     * back to RAM/host -- because KV, dense, or head already claimed the
+     * budget it needed -- does not still attempt (and OOM on) the upload. */
+    int dspark_vram_enabled;
 } ColiDeepSeekV4RuntimeOptions;
 
 enum { COLI_V4_RESIDENT_MAX_LAYERS = 128 };

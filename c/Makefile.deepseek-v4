@@ -78,6 +78,17 @@ CFLAGS += -flto
 LDFLAGS += -flto
 endif
 
+# plans/08-vram-planner.md: V4_VRAM_FAIL_AT is compiled only under
+# COLI_V4_TEST_HOOKS.  Use `make TEST_HOOKS=1 ...` rather than
+# `make CFLAGS+=-DCOLI_V4_TEST_HOOKS ...` -- a CFLAGS assignment on the make
+# command line replaces this file's own CFLAGS/+= lines above wholesale
+# (GNU make lets a command-line variable override every in-makefile
+# assignment to it, `+=` included), silently dropping -O3/-fopenmp/-DCOLI_V4_CUDA.
+TEST_HOOKS ?= 0
+ifeq ($(TEST_HOOKS),1)
+CFLAGS += -DCOLI_V4_TEST_HOOKS
+endif
+
 include Makefile.deepseek-v4.units
 
 TARGET_OBJS = $(addsuffix .o,$(V4_TARGET_UNITS))

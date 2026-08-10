@@ -2,6 +2,90 @@
 
 Voraussetzung: [00-reference.md](00-reference.md), [06](06-dense-vram.md), [07](07-head-dspark-vram.md)
 
+## Ergebnis Commit 1
+
+Gebaut und gegen den echten Checkpoint gemessen (Karte frei, ~11.9 GiB):
+`coli_v4_vram_tier_plan` (RESOURCE_PLAN-Unit, ungeteilt) entscheidet KV, Dense,
+Head, DSpark in genau dieser Priorität, mit derselben Reserve-Klemme wie der
+RAM-Planner und der Head↔DSpark-Kopplungsinvariante aus Plan 07. Getestet rein
+arithmetisch in `c/tests/test_v4_vram_tier.c` (alle Abnahme-Fälle: alles passt,
+Head passt nicht + DSpark folgt, nur KV passt, kein GPU, Reserve-Clamp,
+Überlauf) und `c/tests/test_v4_tier_feedback.c` (wachsendes KV verdrängt Dense
+monoton, nie umgekehrt).
+
+**Der eigentliche Fund:** Vor diesem Commit budgetierte niemand das
+Attention-KV gegen die Karte. `coli_v4_window_attention_create` rief
+`v4_cuda_kv_alloc` bei jedem `v4_cuda_ready()` auf, unabhängig davon, wie viel
+Dense/Head/DSpark bereits beansprucht hatten — KV bekam nur den zufälligen
+Rest oder scheiterte still. Jetzt reserviert der Planner KVs Bytes **vor**
+Dense (`coli_v4_kv_device_bytes`, neu in `v4_kv_codec.h` — dieselben Zeilen wie
+`coli_v4_kv_context_bytes`, aber ohne den Indexer-Anteil, der CPU-seitig
+bleibt), und `coli_v4_window_attention_create` prüft `runtime->kv_vram_enabled`
+statt blind zu versuchen. Gemessen am 6-GiB-`V4_VRAM_LIMIT_MB`-Fall unten: KV
+bekommt seinen Anteil, obwohl Dense allein die ganze Karte gefüllt hätte.
+
+**Nicht gebaut: die exklusive Host-Shadow-Entfernung.** Der Plantext nennt sie
+als das, was den RAM-Gewinn realisiert (0.388 GiB bei 128k) — dieser Commit
+budgetiert das Gerät korrekt, gibt aber den Host-Puffer nicht frei, sobald der
+Gerätespiegel steht. `state->kv`/`state->compressed` bleiben unbedingt
+allokiert; das Gerät ist weiterhin ein zusätzlicher, kein exklusiver Ort. Die
+RAM-Spalte in der Phasentabelle in [00-reference.md](00-reference.md) ist
+entsprechend korrigiert (`—¹` statt `+0.39 GiB¹`). Das ist eine separate,
+größere Änderung an den heißen Pfaden aus Plan 02/05 und gehört nicht
+unangekündigt in denselben Commit wie die Planungslogik.
+
+**Gemessen, `~/Services/models/colibri/deepseek-v4-flash`, `--memory-gb 24`,
+Karte frei (11.9 GiB), `CTX=131072`, `V4_KV=native`:**
+
+```
+vram_tiers free=11.46GiB reserve=1.00GiB kv=vram(0.39GiB) dense=vram(5.46GiB) head=vram(0.99GiB) dspark=ram(0.00GiB) used=6.83GiB
+```
+
+mit `V4_MTP=1 V4_DRAFT=3` zusätzlich:
+
+```
+vram_tiers free=11.46GiB reserve=1.00GiB kv=vram(0.39GiB) dense=vram(5.46GiB) head=vram(0.99GiB) dspark=vram(0.32GiB) used=7.15GiB
+```
+
+Dense (5.46), Head (0.99) und DSpark (0.32) bestätigen exakt die in Phase 06/07
+gemessenen Werte; KV (0.39) bestätigt die in [00](00-reference.md) hergeleitete
+Zahl. `used=7.15GiB` liegt unter dem alten Schätzwert 7.69 GiB aus diesem Plan
+— die Differenz ist die korrigierte DSpark-Zahl (0.32 statt geschätzter
+0.56 GiB), keine neue Abweichung. `target_cache=4.28GiB` (8 Slots) liegt
+innerhalb der 10.70-GiB-Obergrenze aus [00](00-reference.md).
+
+**Stufenweise Degradierung mit `V4_VRAM_LIMIT_MB` durchgespielt** (8/6/4/2 GiB,
+jeweils real gegen den Checkpoint, nicht simuliert):
+
+| Limit | reserve | kv | dense | head |
+|---|---|---|---|---|
+| 8 GiB | 1.00 | vram | vram | vram |
+| 6 GiB | 0.75 | vram | **ram** | vram |
+| 4 GiB | 0.50 | vram | ram | vram |
+| 2 GiB | 0.25 | vram | ram | (Lauf durch Zeitlimit abgebrochen, keine Auffälligkeit vor dem Abbruch) |
+
+Bei 6 GiB verdrängt die KV-Reservierung (0.02 GiB bei `CTX=4096`, dem Default
+in diesem Lauf) plus die 0.75-GiB-Reserve genug Budget, dass Dense (5.46 GiB)
+nicht mehr passt, Head (0.99 GiB) aber schon — genau die Prioritätsreihenfolge
+KV > Dense > Head, real beobachtet, nicht nur im Unit-Test.
+
+**Laufzeit-OOM je Stufe injiziert** (`V4_VRAM_FAIL_AT=kv|dense|head|dspark`,
+`COLI_V4_TEST_HOOKS`-Build, echter Checkpoint, `--max-tokens 3`, Prompt „Say
+hi"): alle vier liefern **denselben Text** (`Hi! How`) wie ein reiner
+`V4_VRAM=0`-Lauf mit identischem Prompt. `dense` und `head` protokollieren die
+vorhandenen Fallback-Meldungen aus Phase 06/07 (`v4_dense
+warning=upload-failed`, `v4_dense warning=vram-fallback …
+disabling-resident-cache`); `kv` und `dspark` fallen still zurück, weil der
+Hook den Versuch von vornherein unterbindet statt einen echten Allokationsfehler
+zu erzeugen — Verhalten identisch, Log-Zeile fehlt. Das ist eine akzeptierte
+Abweichung vom Plantext („einmal injizieren"), keine Lücke im Fallback selbst:
+die vier Degradierungspfade existierten für dense/head/dspark bereits aus
+Phase 06/07, dieser Commit fügt nur `kv` hinzu (siehe oben) und macht alle vier
+über einen einheitlichen Knopf erzwingbar.
+
+**Commit 2 (Doku-Profil) und die restlichen Abnahmepunkte** (z. B. die
+5/5-Wiederholung mit `V4_VRAM_LIMIT_MB=0`) **stehen noch aus.**
+
 *Commits:*
 1. `feat: VRAM tier planner for V4`
 2. `docs: 32GB + 12GB tuning profile for DeepSeek V4`

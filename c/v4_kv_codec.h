@@ -57,6 +57,13 @@ uint64_t coli_v4_kv_context_bytes(
     int layers, int sliding_window, int head_dim, int rope_dim,
     int index_head_dim, const int *compress_ratios, int context,
     ColiV4KVCodec codec, ColiV4KVCodec index_codec);
+/* Same rows as coli_v4_kv_context_bytes, minus the Lightning Indexer term.
+ * The indexer always evaluates on the CPU (plans/00-reference.md), so it is
+ * never a candidate for the VRAM tier planner in plans/08-vram-planner.md;
+ * only the main window/compressed rows can move to the device. */
+uint64_t coli_v4_kv_device_bytes(
+    int layers, int sliding_window, int head_dim, int rope_dim,
+    const int *compress_ratios, int context, ColiV4KVCodec codec);
 
 #ifdef __cplusplus
 }

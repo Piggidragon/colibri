@@ -34,6 +34,50 @@ The default remains unchanged: without `V4_SCRATCH_MB`, the reserve is 512 MiB.
 Numeric values are clamped to 64–4096 MiB, and malformed values fall back to the
 default.
 
+## VRAM tiers (12 GiB RTX 4070, `CUDA=1 V4_VRAM=1`)
+
+With the CUDA build and the card otherwise idle, add `V4_VRAM=1` to the command
+above (`CUDA_HOME=/opt/cuda` on Arch/CachyOS, see
+[plans/09-arch-cachyos.md](../plans/09-arch-cachyos.md) Commit 3, not yet
+built). Measured against the full checkpoint, `--memory-gb 24`,
+`CTX=131072`, `V4_KV=native`:
+
+```
+vram_tiers free=11.46GiB reserve=1.00GiB kv=vram(0.39GiB) dense=vram(5.46GiB) head=vram(0.99GiB) dspark=ram(0.00GiB) used=6.83GiB
+```
+
+Adding `V4_MTP=1 V4_DRAFT=3`:
+
+```
+vram_tiers free=11.46GiB reserve=1.00GiB kv=vram(0.39GiB) dense=vram(5.46GiB) head=vram(0.99GiB) dspark=vram(0.32GiB) used=7.15GiB
+```
+
+Both fit inside the 11.46 GiB budget with headroom to spare; DSpark on top
+still leaves `target_cache=4.28GiB` (8 expert-cache slots) at this context and
+RAM budget — well under the 10.70 GiB upper bound derived in
+[plans/00-reference.md](../plans/00-reference.md). The planner (Commit 1 of
+[plans/08-vram-planner.md](../plans/08-vram-planner.md)) prints this
+`vram_tiers` line next to `ram_tiers` on every start; treat a run that reports
+`kv=ram` at this budget as a sign something else on the GPU already claimed
+memory, not as a planner bug.
+
+`V4_VRAM_LIMIT_MB=<n>` clamps the free VRAM the planner sees, useful for
+rehearsing a smaller card. Confirmed against the real checkpoint: at
+`V4_VRAM_LIMIT_MB=6144` the (higher-priority) attention-KV mirror still lands
+on the device while dense — the single largest tier at 5.46 GiB — falls back
+to RAM and head stays resident; degrading in that order, not crashing, is the
+point of the priority list in plans/08-vram-planner.md. `V4_VRAM_FAIL_AT=kv|
+dense|head|dspark` (`COLI_V4_TEST_HOOKS` builds only) forces a stage's device
+upload to fail at runtime; all four were confirmed to reproduce the exact
+`V4_VRAM=0` output for the same prompt.
+
+The exclusive-ownership step that would additionally remove the attention-KV
+host-side buffer once its device mirror is confirmed (the RAM win noted in
+[plans/00-reference.md](../plans/00-reference.md)'s phase table) is not built
+yet — the host copy stays allocated alongside the device one either way, so
+this profile currently trades VRAM for compute locality, not for RAM headroom
+on the KV tier specifically.
+
 ## Measurement status
 
 The full checkpoint **is** available on the target machine

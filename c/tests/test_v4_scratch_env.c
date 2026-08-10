@@ -56,6 +56,35 @@ static int expect_context(const char *label, const char *value, int expected) {
     return 1;
 }
 
+static void set_vram_limit(const char *value) {
+#ifdef _WIN32
+    _putenv_s("V4_VRAM_LIMIT_MB", value);
+#else
+    setenv("V4_VRAM_LIMIT_MB", value, 1);
+#endif
+}
+
+static void clear_vram_limit(void) {
+#ifdef _WIN32
+    _putenv_s("V4_VRAM_LIMIT_MB", "");
+#else
+    unsetenv("V4_VRAM_LIMIT_MB");
+#endif
+}
+
+/* plans/08-vram-planner.md: V4_VRAM_LIMIT_MB clamps down what the planner
+ * believes is free, without owning a smaller card -- it must never grow the
+ * real free_bytes it is handed, and malformed input must leave it alone. */
+static int expect_vram_limit(const char *label, const char *value,
+                             uint64_t free_bytes, uint64_t expected) {
+    if (value) set_vram_limit(value); else clear_vram_limit();
+    uint64_t actual = coli_v4_vram_limit_bytes(free_bytes);
+    if (actual == expected) return 0;
+    fprintf(stderr, "%s: expected %llu bytes, got %llu bytes\n", label,
+            (unsigned long long)expected, (unsigned long long)actual);
+    return 1;
+}
+
 int main(void) {
     int failed = 0;
     failed |= expect_mb("default", NULL, 512);
@@ -80,8 +109,21 @@ int main(void) {
                 (unsigned long long)session_bytes);
         failed = 1;
     }
+    failed |= expect_vram_limit("vram limit default", NULL,
+                               12 * UINT64_C(1073741824), 12 * UINT64_C(1073741824));
+    failed |= expect_vram_limit("vram limit clamps down", "2048",
+                               12 * UINT64_C(1073741824), 2048 * MIB);
+    failed |= expect_vram_limit("vram limit above free is a no-op", "99999",
+                               2 * UINT64_C(1073741824), 2 * UINT64_C(1073741824));
+    failed |= expect_vram_limit("vram limit zero forces zero", "0",
+                               12 * UINT64_C(1073741824), 0);
+    failed |= expect_vram_limit("vram limit garbage", "abc",
+                               12 * UINT64_C(1073741824), 12 * UINT64_C(1073741824));
+    failed |= expect_vram_limit("vram limit negative", "-1",
+                               12 * UINT64_C(1073741824), 12 * UINT64_C(1073741824));
     clear_scratch();
     clear_context();
+    clear_vram_limit();
     if (!failed) puts("test_v4_scratch_env: ok");
     return failed ? 1 : 0;
 }

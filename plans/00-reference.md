@@ -693,14 +693,14 @@ Neue Knöpfe dieses Branches:
 | `V4_KV_INDEX` | `native` | 03 | gebaut |
 | `V4_VRAM` | 0 | 05–08 | gebaut |
 | `V4_VRAM_RESERVE_MB` | `free/8`, geklemmt 256…1024 | 06 (vorgezogen), 08 | gebaut |
-| `V4_VRAM_LIMIT_MB` | aus (kappt das gemeldete freie VRAM) | 08 | geplant |
-| `V4_VRAM_FAIL_AT` | aus, nur unter `COLI_V4_TEST_HOOKS` | 08 | geplant |
+| `V4_VRAM_LIMIT_MB` | aus (kappt das gemeldete freie VRAM) | 08 | gebaut |
+| `V4_VRAM_FAIL_AT` | aus, nur unter `COLI_V4_TEST_HOOKS` | 08 | gebaut |
 | `V4_OMP_CORES` | `perf`, wenn erkennbar; sonst `all` | 09 | geplant |
 | `V4_PIN_SLOTS` | 16 | 12 | geplant |
 | `V4_PIN_FRACTION` | aus (Alternative zu `V4_PIN_SLOTS`) | 12 | geplant |
 | `V4_PIN_RAMP_REQUESTS` | 24 | 12 | geplant |
 
-Die sechs `gebaut`-Knöpfe stehen in `docs/ENVIRONMENT.md`. Die geerbten
+Die acht `gebaut`-Knöpfe stehen in `docs/ENVIRONMENT.md`. Die geerbten
 Upstream-Knöpfe (`V4_MTP*`, `V4_DRAFT`, `V4_NGRAM`, `V4_PREFIX_LOG`,
 `COLI_V4_*`) stehen dort **nicht** — sie werden vom Code gelesen, sind aber nie
 dokumentiert worden. Wer einen davon anfasst, dokumentiert ihn bei der
@@ -738,11 +738,11 @@ daraus automatisch Gates. Keine zentrale Liste, kein Merge-Konflikt.
 | 01 | [Messen und RAM-Budget](01-measure-and-ram-budget.md) | Ist-Zahlen, `--memory-gb`/`RAM_GB`, `V4_SCRATCH_MB` | +2.6 GiB Systemreserve +0.375 GiB Scratch, vor Tierwechsel | — |
 | 02 | [Flash Attention](02-flash-attention.md) | Online-Softmax, `all_kv` weg, Source-Sync-Test | — | — |
 | 03 | [KV-Codec](03-kv-codec.md) | **natives fp8+bf16/fp4, bit-exakt**, `context_bytes` folgt | **+1.25 GiB** | — |
-| 04 | [TurboQuant](04-turboquant.md) | turbo2/3/4 als verlustbehafteter Tier | +0.27 GiB vor 08; +0.012 danach³ | −2.0 bei 1M |
+| 04 | [TurboQuant](04-turboquant.md) | turbo2/3/4 als verlustbehafteter Tier | +0.27 GiB; +0.012 erst nach Host-Shadow-Entfernung³ | −2.0 bei 1M |
 | 05 | [CUDA-Attention](05-cuda-attention.md) | `backend_cuda_v4`, Flash-Kernel, Attention-KV-Spiegel | 0 (Host-Shadow) | −0.39 |
 | 06 | [Dense in VRAM](06-dense-vram.md) | fp8-Residenz + Matmuls auf GPU | +5.456 GiB | −5.456 |
 | 07 | [Head und DSpark in VRAM](07-head-dspark-vram.md) | Head-Matvec + Drafter auf GPU | +2.16 GiB | −1.31² |
-| 08 | [VRAM-Planner](08-vram-planner.md) | Stufenplanung, exklusive KV-Eigentümerschaft, 4070-Profil | +0.39 GiB¹ | — |
+| 08 | [VRAM-Planner](08-vram-planner.md) | Stufenplanung KV>Dense>Head>DSpark, 4070-Profil | —¹ | — |
 | 09 | [Arch / CachyOS](09-arch-cachyos.md) | `omp_tune.h`, THP, CUDA-Pfade | — | — |
 | 10 | [Dual-Streaming](10-dual-streaming.md) | Mirror-Maschinerie nach V4, gewichtete Stripes | — | — |
 | 11 | [Rückbau auf V4](11-strip-to-v4.md) | andere Motoren + Windows raus | — | — |
@@ -751,15 +751,25 @@ daraus automatisch Gates. Keine zentrale Liste, kein Merge-Konflikt.
 | 14 | [Chunked Prefill + DSpark](14-chunked-prefill-dspark.md) | 256k-Aktivierungsfenster und MTP-Handoff | spart bis zu `CTX/chunk`-fachen State | — |
 
 ¹ 03 hat den gesamten KV bereits von 1.68 auf 0.43 GiB (128k) gesenkt. 05 spiegelt
-den 0.388-GiB-Attention-Anteil, 08 entfernt erst dessen Host-Shadow; 0.044 GiB
-nativer Indexer-KV bleiben im RAM.
+den 0.388-GiB-Attention-Anteil auf die Karte, behält aber den Host-Shadow (die
+KV-Arrays bleiben unbedingt allokiert, das Gerät ist nur ein optionaler zweiter
+Kopierort). 08 gibt dem Attention-KV höchste VRAM-Priorität — vor Dense, damit
+ein großer Dense-Tensor den Session-KV-Spiegel nicht mehr verdrängen kann
+(ungetestet vor 08: `v4_cuda_kv_alloc` lief unbedingt bei `v4_cuda_ready()`,
+ohne jedes Budget) — entfernt den Host-Shadow selbst aber **nicht**. Der
++0.39-GiB-RAM-Gewinn aus einer früheren Fassung dieser Zeile war eine Vorgriff-
+Annahme auf diesen Schritt; er ist noch offen. 0.044 GiB nativer Indexer-KV
+bleiben so oder so im RAM.
 ² 0.99 GiB Head + **gemessene 0.32 GiB** DSpark-Backbone gehen tatsächlich auf die
 GPU (siehe VRAM-Budget oben); die restlichen ~0.85 GiB der 1.17-GiB-DSpark-RAM-Reserve
 waren Marge für Head/Scratch, kein eigener VRAM-Posten.
-³ Vor 08 komprimiert 04 auch den Host-Shadow. Danach bleibt als RAM-Gewinn nur
-der Indexer (0.044 → 0.032 GiB bei 128k); Attention-KV zahlt im VRAM ein. Bei 1M
-passt `native` (3.08 GiB) nach der Phase-06-Inventur nominell in das ~3.39-GiB-
-Budget, aber mit nur ~0.31 GiB Marge; turbo3 (1.06 GiB) bleibt dort empfohlen.
+³ Solange der Host-Shadow steht (siehe ¹), komprimiert 04 ihn mit; der volle
++0.27-GiB-Gewinn gilt also weiter, auch mit 08 gebaut. Erst wenn ein späterer
+Schritt den Host-Shadow entfernt, bleibt als RAM-Gewinn nur noch der Indexer
+(0.044 → 0.032 GiB bei 128k), weil das Attention-KV dann ausschließlich im
+VRAM einzahlt. Bei 1M passt `native` (3.08 GiB) nach der Phase-06-Inventur
+nominell in das ~3.39-GiB-Budget, aber mit nur ~0.31 GiB Marge; turbo3
+(1.06 GiB) bleibt dort empfohlen.
 
 Referenzdokumente ohne Nummer: [paper-deepseek-v4.md](paper-deepseek-v4.md) (das
 Paper), [llamacpp-deepseek-v4.md](llamacpp-deepseek-v4.md) (die
