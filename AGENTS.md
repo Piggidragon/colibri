@@ -34,6 +34,24 @@ Semantik des Modells zu ändern (siehe Regeln).
 hf download deepseek-ai/DeepSeek-V4-Flash-0731 --local-dir /pfad/DeepSeek-V4-Flash
 ```
 
+**Auf dieser Maschine liegt der Checkpoint schon da** — nichts nachladen:
+
+```
+~/Services/models/colibri/deepseek-v4-flash    161 GB, 48 Shards, 72 317 Tensoren
+```
+
+Das ist das Modellverzeichnis für jeden Test gegen echte Gewichte. Das Binary
+nimmt es als erstes Positionsargument:
+
+```bash
+c/deepseek_v4 ~/Services/models/colibri/deepseek-v4-flash "prompt" --max-tokens 64
+```
+
+Die 4 705 `mtp.0`–`mtp.2`-Tensoren sind darin enthalten, also ist es zugleich
+das **einzige** Fixture, mit dem DSpark-Pfade überhaupt laufen: das
+Tiny-Fixture aus Regel 4 hat null `mtp.*`-Tensoren. Wer eine Änderung am
+Drafter nur gegen Tiny grün bekommt, hat den Drafter nicht getestet.
+
 **DSpark steckt darin.** Die Drafter-Tensoren liegen im selben Checkpoint unter dem
 Präfix `mtp.<stage>.` — colibri sucht sie in `engine->target_index`, nicht in einem
 zweiten Modellverzeichnis
