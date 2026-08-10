@@ -36,17 +36,28 @@ default.
 
 ## Measurement status
 
-No full checkpoint is available in the implementation environment, and the
-Tiny fixture cannot currently be regenerated because PyTorch plus an official
-Transformers build with `DeepseekV4ForCausalLM` is absent. Therefore the required
-checkpoint measurements remain pending rather than being replaced by estimates.
+The full checkpoint **is** available on the target machine
+(`~/Services/models/colibri/deepseek-v4-flash`), and the Tiny fixture is
+regenerable from the pinned CPU-only requirements — phase 06 regenerated it with
+`torch==2.13.0+cpu`, `transformers==5.14.1`, `safetensors==0.8.0`. An earlier
+version of this section claimed both were missing; that is no longer true and
+was never a reason to skip a measurement.
+
+The four-run A/B table below was nevertheless never filled in, because phases 02
+and later overtook it. It is still the right shape for a phase-01 re-run:
 
 | Run | `ram_tiers` | Status |
 |---|---|---|
-| `main`, automatic RAM, 512 MiB scratch | — | pending full checkpoint |
-| phase branch, automatic RAM, 512 MiB scratch | — | pending full checkpoint |
-| phase branch, `--memory-gb 28`, 512 MiB scratch | — | pending full checkpoint |
-| phase branch, `--memory-gb 28 V4_SCRATCH_MB=128` | — | pending full checkpoint |
+| `main`, automatic RAM, 512 MiB scratch | — | not recorded |
+| phase branch, automatic RAM, 512 MiB scratch | — | not recorded |
+| phase branch, `--memory-gb 28`, 512 MiB scratch | — | not recorded |
+| phase branch, `--memory-gb 28 V4_SCRATCH_MB=128` | — | not recorded |
+
+The measurements that **do** exist against the full checkpoint are recorded per
+phase, not here: dense residency and the 36 → 46 expert-slot delta in
+[plans/06-dense-vram.md](../plans/06-dense-vram.md), head and DSpark placement
+with the four-run throughput and acceptance table in
+[plans/07-head-dspark-vram.md](../plans/07-head-dspark-vram.md).
 
 Before resident-tier decisions, the expected planner deltas are approximately
 +2.6 GiB from replacing the automatic system reserve with the explicit 28 GiB
@@ -56,7 +67,7 @@ larger full-prefill state reserve, and crossing a dense/head residency threshold
 can make the final expert-cache delta non-additive. Expert capacity advances in
 whole per-layer slots, so the printed `target_cache` delta is quantized.
 
-The checkpoint geometry must also be recorded before this phase is complete:
+The checkpoint geometry should also be recorded with the re-run:
 
 ```bash
 python3 -c "
@@ -68,9 +79,11 @@ print('sliding_window', c['sliding_window'], 'head_dim', c['head_dim'])
 " /path/to/DeepSeek-V4-Flash
 ```
 
-Expected, but not yet measured here: 43 layers split into 2 ratio-0, 21 ratio-4,
-and 20 ratio-128 layers, with `sliding_window=128` and `head_dim=512`. The f32
-KV estimate derived from that geometry is about 13.4 KB per context token.
+Expected: 43 layers split into 2 ratio-0, 21 ratio-4, and 20 ratio-128 layers,
+with `sliding_window=128` and `head_dim=512`. The f32 KV estimate derived from
+that geometry is about 13.4 KB per context token. With the default
+`V4_KV=native` codec since phase 03, the stored KV is smaller by 3.5× (main) and
+7.5× (indexer) at bit-identical values.
 
 ## Reproducible benchmark
 
