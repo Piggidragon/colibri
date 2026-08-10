@@ -83,12 +83,21 @@ die vier Degradierungspfade existierten für dense/head/dspark bereits aus
 Phase 06/07, dieser Commit fügt nur `kv` hinzu (siehe oben) und macht alle vier
 über einen einheitlichen Knopf erzwingbar.
 
-**Commit 2 (Doku-Profil) und die restlichen Abnahmepunkte** (z. B. die
-5/5-Wiederholung mit `V4_VRAM_LIMIT_MB=0`) **stehen noch aus.**
+**Commit 2 ist erledigt** — `docs/deepseek-v4-tuning-32gb.md` trägt die
+`vram_tiers`-Sektion mit den echten Messungen oben, `docs/ENVIRONMENT.md` die
+neuen Knöpfe, `00-reference.md` die korrigierte RAM-Spalte. Ein anschließender
+Fix-Commit (`fc8efef`, Reaktion auf Code-Review von PR #12) hat außerdem die
+tatsächlichen Planer-Verdikte durchgesetzt (DSpark-Upload folgt jetzt
+`vram_plan.dspark` statt der pauschalen `vram_enabled`-Flag), die KV-Byte-Rundung
+auf die reale `16*2^k`-CUDA-Allokation korrigiert, einen `V4_VRAM_LIMIT_MB`-
+Overflow geschlossen und den `vram_tiers`-Log auf `COLI_V4_CUDA`-Builds
+beschränkt. Offen bleibt nur die exklusive KV-Host-Shadow-Entfernung — siehe
+oben, sie war nie Teil dieses Commits.
 
 *Commits:*
 1. `feat: VRAM tier planner for V4`
 2. `docs: 32GB + 12GB tuning profile for DeepSeek V4`
+3. `fix: enforce planner verdicts and fix budget accounting in VRAM tier planner`
 
 ## Ziel
 
