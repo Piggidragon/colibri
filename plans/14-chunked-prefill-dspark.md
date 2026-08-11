@@ -23,6 +23,23 @@ Attention-, Compressor- und Indexer-Zustand bleiben dabei durchgehend. Das
 Tiny-Gate prüft Chunk 64 gegen den unchunked Oracle-Pfad für Long-Prompt,
 Prefix-Reuse und Serve.
 
+**Nachtrag aus dem Review:** `build_runtime_plan` budgetierte den
+Aktivierungs-Reserveposten anfangs weiterhin mit dem vollen `CTX`, obwohl
+`coli_v4_session_create` bei gesetztem `V4_PREFILL_CHUNK` nur die Chunk-Größe
+allokiert — das im "Ziel" unten genannte 256k/32k-Profil wäre am
+RAM-Planner gescheitert, bevor die kleineren Puffer je zugeteilt wurden.
+Nachträglich behoben: der Planer ruft `coli_v4_prefill_chunk_tokens(context)`
+genauso auf wie `coli_v4_session_create` und bucht bei gesetztem Chunk die
+Chunk-Größe statt `CTX`.
+
+Ebenfalls aus dem Review: `setup_done` musste vor die Chunk-Schleife und
+damit vor das Laden der Prompt-Embeddings wandern, weil die Chunk-Schleife
+das Embedding-Laden mit umschließt. Die gemeldete Time-to-First-Token
+enthält dadurch jetzt die Embedding-Lesezeit (~470 MB bei 32k Tokens), die
+die `main`-Baseline aus Plan 01 nicht mitzählt — TTFT-Zahlen dieses Branches
+sind also nicht direkt mit der Baseline vergleichbar, arguably aber die
+ehrlichere Messung.
+
 ## Ergebnis Commit 2
 
 Der vorhandene DSpark-Übergabevertrag trägt ohne zusätzlichen Laufzeitpfad

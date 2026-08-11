@@ -1413,7 +1413,15 @@ static int build_runtime_plan(ColiV4Engine *engine,
     uint64_t scratch = coli_v4_scratch_bytes();
     uint64_t runtime_other = context_bytes(
         &config, context, runtime->kv_codec, runtime->index_codec);
-    if (coli_v4_session_state_bytes(context, config.hc_mult,
+    /* coli_v4_session_create() sizes the two activation buffers off
+     * session->prefill_chunk_tokens, not off CTX, whenever V4_PREFILL_CHUNK
+     * is set (both production callers default max_prompt_tokens to this same
+     * `context`). Budget the reserve the same way, or a chunked run that
+     * would actually fit in RAM gets rejected here before it ever allocates
+     * the smaller buffers. */
+    int session_context = coli_v4_prefill_chunk_tokens(context);
+    if (!session_context) session_context = context;
+    if (coli_v4_session_state_bytes(session_context, config.hc_mult,
                                    config.hidden_size, &session_state) ||
         UINT64_MAX - runtime_other < session_state) {
         snprintf(error, error_size, "V4 runtime reserve overflow");
