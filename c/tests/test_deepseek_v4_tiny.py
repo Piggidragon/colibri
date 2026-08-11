@@ -121,6 +121,7 @@ def check_session(
     temporary: Path,
     ordinal: int = 0,
     compatibility_flag: bool = False,
+    env: dict[str, str] | None = None,
 ) -> list[int]:
     record = temporary / f"{name}-target-{ordinal}.json"
     command = [
@@ -135,7 +136,7 @@ def check_session(
     ]
     if compatibility_flag:
         command.append("--no-dspark")
-    result = run(f"target session {name}", command)
+    result = run(f"target session {name}", command, env=env)
     actual = json.loads(record.read_text(encoding="utf-8"))
     expected_prompt = case["prompt_ids"]
     expected_full = case["greedy_full_ids"]
@@ -175,16 +176,20 @@ def check_session(
         if attempts and int(attempts.group(1)) != 0:
             raise AssertionError(
                 f"--no-dspark still attempted {attempts.group(1)} speculations")
+    if env and env.get("V4_PREFILL_CHUNK"):
+        if "v4_prefill chunk=" not in result.stderr:
+            raise AssertionError(f"session {name}: missing chunk report")
     print(f"PASS target session {name}: exact IDs and exact length")
     return actual["full_ids"]
 
 
-def check_serve(binary: Path, model: Path, case: dict[str, object]) -> None:
+def check_serve(binary: Path, model: Path, case: dict[str, object],
+                env: dict[str, str] | None = None) -> None:
     engine = openai_server.Engine(
         binary,
         model,
         max_tokens=int(case["max_new_tokens"]),
-        env=dict(os.environ, CTX="128"),
+        env=dict(os.environ, CTX="128", **(env or {})),
         kv_slots=1,
     )
     try:
@@ -267,8 +272,18 @@ def main() -> int:
             )
         # The 72-token case crosses the 64-token target prefill chunk boundary.
         check_session(binary, fixture, "long", cases["long"], temporary)
+        check_session(
+            binary,
+            fixture,
+            "long-chunked",
+            cases["long"],
+            temporary,
+            env=dict(os.environ, V4_PREFILL_CHUNK="64"),
+        )
         check_cli_uses_engine_context(binary, fixture, temporary)
         check_serve(binary, fixture, cases["short"])
+        check_serve(binary, fixture, cases["short"],
+                    env={"V4_PREFILL_CHUNK": "64"})
 
     print("PASS tiny DeepSeek V4 target oracle: all checks completed")
     return 0

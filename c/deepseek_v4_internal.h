@@ -796,6 +796,10 @@ static inline int coli_v4_indexer_select(
 
 int coli_v4_session_state_bytes(int context_tokens, int hc_mult,
                                 int hidden_size, uint64_t *bytes);
+/* V4_PREFILL_CHUNK=0 preserves the full-prompt allocation.  A valid value is
+ * clamped to the V4 chunk contract and then capped by this session's prompt
+ * capacity, so callers can use the answer directly as a buffer length. */
+int coli_v4_prefill_chunk_tokens(int max_prompt_tokens);
 int coli_v4_resource_plan_compute(
     ColiDeepSeekV4ResourcePlan *plan,
     const ColiDeepSeekV4ResourceInputs *inputs,
@@ -964,6 +968,7 @@ struct ColiV4Session {
     int *prompt_ids;
     int *generated;
     int max_prompt_tokens;
+    int prefill_chunk_tokens; /* 0 => full prompt, otherwise buffer capacity */
     int max_new_tokens_cap;
     int prompt_count;
     int generated_count;

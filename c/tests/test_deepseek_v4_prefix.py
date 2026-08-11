@@ -34,9 +34,12 @@ def parse_tokens(text: str) -> list[int]:
 class Serve:
     """One persistent `SERVE=1` engine process."""
 
-    def __init__(self, binary: Path, model: Path, ctx: str = "128") -> None:
+    def __init__(self, binary: Path, model: Path, ctx: str = "128",
+                 prefill_chunk: str | None = None) -> None:
         env = dict(os.environ, SERVE="1", SNAP=str(model), CTX=ctx,
                    V4_PREFIX_LOG="1")
+        if prefill_chunk is not None:
+            env["V4_PREFILL_CHUNK"] = prefill_chunk
         self.process = subprocess.Popen(
             [str(binary)], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
             stderr=subprocess.PIPE, env=env,
@@ -98,12 +101,13 @@ class Serve:
 
 
 def check_growing_conversation(binary: Path, model: Path,
-                               case: dict[str, object]) -> None:
+                               case: dict[str, object],
+                               prefill_chunk: str | None = None) -> None:
     """Turn 2 extends turn 1: the state is reused, the output does not change."""
     first_ids = list(case["prompt_ids"])            # type: ignore[arg-type]
     max_new = 4
 
-    warm = Serve(binary, model)
+    warm = Serve(binary, model, prefill_chunk=prefill_chunk)
     try:
         first_text, first_reuse = warm.submit(token_prompt(first_ids), max_new)
         if first_reuse != 0:
@@ -124,7 +128,7 @@ def check_growing_conversation(binary: Path, model: Path,
     finally:
         warm.close()
 
-    cold = Serve(binary, model)
+    cold = Serve(binary, model, prefill_chunk=prefill_chunk)
     try:
         cold_text, cold_reuse = cold.submit(token_prompt(second_ids), max_new)
     finally:
@@ -152,20 +156,21 @@ def check_growing_conversation(binary: Path, model: Path,
 
 
 def check_divergent_prompt_resets(binary: Path, model: Path,
-                                  case: dict[str, object]) -> None:
+                                  case: dict[str, object],
+                                  prefill_chunk: str | None = None) -> None:
     """A prompt that is not an extension must fall back to a full prefill."""
     first_ids = list(case["prompt_ids"])            # type: ignore[arg-type]
     other_ids = [token + 1 for token in first_ids]
     max_new = 4
 
-    warm = Serve(binary, model)
+    warm = Serve(binary, model, prefill_chunk=prefill_chunk)
     try:
         warm.submit(token_prompt(first_ids), max_new)
         divergent_text, reuse = warm.submit(token_prompt(other_ids), max_new)
     finally:
         warm.close()
 
-    cold = Serve(binary, model)
+    cold = Serve(binary, model, prefill_chunk=prefill_chunk)
     try:
         cold_text, _ = cold.submit(token_prompt(other_ids), max_new)
     finally:
@@ -184,12 +189,13 @@ def check_divergent_prompt_resets(binary: Path, model: Path,
 
 
 def check_repeated_prompt(binary: Path, model: Path,
-                          case: dict[str, object]) -> None:
+                          case: dict[str, object],
+                          prefill_chunk: str | None = None) -> None:
     """An identical prompt is not a strict extension: it must re-prefill."""
     ids = list(case["prompt_ids"])                  # type: ignore[arg-type]
     max_new = 4
 
-    warm = Serve(binary, model)
+    warm = Serve(binary, model, prefill_chunk=prefill_chunk)
     try:
         first_text, _ = warm.submit(token_prompt(ids), max_new)
         second_text, reuse = warm.submit(token_prompt(ids), max_new)
@@ -217,6 +223,9 @@ def main() -> int:
     check_growing_conversation(arguments.binary, arguments.fixture, case)
     check_repeated_prompt(arguments.binary, arguments.fixture, case)
     check_divergent_prompt_resets(arguments.binary, arguments.fixture, case)
+    check_growing_conversation(arguments.binary, arguments.fixture, case, "64")
+    check_repeated_prompt(arguments.binary, arguments.fixture, case, "64")
+    check_divergent_prompt_resets(arguments.binary, arguments.fixture, case, "64")
     print("PASS DeepSeek V4 KV prefix reuse: all checks completed")
     return 0
 

@@ -12,6 +12,17 @@ Teil der optionalen Maximaldurchsatz-Messung.
 2. `feat: hand chunked V4 prefill history to DSpark decode`
 3. `perf: tune the 256k TurboQuant + DSpark profile`
 
+## Ergebnis Commit 1
+
+`V4_PREFILL_CHUNK=0` erhält den bisherigen Full-Prefill-Pfad. Positive Werte
+werden auf 64…65536 Token geklemmt, auf 64er-Grenzen abgerundet und bei der
+Session-Eröffnung gegen ihre Prompt-Kapazität begrenzt. `state` und `next`
+allokieren dann nur diese Kapazität; der frische Prompt-Suffix wird in
+aufeinanderfolgenden Target-Batches mit absoluten Positionen verarbeitet.
+Attention-, Compressor- und Indexer-Zustand bleiben dabei durchgehend. Das
+Tiny-Gate prüft Chunk 64 gegen den unchunked Oracle-Pfad für Long-Prompt,
+Prefix-Reuse und Serve.
+
 ## Ziel
 
 **256k Kontext ist das tägliche Langkontext-Profil** dieser Maschine:
@@ -23,8 +34,10 @@ V4_MTP=1 V4_DRAFT=3 V4_VRAM=1
 
 `turbo3` bleibt ein explizites, verlustbehaftetes Opt-in; es ändert weder
 Router noch Top-k. Chunking und die DSpark-Übergabe müssen gegen den
-unchunked Target-Pfad token-identisch bleiben. DSpark wird erst Bestandteil
-dieses Profils, wenn die offene Full-Checkpoint-A/B-Abnahme aus Plan 07 grün ist.
+unchunked Target-Pfad token-identisch bleiben. Die Token-A/B-Abnahme aus Plan
+07 ist grün (je Backend Target-only gegen DSpark); die noch offene
+Durchsatz-/Akzeptanzmessung bleibt eine Profilfrage und blockiert den
+Übergabevertrag nicht.
 
 **1M (`CTX=1048576`) ist experimentell**, kein Default und keine
 Durchsatz-Zusage. Es benutzt ebenfalls Turbo3 und Chunking, braucht aber eine

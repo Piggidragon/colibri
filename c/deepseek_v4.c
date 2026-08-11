@@ -932,6 +932,26 @@ int coli_v4_session_state_bytes(int context_tokens, int hc_mult,
     return 0;
 }
 
+/* Long V4 prompts used to allocate both activation buffers at CTX size even
+ * when the target forward path can carry its KV state across batches.  Keep
+ * full-prefill as the default: an invalid setting must not silently change
+ * either memory use or numerical execution. */
+int coli_v4_prefill_chunk_tokens(int max_prompt_tokens) {
+    const char *setting = getenv("V4_PREFILL_CHUNK");
+    if (!setting || !setting[0] || max_prompt_tokens < 1) return 0;
+    char *end = NULL;
+    errno = 0;
+    long parsed = strtol(setting, &end, 10);
+    if (errno || end == setting || *end || parsed < 0 || parsed > INT_MAX)
+        return 0;
+    if (parsed == 0) return 0;
+    if (parsed < 64) parsed = 64;
+    if (parsed > 65536) parsed = 65536;
+    parsed = (parsed / 64) * 64;
+    if (parsed > max_prompt_tokens) parsed = max_prompt_tokens;
+    return (int)parsed;
+}
+
 uint64_t coli_v4_os_available_memory(void) {
 #ifdef _WIN32
     MEMORYSTATUSEX status;
@@ -9171,6 +9191,8 @@ int coli_v4_session_create(ColiV4Session **output, ColiV4Engine *engine,
     session->max_prompt_tokens =
         options && options->max_prompt_tokens > 0 ? options->max_prompt_tokens
                                                   : 512;
+    session->prefill_chunk_tokens =
+        coli_v4_prefill_chunk_tokens(session->max_prompt_tokens);
     session->max_new_tokens_cap =
         options && options->max_new_tokens_cap > 0 ? options->max_new_tokens_cap
                                                    : 512;
@@ -9210,7 +9232,9 @@ int coli_v4_session_create(ColiV4Session **output, ColiV4Engine *engine,
     }
 
     size_t hd = (size_t)session->config.hc_mult * session->config.hidden_size;
-    size_t slots = (size_t)session->max_prompt_tokens;
+    size_t slots = (size_t)(session->prefill_chunk_tokens
+                            ? session->prefill_chunk_tokens
+                            : session->max_prompt_tokens);
     session->state = malloc(slots * hd * sizeof(float));
     session->next = malloc(slots * hd * sizeof(float));
     session->hidden = malloc((size_t)session->config.hidden_size * sizeof(float));
@@ -9390,28 +9414,37 @@ int coli_v4_session_generate(ColiV4Session *session,
                 reuse, prompt_count);
 
     int fresh = prompt_count - reuse;
-    for (int item = 0; item < fresh; item++)
-        if (load_embedding(state + (size_t)item * hd, index, config,
-                           session->prompt_ids[reuse + item])) {
-            /* The state now matches neither the old ids nor the new ones. */
+    int chunk_capacity = session->prefill_chunk_tokens
+        ? session->prefill_chunk_tokens : fresh;
+    int final_batch = 0;
+    double setup_done = spec_now();
+    for (int offset = 0; offset < fresh; offset += final_batch) {
+        final_batch = fresh - offset;
+        if (final_batch > chunk_capacity) final_batch = chunk_capacity;
+        for (int item = 0; item < final_batch; item++)
+            if (load_embedding(state + (size_t)item * hd, index, config,
+                               session->prompt_ids[reuse + offset + item])) {
+                /* The state now matches neither the old ids nor the new ones. */
+                kv_prefix_taint(&session->fed);
+                if (error && error_size)
+                    snprintf(error, error_size, "cannot load embedding");
+                return -1;
+            }
+        if (target_batch(engine, &state, &next, attention, index, config,
+                         experts, session->prompt_ids + reuse + offset,
+                         reuse + offset, final_batch, error, error_size)) {
             kv_prefix_taint(&session->fed);
-            if (error && error_size)
-                snprintf(error, error_size, "cannot load embedding");
             return -1;
         }
-
-    double setup_done = spec_now();
-    if (target_batch(engine, &state, &next, attention, index, config, experts,
-                     session->prompt_ids + reuse, reuse, fresh,
-                     error, error_size)) {
-        kv_prefix_taint(&session->fed);
-        return -1;
     }
     session->state = state;
     session->next = next;
-    /* The batch holds only the fresh tail, so the final row is at fresh-1
-     * even though its absolute position is prompt_count-1. */
-    const float *last = state + (size_t)(fresh - 1) * hd;
+    if (session->prefill_chunk_tokens)
+        fprintf(stderr, "v4_prefill chunk=%d fresh=%d final_batch=%d\n",
+                chunk_capacity, fresh, final_batch);
+    /* The final batch holds only the last chunk of the fresh tail, so its last
+     * row is final_batch-1 even though its absolute position is prompt_count-1. */
+    const float *last = state + (size_t)(final_batch - 1) * hd;
     int current = 0;
     float current_logit = 0.0f;
     if (final_hidden(hidden, last, index, config, error, error_size) ||
