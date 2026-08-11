@@ -77,7 +77,7 @@ und nicht wiederholen.
 | 11 | [Rückbau auf V4](plans/11-strip-to-v4.md) | offen, **zuletzt** |
 | 12 | [Expert-Cache-Politik](plans/12-expert-cache-policy.md) | Commit 1+2 fertig; Commit 3 als eigene Langlauf-Messung zurückgestellt |
 | 13 | [Frontend V4-only](plans/13-frontend-v4.md) | offen, optional |
-| 14 | [Chunked Prefill + DSpark](plans/14-chunked-prefill-dspark.md) | Commit 1 fertig, Commit 2 in Arbeit; Commit 3 als Langlauf-Messung zurückgestellt |
+| 14 | [Chunked Prefill + DSpark](plans/14-chunked-prefill-dspark.md) | Commit 1+2 fertig; Commit 3 als Langlauf-Messung zurückgestellt |
 
 Referenzdokumente ohne Nummer:
 [Paper](plans/paper-deepseek-v4.md) ·

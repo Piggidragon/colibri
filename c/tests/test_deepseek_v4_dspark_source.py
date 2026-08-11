@@ -35,6 +35,19 @@ class DeepSeekV4DSparkSourceTest(unittest.TestCase):
         self.assertLess(draft, target)
         self.assertLess(target, ready)
 
+    def test_chunked_prefill_finishes_before_dspark_decode(self):
+        fresh = self.engine.index("int fresh = prompt_count - reuse;")
+        prefill = self.engine.index("for (int offset = 0; offset < fresh;", fresh)
+        decode = self.engine.index("int full_mtp_ready = 0;", prefill)
+        draft = self.engine.index("proposals = v4_dspark_draft(", decode)
+        self.assertLess(fresh, prefill)
+        self.assertLess(prefill, decode)
+        self.assertLess(decode, draft)
+        # New prompts reset the history once before the chunk loop; the loop
+        # itself only feeds absolute positions through target_batch.
+        reset = self.engine.index("v4_ds_reset_history();")
+        self.assertLess(reset, prefill)
+
     def test_rejected_suffix_invalidates_hidden_taps(self):
         restore = self.engine.index("if (spec_attention_restore(")
         invalidate = self.engine.index("v4_ds_invalidate_from(old_last + 1)")

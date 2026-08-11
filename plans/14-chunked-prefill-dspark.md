@@ -23,6 +23,21 @@ Attention-, Compressor- und Indexer-Zustand bleiben dabei durchgehend. Das
 Tiny-Gate prüft Chunk 64 gegen den unchunked Oracle-Pfad für Long-Prompt,
 Prefix-Reuse und Serve.
 
+## Ergebnis Commit 2
+
+Der vorhandene DSpark-Übergabevertrag trägt ohne zusätzlichen Laufzeitpfad
+über die Chunkgrenzen: `target_batch` tappt jede Target-Position, ein neuer
+Prompt setzt die Historie einmal vor der Chunk-Schleife zurück, und
+`full_mtp_ready` bleibt bis nach dem letzten Chunk falsch. DSpark-Proposals
+beginnen folglich erst im verifizierten Decode. Der Source-Gate prüft diese
+Reihenfolge. Das Tiny-Fixture enthält absichtlich keine `mtp.*`-Tensoren; die
+bereits grüne Full-Checkpoint-A/B aus Plan 07 bleibt deshalb der
+DSpark-Qualitätsbeleg.
+
+**Commit 3 ist zurückgestellt.** Die 256k-Profilmessung ist ein langer,
+dedizierter Lauf und wird erst mit ausreichend reservierter Laufzeit gemacht;
+es gibt noch keinen neuen Chunk-Default oder Durchsatzanspruch.
+
 ## Ziel
 
 **256k Kontext ist das tägliche Langkontext-Profil** dieser Maschine:
