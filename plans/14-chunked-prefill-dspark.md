@@ -38,6 +38,14 @@ DSpark-Qualitätsbeleg.
 dedizierter Lauf und wird erst mit ausreichend reservierter Laufzeit gemacht;
 es gibt noch keinen neuen Chunk-Default oder Durchsatzanspruch.
 
+**Nach-Merge-Abnahme bewusst offen:** Diese Implementierungs-PR darf vor der
+teuren Full-Checkpoint-Grenzprobe gemergt werden. Danach läuft ein Prompt über
+mindestens eine 64er-Chunkgrenze dreimal: unchunked Target-only, chunked
+Target-only und chunked `V4_MTP=1 V4_DRAFT=3`. Die beiden Target-Folgen müssen
+greedy identisch sein; im DSpark-Lauf müssen echte Proposals auftreten und die
+emittierte Folge ebenfalls der Target-Folge entsprechen. Das ist eine
+Korrektheitsabnahme, keine Ersatzmessung für Commit 3.
+
 ## Ziel
 
 **256k Kontext ist das tägliche Langkontext-Profil** dieser Maschine:
