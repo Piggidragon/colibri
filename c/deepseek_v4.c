@@ -3885,10 +3885,13 @@ int coli_v4_indexer_step(ColiDeepSeekV4Indexer *state, int *indices,
      * the parallel region, which would be a data race. Skipped entirely
      * (not just no-op per-iteration) when an earlier stage already failed,
      * matching the original `!result &&` loop guard without breaking the
-     * canonical-loop form #pragma omp for requires. */
+     * canonical-loop form #pragma omp for requires. The `if()` skips the
+     * fork/join for short prompts (state->count is 1-3 at session start) --
+     * the parallel win only shows up once there are enough candidates to
+     * amortize the team overhead. */
     int decode_failed = 0;
     if (!result) {
-        #pragma omp parallel for reduction(|:decode_failed)
+        #pragma omp parallel for reduction(|:decode_failed) if(state->count >= 8)
         for (int candidate = 0; candidate < state->count; candidate++) {
             const void *key = (const unsigned char *)state->compressed +
                               (size_t)candidate * state->row_bytes;
@@ -5700,10 +5703,13 @@ int coli_v4_indexer_step(ColiDeepSeekV4Indexer *state, int *indices,
      * the parallel region, which would be a data race. Skipped entirely
      * (not just no-op per-iteration) when an earlier stage already failed,
      * matching the original `!result &&` loop guard without breaking the
-     * canonical-loop form #pragma omp for requires. */
+     * canonical-loop form #pragma omp for requires. The `if()` skips the
+     * fork/join for short prompts (state->count is 1-3 at session start) --
+     * the parallel win only shows up once there are enough candidates to
+     * amortize the team overhead. */
     int decode_failed = 0;
     if (!result) {
-        #pragma omp parallel for reduction(|:decode_failed)
+        #pragma omp parallel for reduction(|:decode_failed) if(state->count >= 8)
         for (int candidate = 0; candidate < state->count; candidate++) {
             const void *key = (const unsigned char *)state->compressed +
                               (size_t)candidate * state->row_bytes;
@@ -7249,18 +7255,23 @@ static void hot_repin_locked(V4HotPolicy *policy, V4ExpertStoreState *state,
     uint64_t *usage = policy->usage +
         (size_t)layer * state->experts_per_layer;
     int *pins = policy->pins + (size_t)layer * policy->pin_count;
+    /* `taken` turns the "already picked this rank" check from an O(rank)
+     * scan of `pins` into an O(1) lookup, so the whole partial selection is
+     * O(pin_count * experts_per_layer) instead of O(pin_count^2 *
+     * experts_per_layer) -- this runs under state->mutex on every repin, and
+     * V4_PIN_SLOTS can now push pin_count well past the old hard cap of 16. */
+    unsigned char taken[state->experts_per_layer];
+    memset(taken, 0, sizeof(taken));
     for (int rank = 0; rank < policy->pin_count; rank++) {
         int best = -1;
         for (int expert = 0; expert < state->experts_per_layer; expert++) {
-            int already = 0;
-            for (int prior = 0; prior < rank; prior++)
-                if (pins[prior] == expert) { already = 1; break; }
-            if (!already && usage[expert] &&
+            if (!taken[expert] && usage[expert] &&
                 (best < 0 || usage[expert] > usage[best] ||
                  (usage[expert] == usage[best] && expert < best)))
                 best = expert;
         }
         pins[rank] = best;
+        if (best >= 0) taken[best] = 1;
     }
     V4ExpertSlot *slots = layer_slots(state, layer);
     for (int i = 0; i < state->slots_per_layer; i++)

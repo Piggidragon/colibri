@@ -726,7 +726,14 @@ typedef struct { float score; int index; } ColiV4IndexScore;
  * scores[0..topk). */
 static inline int coli_v4_index_score_worse(const ColiV4IndexScore *a,
                                             const ColiV4IndexScore *b) {
-    if (a->score != b->score) return a->score < b->score;
+    /* Mirrors the removed descending_score()'s branch structure, not just
+     * its result on finite scores: `<` and `>` are both false whenever
+     * either operand is NaN, so NaN falls into the same index tiebreak that
+     * real ties use, exactly like the old qsort comparator did. A `!=`-based
+     * test would instead treat any NaN pair as "not equal" and skip the
+     * tiebreak, making two distinct NaN entries compare as equal ranks. */
+    if (a->score < b->score) return 1;
+    if (a->score > b->score) return 0;
     return a->index > b->index;
 }
 

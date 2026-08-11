@@ -3,12 +3,14 @@
  * qsort(scores, count, sizeof(*scores), descending_score) would put in
  * scores[0..topk) -- router semantics, not just "similar enough". This
  * compares the two against reference qsort output across the sizes and
- * tie patterns the plan calls out, and once single-threaded / once with
- * OpenMP, since the same header also holds the parallelized scan in
- * coli_v4_indexer_step (test_deepseek_v4.c exercises that end to end; this
- * file isolates the selection algorithm itself, with no deepseek_v4.c
- * dependency at all -- coli_v4_indexer_select is a static inline in
- * deepseek_v4_internal.h). */
+ * tie patterns the plan calls out. coli_v4_indexer_select() itself is
+ * sequential (no OpenMP) and this file has no deepseek_v4.c dependency at
+ * all -- it exercises the static-inline selection algorithm from
+ * deepseek_v4_internal.h in isolation. The OpenMP-parallelized scoring loop
+ * that feeds it lives in coli_v4_indexer_step() in deepseek_v4.c and is not
+ * covered by a direct unit test; its only regression coverage today is the
+ * token-identity check in `make deepseek-v4-tiny-check` (the fixture has a
+ * rate-4 CSA layer with index_topk=2, so the parallel path does run). */
 #include "../deepseek_v4_internal.h"
 
 #include <stdint.h>
