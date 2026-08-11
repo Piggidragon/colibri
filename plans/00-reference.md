@@ -696,11 +696,11 @@ Neue Knöpfe dieses Branches:
 | `V4_VRAM_LIMIT_MB` | aus (kappt das gemeldete freie VRAM) | 08 | gebaut |
 | `V4_VRAM_FAIL_AT` | aus, nur unter `COLI_V4_TEST_HOOKS` | 08 | gebaut |
 | `V4_OMP_CORES` | `perf`, wenn erkennbar; sonst `all` | 09 | geplant |
-| `V4_PIN_SLOTS` | 16 | 12 | geplant |
-| `V4_PIN_FRACTION` | aus (Alternative zu `V4_PIN_SLOTS`) | 12 | geplant |
-| `V4_PIN_RAMP_REQUESTS` | 24 | 12 | geplant |
+| `V4_PIN_SLOTS` | compile-time `COLI_V4_MAX_PIN_SLOTS_PER_LAYER` (16 im gebauten Binary) | 12 | gebaut |
+| `V4_PIN_FRACTION` | aus (Alternative zu `V4_PIN_SLOTS`) | 12 | gebaut |
+| `V4_PIN_RAMP_REQUESTS` | compile-time `COLI_V4_PIN_RAMP_REQUESTS` (24 im gebauten Binary) | 12 | gebaut |
 
-Die acht `gebaut`-Knöpfe stehen in `docs/ENVIRONMENT.md`. Die geerbten
+Die elf `gebaut`-Knöpfe stehen in `docs/ENVIRONMENT.md`. Die geerbten
 Upstream-Knöpfe (`V4_MTP*`, `V4_DRAFT`, `V4_NGRAM`, `V4_PREFIX_LOG`,
 `COLI_V4_*`) stehen dort **nicht** — sie werden vom Code gelesen, sind aber nie
 dokumentiert worden. Wer einen davon anfasst, dokumentiert ihn bei der

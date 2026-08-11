@@ -8,6 +8,112 @@ Commit 2 trägt erst mit [03-kv-codec.md](03-kv-codec.md) — siehe dort.
 2. `perf: parallel scoring and partial select for the lightning indexer`
 3. `perf: measure and tune the prefill expert batching`
 
+## Ergebnis Commit 1
+
+Gebaut: `V4_PIN_SLOTS` (absolut) und `V4_PIN_FRACTION` (Anteil von
+`available_pins`) ersetzen die Compile-Konstante
+`COLI_V4_MAX_PIN_SLOTS_PER_LAYER` (16 im gebauten Binary) zur Laufzeit;
+`V4_PIN_RAMP_REQUESTS` ersetzt ebenso `COLI_V4_PIN_RAMP_REQUESTS` (24). Beide
+Funktionen (`coli_v4_pin_slots_ceiling`, `coli_v4_pin_ramp_requests`) leben in
+der `RESOURCE_PLAN`-Unit — nicht in `EXPERT_STORE_HOT_ROWS16`, wo sie
+aufgerufen werden — aus demselben Grund wie `coli_v4_vram_limit_bytes`: nur
+`RESOURCE_PLAN` linkt eigenständig für den Test, der Rest der Hot-Policy-Unit
+zieht Compressor/Matmul/RoPE aus anderen Units mit. `V4_PIN_SLOTS` gewinnt,
+wenn beide Knöpfe gesetzt sind; Müll-Eingabe fällt auf den Compile-Default
+zurück; das Ergebnis wird immer auf `[0, available_pins]` geklemmt.
+
+Getestet in `c/tests/test_v4_pin_env.c` (Default, Clamp nach oben/unten,
+Müll, negativ, beide Knöpfe gleichzeitig) und am echten Checkpoint bestätigt:
+`v4_hot_policy`-Zeile zeigt korrektes `pin_slots_per_layer` für
+`V4_PIN_SLOTS=8`, `V4_PIN_FRACTION=0.5` (→ 12 bei `available_pins=24`) und
+`V4_PIN_RAMP_REQUESTS=0`.
+
+**Die Trefferquoten-Messung aus der Abnahme ist nur teilweise gelungen.** Die
+im Plan vorgeschlagene Sweep-Matrix (`V4_PIN_SLOTS` ∈ {4, 16, 32, 44} bei 32k,
+{4, 8, 16, 22} bei 128k) erwies sich in dieser Sitzung als unpraktikabel: ein
+einzelner Lauf mit 16 generierten Tokens bei `CTX=8192` las über 100 GB von
+Platte, ohne innerhalb von 280 s fertig zu werden (siehe eigener Abschnitt
+unten) — der kalte Expert-Cache dominiert bei jedem Lauf, der groß genug ist,
+um die Politik überhaupt zu unterscheiden.
+
+Ausweichend gemessen bei `CTX=4096` mit einem minimalen Zwei-Wort-Prompt (16
+Forward-Tokens gesamt, `available_pins=42`, echter Checkpoint,
+`COLI_V4_SAVE_USAGE=0`):
+
+| `V4_PIN_SLOTS` | hits | misses | hit_rate | bytes gelesen |
+|---|---|---|---|---|
+| 2 | 2241 | 1629 | 57.907 % | 21.78 GB |
+| 8 | 2240 | 1630 | 57.881 % | 21.79 GB |
+| 16 | 2238 | 1632 | 57.829 % | 21.82 GB |
+| 33 | 2238 | 1632 | 57.829 % | 21.82 GB |
+
+Die Spanne (57.83–57.91 %) liegt im Rauschen — bei nur 16 Forward-Tokens gibt
+es kaum Wiederholung im Working Set, also kaum Gelegenheit, bei der die
+Pin-Politik überhaupt greifen könnte. Das ist selbst ein ehrliches Ergebnis:
+ein aussagekräftiger Vergleich braucht deutlich mehr Decode-Volumen (oder die
+im Plan genannten ≥5000 Requests, ab denen die Autopin-Historie greift), nicht
+nur eine längere Sweep-Liste. Die ursprünglich verlangte Messung bei 32k/128k
+mit realistischem Prompt bleibt offen.
+
+**Nebenfund, der Platte-I/O-Kosten kalter Läufe:** Ein Probe-Lauf bei
+`CTX=8192`, `V4_VRAM=1`, 16 generierte Tokens zeigte über `/proc/PID/io`
+`read_bytes` jenseits von 100 GB (> 4× `target_cache=25 GiB`), ohne innerhalb
+von 280 s fertig zu werden; die meisten Worker-Threads standen im
+D-Zustand (I/O-Wartezustand). Das deckt sich mit der in
+[00-reference.md](00-reference.md) dokumentierten niedrigen
+Trefferquote im stationären Zustand (~17 % bei 32k, ~8 % bei 128k) — die
+meisten Expertenanfragen sind beim kalten Start Fehltreffer, die je einen
+Plattenzugriff kosten, und das ist genau der Befund, der diesen Plan
+begründet (siehe „Warum dieser Plan überhaupt existiert" unten). Für die
+Praxis heißt das: `bench_v4.py`s `medium`/`long`-Profile brauchen auf dieser
+Maschine mehrere Minuten pro Konfiguration, nicht die im Plan angenommenen
+„paar Minuten".
+
+## Ergebnis Commit 2
+
+Gebaut: die Bewertungsschleife (1) in `coli_v4_indexer_step` (`#pragma omp
+parallel for`, mit `reduction(|:decode_failed)` statt eines direkten
+Schreibzugriffs auf `result` aus der parallelen Region — letzteres wäre ein
+Datenrennen) und der Sort (2) (`qsort` → `coli_v4_indexer_select`, Min-Heap-
+basierter Partial-Select, O(count log topk) statt O(count log count)) — in
+**beiden** Kopien (`INDEXER`, `INDEXER_SNAPSHOT`), identisch, wie
+[AGENTS.md](../AGENTS.md) für die duplizierten Units verlangt.
+
+`coli_v4_indexer_select` liegt als `static inline` in
+`deepseek_v4_internal.h` (Typ `ColiV4IndexScore`, geteilt von beiden Kopien
+über einen Type-Alias `typedef ColiV4IndexScore IndexScore;`) statt in einer
+der beiden Units: die Funktion ist reine Array-Logik ohne V4-Zustand, und eine
+unit-lokale Definition hätte in `INDEXER_SNAPSHOT` denselben Rename-Trick
+gebraucht wie jedes andere dortige Symbol (`#define coli_v4_indexer_step
+snapshot_copy_indexer_step` etc.) — für keinen Gewinn. So bekommt jede
+Übersetzungseinheit, die den Header includet, ihre eigene private Kopie, und
+der Test braucht kein `deepseek_v4.c` und keinen Unit-Define.
+
+**Getestet:** `c/tests/test_v4_indexer_select.c` vergleicht
+`coli_v4_indexer_select` gegen eine Referenz-`qsort` mit demselben
+Tie-Break (aufsteigender Index bei Score-Gleichstand) für `count` ∈ {1, 512,
+513, 250000}, `topk` ∈ {1, count/2, count, count+37}, und drei
+Score-Verteilungen (alle verschieden, viele Gleichstände, alle gleich) —
+identische Indexliste in identischer Reihenfolge in jedem Fall, plus die
+Randfälle `count=0` und `topk≤0`. Läuft in <0.4 s, keine Abhängigkeit auf
+`deepseek_v4.c`.
+
+**Verifiziert gegen den echten Checkpoint:** `make -C c test`, `make -C c
+check` und `make -C c deepseek-v4-tiny-check` (Token-identisch) sind grün mit
+Commit 1+2 zusammen. Ein manueller Lauf gegen den vollen Checkpoint
+(`CTX=4096`, `V4_VRAM=1`, Prompt „Say hi", `--max-tokens 8`) liefert exakt
+denselben Text (`Hi! How can I help you today`) wie derselbe Lauf auf dem
+Commit-1-only-Stand — die Parallelisierung und der Partial-Select ändern die
+Token-Ausgabe nicht.
+
+**Nicht gemessen:** der behauptete Geschwindigkeitsgewinn der
+Bewertungsschleife selbst (skaliert sie tatsächlich mit der Teamgröße, oder
+ist sie speicherbandbreitengebunden wie in der Abnahme als mögliches Ergebnis
+vorgesehen?) — dafür bräuchte es einen Lauf mit großem `state->count`
+(langer Kontext), und genau der ist der Lauf, der in dieser Sitzung am
+kalten Cache scheiterte (siehe Commit 1 oben). Offen für eine Folge-Messung,
+sobald ein Lauf mit warmem Cache oder viel mehr Zeitbudget möglich ist.
+
 ## Warum dieser Plan überhaupt existiert
 
 **Das war die größte Lücke im Planset.** Die Pläne 01–11 machen alle dasselbe:

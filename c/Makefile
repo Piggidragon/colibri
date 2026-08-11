@@ -860,6 +860,17 @@ tests/test_native_quant$(EXE): tests/test_native_quant.c deepseek_v4.c native_qu
 tests/test_v4_scratch_env$(EXE): tests/test_v4_scratch_env.c deepseek_v4.c deepseek_v4_internal.h
 	$(CC) $(CFLAGS) -DCOLI_V4_UNIT_RESOURCE_PLAN deepseek_v4.c $< -o $@ $(LDFLAGS)
 
+tests/test_v4_pin_env$(EXE): tests/test_v4_pin_env.c deepseek_v4.c deepseek_v4_internal.h
+	$(CC) $(CFLAGS) -DCOLI_V4_UNIT_RESOURCE_PLAN \
+		-DCOLI_V4_MAX_PIN_SLOTS_PER_LAYER=16 -DCOLI_V4_PIN_RAMP_REQUESTS=24 \
+		deepseek_v4.c $< -o $@ $(LDFLAGS)
+
+# coli_v4_indexer_select is a static inline in deepseek_v4_internal.h (see
+# plans/12-expert-cache-policy.md Commit 2), so this test needs no unit
+# define and no deepseek_v4.c -- just the header.
+tests/test_v4_indexer_select$(EXE): tests/test_v4_indexer_select.c deepseek_v4_internal.h
+	$(CC) $(CFLAGS) $< -o $@ $(LDFLAGS)
+
 tests/test_v4_flash_attention$(EXE): tests/test_v4_flash_attention.c deepseek_v4.c deepseek_v4_internal.h v4_kv_codec.h native_quant.h turbo_quant.h
 	$(CC) $(CFLAGS) -DCOLI_V4_UNIT_SPARSE_ATTENTION -DCOLI_V4_UNIT_NATIVE_QUANT \
 		-DCOLI_V4_UNIT_KV_CODEC \

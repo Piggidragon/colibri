@@ -696,6 +696,104 @@ int coli_v4_context_tokens(void);
  * malformed/unset input, leaves `free_bytes` unchanged.  `0` is a valid
  * clamp-down value (not malformed) and forces the result to zero. */
 uint64_t coli_v4_vram_limit_bytes(uint64_t free_bytes);
+/* V4_PIN_SLOTS (absolute) / V4_PIN_FRACTION (share of available_pins) turn
+ * the former COLI_V4_MAX_PIN_SLOTS_PER_LAYER compile-time ceiling into a
+ * runtime one.  V4_PIN_SLOTS wins if both are set.  Result is always
+ * clamped into [0, available_pins]; garbage/out-of-range input on either
+ * knob falls back to the compile-time default. */
+int coli_v4_pin_slots_ceiling(int available_pins);
+/* V4_PIN_RAMP_REQUESTS overrides the compile-time COLI_V4_PIN_RAMP_REQUESTS
+ * default (0 = ramp disabled).  Garbage/negative input falls back to the
+ * compile-time default. */
+int coli_v4_pin_ramp_requests(void);
+
+/* Shared by both indexer copies (INDEXER, INDEXER_SNAPSHOT -- see
+ * plans/12-expert-cache-policy.md Commit 2) and their test. Defined here as
+ * static inline, like coli_v4_vram_fail_at() above, rather than living in
+ * either unit: the function is pure array logic with no v4 state, and a
+ * unit-local definition would need the rename-macro trick every other
+ * INDEXER_SNAPSHOT symbol uses to avoid a duplicate-symbol link error, for
+ * no benefit -- this way each translation unit that includes this header
+ * (including the test, with no deepseek_v4.c dependency at all) gets its
+ * own private copy. */
+typedef struct { float score; int index; } ColiV4IndexScore;
+
+/* True if `a` sorts strictly after `b`: lower score first, ties broken by
+ * ascending index. Mirrors deepseek_v4.c's descending_score() qsort
+ * comparator exactly (same total order), so coli_v4_indexer_select()'s
+ * output for the retained set is byte-identical to what
+ * qsort(scores, count, sizeof(*scores), descending_score) would have put in
+ * scores[0..topk). */
+static inline int coli_v4_index_score_worse(const ColiV4IndexScore *a,
+                                            const ColiV4IndexScore *b) {
+    /* Mirrors the removed descending_score()'s branch structure, not just
+     * its result on finite scores: `<` and `>` are both false whenever
+     * either operand is NaN, so NaN falls into the same index tiebreak that
+     * real ties use, exactly like the old qsort comparator did. A `!=`-based
+     * test would instead treat any NaN pair as "not equal" and skip the
+     * tiebreak, making two distinct NaN entries compare as equal ranks. */
+    if (a->score < b->score) return 1;
+    if (a->score > b->score) return 0;
+    return a->index > b->index;
+}
+
+static inline int coli_v4_index_score_descending(const void *left,
+                                                  const void *right) {
+    const ColiV4IndexScore *a = left, *b = right;
+    if (coli_v4_index_score_worse(a, b)) return 1;
+    if (coli_v4_index_score_worse(b, a)) return -1;
+    return 0;
+}
+
+/* Min-heap sift-down: heap[0..size) is a min-heap by "worse" (root is the
+ * single worst-ranked element of the retained set, so a better candidate
+ * can evict it in O(log size) instead of re-sorting). */
+static inline void coli_v4_index_score_sift_down(
+    ColiV4IndexScore *heap, int size, int root) {
+    for (;;) {
+        int left = 2 * root + 1, right = left + 1, smallest = root;
+        if (left < size &&
+            coli_v4_index_score_worse(&heap[left], &heap[smallest]))
+            smallest = left;
+        if (right < size &&
+            coli_v4_index_score_worse(&heap[right], &heap[smallest]))
+            smallest = right;
+        if (smallest == root) return;
+        ColiV4IndexScore swap = heap[root];
+        heap[root] = heap[smallest]; heap[smallest] = swap;
+        root = smallest;
+    }
+}
+
+/* Selects the best `topk` of scores[0..count), by descending score with
+ * ties broken by ascending index, into scores[0..min(topk,count)) in that
+ * same sorted order -- the identical set and order a full
+ * qsort(..., descending_score) would produce, without sorting the discarded
+ * remainder (O(count log topk) instead of O(count log count), see
+ * plans/12-expert-cache-policy.md Commit 2). count < 0 is treated as 0;
+ * topk <= 0 is a no-op. Returns min(topk, count). Router semantics: the
+ * selected set and order must never differ from a full descending qsort --
+ * see test_v4_indexer_select.c. */
+static inline int coli_v4_indexer_select(
+    ColiV4IndexScore *scores, int count, int topk) {
+    if (count < 0) count = 0;
+    if (topk > count) topk = count;
+    if (topk <= 0) return 0;
+    if (topk < count) {
+        for (int i = topk / 2 - 1; i >= 0; i--)
+            coli_v4_index_score_sift_down(scores, topk, i);
+        for (int i = topk; i < count; i++) {
+            if (coli_v4_index_score_worse(&scores[0], &scores[i])) {
+                scores[0] = scores[i];
+                coli_v4_index_score_sift_down(scores, topk, 0);
+            }
+        }
+    }
+    qsort(scores, (size_t)topk, sizeof(*scores),
+          coli_v4_index_score_descending);
+    return topk;
+}
+
 int coli_v4_session_state_bytes(int context_tokens, int hc_mult,
                                 int hidden_size, uint64_t *bytes);
 int coli_v4_resource_plan_compute(

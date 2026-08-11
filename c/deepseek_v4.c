@@ -860,6 +860,66 @@ uint64_t coli_v4_vram_limit_bytes(uint64_t free_bytes) {
     return free_bytes;
 }
 
+#ifndef COLI_V4_MAX_PIN_SLOTS_PER_LAYER
+#define COLI_V4_MAX_PIN_SLOTS_PER_LAYER 4
+#endif
+
+/* V4_PIN_SLOTS (absolute) and V4_PIN_FRACTION (share of available_pins, the
+ * slots left after minimum_slots) turn the former compile-time ceiling into
+ * a runtime one; the compile-time value (16 on Linux/MSYS2, see
+ * Makefile.deepseek-v4) stays the default when neither is set. If both are
+ * set, V4_PIN_SLOTS wins -- it is applied last. Garbage or out-of-range
+ * input on either falls back to the default, same pattern as
+ * coli_v4_vram_limit_bytes() above; the result is always clamped into
+ * [0, available_pins]. Lives in RESOURCE_PLAN (not the ROWS16 hot-policy
+ * unit that calls it) so it links standalone for tests, same reason
+ * coli_v4_vram_limit_bytes does. */
+int coli_v4_pin_slots_ceiling(int available_pins) {
+    if (available_pins < 0) available_pins = 0;
+    int ceiling = COLI_V4_MAX_PIN_SLOTS_PER_LAYER;
+    const char *frac = getenv("V4_PIN_FRACTION");
+    if (frac && frac[0]) {
+        char *end = NULL;
+        errno = 0;
+        double parsed = strtod(frac, &end);
+        if (!errno && end != frac && !*end && parsed >= 0.0 && parsed <= 1.0)
+            ceiling = (int)(parsed * available_pins + 0.5);
+    }
+    const char *slots = getenv("V4_PIN_SLOTS");
+    if (slots && slots[0]) {
+        char *end = NULL;
+        errno = 0;
+        long parsed = strtol(slots, &end, 10);
+        if (!errno && end != slots && !*end && parsed >= 0 &&
+            parsed <= INT_MAX)
+            ceiling = (int)parsed;
+    }
+    if (ceiling < 0) ceiling = 0;
+    if (ceiling > available_pins) ceiling = available_pins;
+    return ceiling;
+}
+
+#ifndef COLI_V4_PIN_RAMP_REQUESTS
+#define COLI_V4_PIN_RAMP_REQUESTS 0
+#endif
+
+/* V4_PIN_RAMP_REQUESTS overrides the compile-time default; 0 disables the
+ * ramp (every pin is active immediately once history is unseeded). Garbage
+ * or a negative value falls back to the compile-time default, same pattern
+ * as coli_v4_vram_limit_bytes() above. */
+int coli_v4_pin_ramp_requests(void) {
+    const char *setting = getenv("V4_PIN_RAMP_REQUESTS");
+    if (setting && setting[0]) {
+        char *end = NULL;
+        errno = 0;
+        long parsed = strtol(setting, &end, 10);
+        if (!errno && end != setting && !*end && parsed >= 0 &&
+            parsed <= INT_MAX)
+            return (int)parsed;
+    }
+    return COLI_V4_PIN_RAMP_REQUESTS;
+}
+
 int coli_v4_session_state_bytes(int context_tokens, int hc_mult,
                                 int hidden_size, uint64_t *bytes) {
     uint64_t slots, values, one_buffer;
@@ -3629,7 +3689,11 @@ struct ColiDeepSeekV4Indexer {
     float *compressor_scratch;
 };
 
-typedef struct { float score; int index; } IndexScore;
+/* Alias, not a redefinition: the type moved to deepseek_v4_internal.h
+ * (ColiV4IndexScore) so coli_v4_indexer_select() can be a single static
+ * inline shared by both indexer copies and their test -- see
+ * plans/12-expert-cache-policy.md Commit 2. */
+typedef ColiV4IndexScore IndexScore;
 
 static int set_error(char *error, size_t size, const char *format, ...) {
     if (error && size) {
@@ -3647,13 +3711,6 @@ static const void *value(const ColiDeepSeekV4LayerWeights *weights,
     char name[COLI_V4_MAX_TENSOR_NAME];
     snprintf(name, sizeof(name), "layers.%d.%s", weights->plan.layer, suffix);
     return coli_v4_layer_data(weights, name, spec);
-}
-
-static int descending_score(const void *left, const void *right) {
-    const IndexScore *a = left, *b = right;
-    if (a->score < b->score) return 1;
-    if (a->score > b->score) return -1;
-    return a->index - b->index;
 }
 
 int coli_v4_indexer_create(ColiDeepSeekV4Indexer **output,
@@ -3820,33 +3877,49 @@ int coli_v4_indexer_step(ColiDeepSeekV4Indexer *state, int *indices,
             sum += coli_bf16_decode(row[column]) * input[column];
         head_weights[head] = sum * weight_scale;
     }
-    for (int candidate = 0; !result && candidate < state->count; candidate++) {
-        const void *key = (const unsigned char *)state->compressed +
-                          (size_t)candidate * state->row_bytes;
-        /* Keep decode storage candidate-local so a future OpenMP scan gets a
-         * private buffer per worker instead of sharing compressor scratch. */
-        float decoded[dimension];
-        const float *values = key;
-        if (state->codec != COLI_V4_KV_F32) {
-            result = coli_v4_kv_decode_row(
-                state->codec, COLI_V4_KV_INDEX,
-                decoded, key, dimension, 0);
-            values = decoded;
+    /* The scan is read-only except for each candidate's own scores[] slot
+     * and a decode buffer that is already stack-local per iteration, so it
+     * parallelizes without changing which candidate wins -- see
+     * plans/12-expert-cache-policy.md Commit 2. decode_failed uses a
+     * bitwise-or reduction instead of writing `result` directly from inside
+     * the parallel region, which would be a data race. Skipped entirely
+     * (not just no-op per-iteration) when an earlier stage already failed,
+     * matching the original `!result &&` loop guard without breaking the
+     * canonical-loop form #pragma omp for requires. The `if()` skips the
+     * fork/join for short prompts (state->count is 1-3 at session start) --
+     * the parallel win only shows up once there are enough candidates to
+     * amortize the team overhead. */
+    int decode_failed = 0;
+    if (!result) {
+        #pragma omp parallel for reduction(|:decode_failed) if(state->count >= 8)
+        for (int candidate = 0; candidate < state->count; candidate++) {
+            const void *key = (const unsigned char *)state->compressed +
+                              (size_t)candidate * state->row_bytes;
+            float decoded[dimension];
+            const float *values = key;
+            if (state->codec != COLI_V4_KV_F32) {
+                if (coli_v4_kv_decode_row(
+                        state->codec, COLI_V4_KV_INDEX,
+                        decoded, key, dimension, 0))
+                    decode_failed = 1;
+                values = decoded;
+            }
+            float score = 0.0f;
+            for (int head = 0; head < heads; head++) {
+                const float *query = queries + (size_t)head * dimension;
+                float dot = 0.0f;
+                for (int column = 0; column < dimension; column++)
+                    dot += query[column] * values[column];
+                score += fmaxf(dot, 0.0f) * head_weights[head];
+            }
+            scores[candidate] = (IndexScore){score, candidate};
         }
-        float score = 0.0f;
-        for (int head = 0; head < heads; head++) {
-            const float *query = queries + (size_t)head * dimension;
-            float dot = 0.0f;
-            for (int column = 0; column < dimension; column++)
-                dot += query[column] * values[column];
-            score += fmaxf(dot, 0.0f) * head_weights[head];
-        }
-        scores[candidate] = (IndexScore){score, candidate};
+        if (decode_failed) result = -1;
     }
-    if (!result) qsort(scores, (size_t)state->count, sizeof(*scores), descending_score);
     int selected = state->count;
     if (selected > state->config->index_topk) selected = state->config->index_topk;
     if (selected > index_capacity) selected = index_capacity;
+    if (!result) coli_v4_indexer_select(scores, state->count, selected);
     for (int i = 0; !result && i < selected; i++) indices[i] = scores[i].index;
     free(qdq); free(scales); free(scores); free(head_weights); free(queries);
     return result ? set_error(error, error_size, "indexer scoring failed") : selected;
@@ -5434,7 +5507,11 @@ struct ColiDeepSeekV4Indexer {
     float *compressor_scratch;
 };
 
-typedef struct { float score; int index; } IndexScore;
+/* Alias, not a redefinition: the type moved to deepseek_v4_internal.h
+ * (ColiV4IndexScore) so coli_v4_indexer_select() can be a single static
+ * inline shared by both indexer copies and their test -- see
+ * plans/12-expert-cache-policy.md Commit 2. */
+typedef ColiV4IndexScore IndexScore;
 
 static int set_error(char *error, size_t size, const char *format, ...) {
     if (error && size) {
@@ -5452,13 +5529,6 @@ static const void *value(const ColiDeepSeekV4LayerWeights *weights,
     char name[COLI_V4_MAX_TENSOR_NAME];
     snprintf(name, sizeof(name), "layers.%d.%s", weights->plan.layer, suffix);
     return coli_v4_layer_data(weights, name, spec);
-}
-
-static int descending_score(const void *left, const void *right) {
-    const IndexScore *a = left, *b = right;
-    if (a->score < b->score) return 1;
-    if (a->score > b->score) return -1;
-    return a->index - b->index;
 }
 
 int coli_v4_indexer_create(ColiDeepSeekV4Indexer **output,
@@ -5625,33 +5695,49 @@ int coli_v4_indexer_step(ColiDeepSeekV4Indexer *state, int *indices,
             sum += coli_bf16_decode(row[column]) * input[column];
         head_weights[head] = sum * weight_scale;
     }
-    for (int candidate = 0; !result && candidate < state->count; candidate++) {
-        const void *key = (const unsigned char *)state->compressed +
-                          (size_t)candidate * state->row_bytes;
-        /* Keep decode storage candidate-local so a future OpenMP scan gets a
-         * private buffer per worker instead of sharing compressor scratch. */
-        float decoded[dimension];
-        const float *values = key;
-        if (state->codec != COLI_V4_KV_F32) {
-            result = coli_v4_kv_decode_row(
-                state->codec, COLI_V4_KV_INDEX,
-                decoded, key, dimension, 0);
-            values = decoded;
+    /* The scan is read-only except for each candidate's own scores[] slot
+     * and a decode buffer that is already stack-local per iteration, so it
+     * parallelizes without changing which candidate wins -- see
+     * plans/12-expert-cache-policy.md Commit 2. decode_failed uses a
+     * bitwise-or reduction instead of writing `result` directly from inside
+     * the parallel region, which would be a data race. Skipped entirely
+     * (not just no-op per-iteration) when an earlier stage already failed,
+     * matching the original `!result &&` loop guard without breaking the
+     * canonical-loop form #pragma omp for requires. The `if()` skips the
+     * fork/join for short prompts (state->count is 1-3 at session start) --
+     * the parallel win only shows up once there are enough candidates to
+     * amortize the team overhead. */
+    int decode_failed = 0;
+    if (!result) {
+        #pragma omp parallel for reduction(|:decode_failed) if(state->count >= 8)
+        for (int candidate = 0; candidate < state->count; candidate++) {
+            const void *key = (const unsigned char *)state->compressed +
+                              (size_t)candidate * state->row_bytes;
+            float decoded[dimension];
+            const float *values = key;
+            if (state->codec != COLI_V4_KV_F32) {
+                if (coli_v4_kv_decode_row(
+                        state->codec, COLI_V4_KV_INDEX,
+                        decoded, key, dimension, 0))
+                    decode_failed = 1;
+                values = decoded;
+            }
+            float score = 0.0f;
+            for (int head = 0; head < heads; head++) {
+                const float *query = queries + (size_t)head * dimension;
+                float dot = 0.0f;
+                for (int column = 0; column < dimension; column++)
+                    dot += query[column] * values[column];
+                score += fmaxf(dot, 0.0f) * head_weights[head];
+            }
+            scores[candidate] = (IndexScore){score, candidate};
         }
-        float score = 0.0f;
-        for (int head = 0; head < heads; head++) {
-            const float *query = queries + (size_t)head * dimension;
-            float dot = 0.0f;
-            for (int column = 0; column < dimension; column++)
-                dot += query[column] * values[column];
-            score += fmaxf(dot, 0.0f) * head_weights[head];
-        }
-        scores[candidate] = (IndexScore){score, candidate};
+        if (decode_failed) result = -1;
     }
-    if (!result) qsort(scores, (size_t)state->count, sizeof(*scores), descending_score);
     int selected = state->count;
     if (selected > state->config->index_topk) selected = state->config->index_topk;
     if (selected > index_capacity) selected = index_capacity;
+    if (!result) coli_v4_indexer_select(scores, state->count, selected);
     for (int i = 0; !result && i < selected; i++) indices[i] = scores[i].index;
     free(qdq); free(scales); free(scores); free(head_weights); free(queries);
     return result ? set_error(error, error_size, "indexer scoring failed") : selected;
@@ -6843,6 +6929,7 @@ fail:
 typedef struct V4HotPolicy {
     ColiExpertStore *store;
     int pin_count;
+    int ramp_requests;
     uint64_t repin_interval;
     uint64_t *usage;
     uint64_t *layer_requests;
@@ -6993,21 +7080,15 @@ static V4HotPolicy *hot_find(ColiExpertStore *store) {
     return policy;
 }
 
-#ifndef COLI_V4_PIN_RAMP_REQUESTS
-#define COLI_V4_PIN_RAMP_REQUESTS 0
-#endif
-
 static int hot_is_pinned(const V4HotPolicy *policy, int layer, int expert) {
     if (!policy || policy->pin_count < 1) return 0;
     int active = policy->pin_count;
-#if COLI_V4_PIN_RAMP_REQUESTS > 0
-    if (!policy->history_seeded && active > 4) {
+    if (policy->ramp_requests > 0 && !policy->history_seeded && active > 4) {
         uint64_t grown = policy->layer_requests[layer] /
-                         COLI_V4_PIN_RAMP_REQUESTS;
+                         (uint64_t)policy->ramp_requests;
         active = grown >= (uint64_t)(active - 4)
             ? active : 4 + (int)grown;
     }
-#endif
     const int *pins = policy->pins + (size_t)layer * policy->pin_count;
     for (int i = 0; i < active; i++)
         if (pins[i] == expert) return 1;
@@ -7174,18 +7255,23 @@ static void hot_repin_locked(V4HotPolicy *policy, V4ExpertStoreState *state,
     uint64_t *usage = policy->usage +
         (size_t)layer * state->experts_per_layer;
     int *pins = policy->pins + (size_t)layer * policy->pin_count;
+    /* `taken` turns the "already picked this rank" check from an O(rank)
+     * scan of `pins` into an O(1) lookup, so the whole partial selection is
+     * O(pin_count * experts_per_layer) instead of O(pin_count^2 *
+     * experts_per_layer) -- this runs under state->mutex on every repin, and
+     * V4_PIN_SLOTS can now push pin_count well past the old hard cap of 16. */
+    unsigned char taken[state->experts_per_layer];
+    memset(taken, 0, sizeof(taken));
     for (int rank = 0; rank < policy->pin_count; rank++) {
         int best = -1;
         for (int expert = 0; expert < state->experts_per_layer; expert++) {
-            int already = 0;
-            for (int prior = 0; prior < rank; prior++)
-                if (pins[prior] == expert) { already = 1; break; }
-            if (!already && usage[expert] &&
+            if (!taken[expert] && usage[expert] &&
                 (best < 0 || usage[expert] > usage[best] ||
                  (usage[expert] == usage[best] && expert < best)))
                 best = expert;
         }
         pins[rank] = best;
+        if (best >= 0) taken[best] = 1;
     }
     V4ExpertSlot *slots = layer_slots(state, layer);
     for (int i = 0; i < state->slots_per_layer; i++)
@@ -7387,12 +7473,8 @@ int COLI_V4_ROWS16_STORE_OPEN(
             direct_io ? "direct-aligned" : "buffered-pread");
     int minimum_slots = state->experts_per_layer < 6
         ? state->experts_per_layer : 6;
-    int maximum_pins = state->slots_per_layer - minimum_slots;
-#ifndef COLI_V4_MAX_PIN_SLOTS_PER_LAYER
-#define COLI_V4_MAX_PIN_SLOTS_PER_LAYER 4
-#endif
-    if (maximum_pins > COLI_V4_MAX_PIN_SLOTS_PER_LAYER)
-        maximum_pins = COLI_V4_MAX_PIN_SLOTS_PER_LAYER;
+    int available_pins = state->slots_per_layer - minimum_slots;
+    int maximum_pins = coli_v4_pin_slots_ceiling(available_pins);
     int pin_requested = options->pin_slots_per_layer;
     /* -1 / 0 => implementation default (use maximum_pins). */
     uint64_t requested = pin_requested > 0
@@ -7420,6 +7502,7 @@ int COLI_V4_ROWS16_STORE_OPEN(
     }
     for (size_t i = 0; i < pins; i++) policy->pins[i] = -1;
     policy->store = *output; policy->pin_count = pin_count;
+    policy->ramp_requests = coli_v4_pin_ramp_requests();
     policy->history_path = hot_history_path(options->model_dir);
     policy->repin_interval = options->repin_interval
         ? options->repin_interval : (uint64_t)minimum_slots;
@@ -7439,8 +7522,10 @@ int COLI_V4_ROWS16_STORE_OPEN(
     pthread_mutex_unlock(&hot_policies_mutex);
     (*output)->ops = &hot_operations;
     fprintf(stderr,
-            "v4_hot_policy pin_slots_per_layer=%d repin_interval=%llu "
-            "mode=resident-ram rows16=hot-pins\n", pin_count,
+            "v4_hot_policy pin_slots_per_layer=%d available_pins=%d "
+            "ramp_requests=%d repin_interval=%llu mode=resident-ram "
+            "rows16=hot-pins\n", pin_count, available_pins,
+            policy->ramp_requests,
             (unsigned long long)policy->repin_interval);
     const char *prewarm = getenv("COLI_V4_PREWARM");
     if (policy->history_seeded && prewarm && atoi(prewarm) != 0 &&
