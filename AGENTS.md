@@ -348,10 +348,14 @@ Agent nichts wieder.
 - **Linux-Hybrid-Fallback.** Fehlt
   `/sys/devices/system/cpu/types/intel_core_*/cpumap`, zählt
   `coli_physical_cores()` weiter die eindeutigen `thread_siblings_list`-Einträge
-  und sieht auf dem i5-13400F 10 P- und E-Cores zusammen. Der V4-Pfad nutzt bei
-  vorhandener Intel-Typologie `V4_OMP_CORES=perf` und zählt deren SMT-Siblings
-  zu sechs P-Core-Workern; bis dessen A/B vorliegt, bleibt der physische
-  `all`-Default. Siehe Plan 09.
+  und sieht auf dem i5-13400F 10 P- und E-Cores zusammen. `/sys/devices/system/cpu/types/`
+  existiert auf der Zielmaschine (CachyOS, Kernel 7.1.6-1) selbst **nicht** —
+  `coli_linux_performance_cores()` fällt dann auf die Range-Liste
+  `/sys/devices/cpu_core/cpus` zurück (hier `0-11`), sonst wäre `V4_OMP_CORES=perf`
+  dort ein stiller No-Op. Der V4-Pfad zählt deren SMT-Siblings zu sechs
+  P-Core-Workern; bis dessen A/B vorliegt, bleibt der physische `all`-Default,
+  und ein defekter `V4_OMP_CORES`-Wert fällt ebenfalls auf `all` zurück, nicht
+  auf einen ungetesteten `perf`-Versuch. Siehe Plan 09.
 - **Kein separater DSpark-Download.** Der Drafter liegt im Hauptcheckpoint unter
   `mtp.<stage>.`. Wer nach einem eigenen DSpark-Repo sucht, sucht falsch.
 - **MTP-Tiefe 1, aber drei DSpark-Stufen.** Das Paper nennt

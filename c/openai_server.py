@@ -1423,9 +1423,16 @@ def tune_child_env(env, arch):
     """
     if arch != "deepseek_v4":
         return env
-    # Leave the OpenMP environment unset so the V4 binary can select P-cores
-    # from Linux's intel_core_* topology.  An operator's OMP_NUM_THREADS still
+    # Leave OMP_NUM_THREADS unset so the V4 binary can select P-cores from
+    # Linux's hybrid-core topology itself.  An operator's OMP_NUM_THREADS still
     # passes through untouched and remains the highest-priority override.
+    if not env.get("COLI_NO_OMP_TUNE") and sys.platform != "win32":
+        # coli_v4_omp_tune_threads sizes the team in-binary, but libgomp's
+        # default placement is unbound: a reduced team can then migrate onto
+        # E-cores, defeating V4_OMP_CORES=perf. Neither variable sets thread
+        # count, so they don't fight the in-binary sizing.
+        env.setdefault("OMP_PROC_BIND", "close")
+        env.setdefault("OMP_PLACES", "cores")
     # All speculative paths stay opt-in: partial acceptance requires expensive
     # recurrent-attention replay on this engine.
     env.setdefault("V4_DRAFT", "0")

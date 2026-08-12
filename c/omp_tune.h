@@ -140,6 +140,25 @@ static int coli_physical_cores(void)
 }
 
 #if !defined(_WIN32) && !defined(__APPLE__)
+/* Reads one line into buf, rejecting a read that hit the buffer edge without
+ * reaching '\n' or EOF: a silently truncated line makes coli_linux_cpumap_has_cpu
+ * and the rangeset parser below shift every CPU index rather than fail loudly,
+ * which is exactly the "wrong count is worse than no count" case the file
+ * warns about at the top. Returns 0 (buf left unusable) on any such failure. */
+static int coli_linux_read_first_line(const char *path, char *buf, size_t bufsz)
+{
+    FILE *f = fopen(path, "r");
+    if (!f) return 0;
+    int ok = fgets(buf, (int)bufsz, f) != NULL;
+    if (ok) {
+        size_t len = strlen(buf);
+        if (len == bufsz - 1 && buf[len - 1] != '\n' && !feof(f)) ok = 0;
+        else buf[strcspn(buf, "\n")] = 0;
+    }
+    fclose(f);
+    return ok;
+}
+
 /* cpumap prints the most significant group first; count nibbles from its
  * right edge so CPU 0 is the least-significant bit regardless of commas. */
 static int coli_linux_cpumap_has_cpu(const char *map, int cpu)
@@ -159,29 +178,65 @@ static int coli_linux_cpumap_has_cpu(const char *map, int cpu)
     return 0;
 }
 
-/* Intel hybrid kernels export the P-core logical CPUs here.  Collapse their
- * SMT siblings as coli_physical_cores does, because static V4 matmuls want
- * six P-core workers on the target i5-13400F, not twelve SMT threads. */
+/* /sys/devices/cpu_core/cpus (and its cpu_atom sibling) is a comma-separated
+ * list of "N" or "N-M" ranges, ascending CPU id -- not a cpumap hex string. */
+static int coli_linux_rangeset_has_cpu(const char *ranges, int cpu)
+{
+    if (!ranges || cpu < 0) return 0;
+    const char *p = ranges;
+    while (*p) {
+        char *end;
+        long lo = strtol(p, &end, 10);
+        if (end == p) return 0;
+        long hi = lo;
+        p = end;
+        if (*p == '-') {
+            p++;
+            hi = strtol(p, &end, 10);
+            if (end == p) return 0;
+            p = end;
+        }
+        if (cpu >= lo && cpu <= hi) return 1;
+        while (*p == ',' || *p == ' ' || *p == '\t' || *p == '\n') p++;
+    }
+    return 0;
+}
+
+/* Intel hybrid kernels export the P-core logical CPUs here -- on kernels that
+ * still have it. This target (CachyOS, kernel 7.1.6) has no
+ * /sys/devices/system/cpu/types/ directory at all; its P-core set is exposed
+ * only as a plain range list at /sys/devices/cpu_core/cpus. Try the more
+ * precise types/.../cpumap source first, then fall back to the range list, so
+ * V4_OMP_CORES=perf isn't a silent no-op on this exact machine.
+ * Collapse SMT siblings as coli_physical_cores does, because static V4
+ * matmuls want six P-core workers on the target i5-13400F, not twelve SMT
+ * threads. */
 static int coli_linux_performance_cores(void)
 {
-    DIR *types = opendir("/sys/devices/system/cpu/types");
-    if (!types) return 0;
     char cpu_map[1024] = {0};
-    struct dirent *type;
-    while ((type = readdir(types))) {
-        if (strncmp(type->d_name, "intel_core_", 11) != 0) continue;
-        char path[512];
-        snprintf(path, sizeof(path),
-                 "/sys/devices/system/cpu/types/%s/cpumap", type->d_name);
-        FILE *f = fopen(path, "r");
-        if (f) {
-            fgets(cpu_map, sizeof(cpu_map), f);
-            fclose(f);
+    char rangelist[1024] = {0};
+    int have_cpu_map = 0, have_rangelist = 0;
+
+    DIR *types = opendir("/sys/devices/system/cpu/types");
+    if (types) {
+        struct dirent *type;
+        while ((type = readdir(types))) {
+            if (strncmp(type->d_name, "intel_core_", 11) != 0) continue;
+            char path[512];
+            snprintf(path, sizeof(path),
+                     "/sys/devices/system/cpu/types/%s/cpumap", type->d_name);
+            if (coli_linux_read_first_line(path, cpu_map, sizeof(cpu_map)) && cpu_map[0]) {
+                have_cpu_map = 1;
+                break;
+            }
         }
-        if (cpu_map[0]) break;
+        closedir(types);
     }
-    closedir(types);
-    if (!cpu_map[0]) return 0;
+    if (!have_cpu_map) {
+        have_rangelist = coli_linux_read_first_line(
+            "/sys/devices/cpu_core/cpus", rangelist, sizeof(rangelist)) && rangelist[0];
+    }
+    if (!have_cpu_map && !have_rangelist) return 0;
 
     DIR *cpus = opendir("/sys/devices/system/cpu");
     if (!cpus) return 0;
@@ -192,15 +247,14 @@ static int coli_linux_performance_cores(void)
         if (strncmp(entry->d_name, "cpu", 3) != 0 ||
             entry->d_name[3] < '0' || entry->d_name[3] > '9') continue;
         int cpu = atoi(entry->d_name + 3);
-        if (!coli_linux_cpumap_has_cpu(cpu_map, cpu)) continue;
+        int is_perf = have_cpu_map ? coli_linux_cpumap_has_cpu(cpu_map, cpu)
+                                    : coli_linux_rangeset_has_cpu(rangelist, cpu);
+        if (!is_perf) continue;
         char path[512], siblings[64];
         snprintf(path, sizeof(path),
                  "/sys/devices/system/cpu/%s/topology/thread_siblings_list",
                  entry->d_name);
-        FILE *f = fopen(path, "r");
-        if (!f) continue;
-        if (fgets(siblings, sizeof(siblings), f)) {
-            siblings[strcspn(siblings, "\n")] = 0;
+        if (coli_linux_read_first_line(path, siblings, sizeof(siblings))) {
             int duplicate = 0;
             for (int i = 0; i < n; i++)
                 if (strcmp(seen[i], siblings) == 0) { duplicate = 1; break; }
@@ -209,7 +263,6 @@ static int coli_linux_performance_cores(void)
                 n++;
             }
         }
-        fclose(f);
     }
     closedir(cpus);
     return n;
@@ -256,7 +309,7 @@ static void coli_v4_omp_tune_threads(const char *engine)
     const char *setting = getenv("V4_OMP_CORES");
     int all = !setting || !setting[0] || !strcmp(setting, "all");
     int use_perf = setting && !strcmp(setting, "perf");
-    int target = 0, performance = 0;
+    int target = 0, performance = 0, malformed = 0;
 #if !defined(_WIN32) && !defined(__APPLE__)
     if (use_perf) {
         target = coli_linux_performance_cores();
@@ -273,21 +326,26 @@ static void coli_v4_omp_tune_threads(const char *engine)
             else if (parsed > logical) target = logical;
             else target = (int)parsed;
         } else {
-#if !defined(_WIN32) && !defined(__APPLE__)
-            target = coli_linux_performance_cores();
-            performance = target > 0;
-#endif
-            if (!target) target = coli_physical_cores();
+            /* Garbage V4_OMP_CORES falls back to the same "all" (physical
+             * cores) path as an unset/empty value, per docs/ENVIRONMENT.md
+             * and CLAUDE.md rule 2 -- not to the still-unmeasured perf path. */
+            malformed = 1;
+            target = coli_physical_cores();
         }
     }
     if (target <= 0 || target >= logical) return;
 
     omp_set_num_threads(target);
-    fprintf(stderr, "[OMP] %s: %d %s-core threads instead of %d logical CPUs; "
-                    "set V4_OMP_CORES=perf|all|<n> or OMP_NUM_THREADS=<n> to override\n",
-            engine, target, performance ? "performance" :
-            (all || use_perf ? "physical" : "selected"),
-            logical);
+    if (malformed) {
+        fprintf(stderr, "[OMP] %s: V4_OMP_CORES=\"%s\" is not perf|all|<n>, ignoring it; "
+                        "%d physical-core threads instead of %d logical CPUs\n",
+                engine, setting, target, logical);
+    } else {
+        fprintf(stderr, "[OMP] %s: %d %s-core threads instead of %d logical CPUs; "
+                        "set V4_OMP_CORES=perf|all|<n> or OMP_NUM_THREADS=<n> to override\n",
+                engine, target, performance ? "performance" : "physical",
+                logical);
+    }
 #else
     (void)engine;
 #endif

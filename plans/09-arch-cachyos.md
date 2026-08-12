@@ -415,12 +415,24 @@ weiterhin zu Plan 15.
 
 Commit 1b ergänzt `coli_v4_omp_tune_threads`: Linux liest bei vorhandener
 `intel_core_*`-Topologie die P-Core-CPU-Maske und dedupliziert deren SMT-Siblings.
-`V4_OMP_CORES=perf|all|<n>` ist dokumentiert und getestet; `perf` wählt auf dem
-i5-13400F sechs P-Core-Worker, während `all` bis zur noch ausstehenden A/B
-weiterhin der Default bleibt. `OMP_NUM_THREADS` und `COLI_NO_OMP_TUNE` haben weiterhin
-Vorrang. `coli` und der Direkt-Server lassen für V4 nun die OMP-Umgebung frei,
-damit der Binary-Pfad nicht mehr vor dem Start maskiert wird; sie setzen auch
-keine Spin-Wait-Defaults mehr.
+**Korrektur (Code-Review, 2026-08-12):** Die Zielmaschine (CachyOS, Kernel
+7.1.6-1) exportiert `/sys/devices/system/cpu/types/` gar nicht — nur neuere
+Kernel tun das. `coli_linux_performance_cores()` fällt deshalb jetzt zusätzlich
+auf `/sys/devices/cpu_core/cpus` zurück (eine Range-Liste, kein Hex-Cpumap; hier
+`0-11`), bevor es aufgibt. Ohne diesen Fallback war `V4_OMP_CORES=perf` auf der
+Zielmaschine ein stiller No-Op (lieferte 10 statt 6). Verifiziert:
+`V4_OMP_CORES=perf ./tests/test_v4_omp_tune` zeigt jetzt `6 performance-core
+threads`. `V4_OMP_CORES=perf|all|<n>` ist dokumentiert und getestet; `perf`
+wählt auf dem i5-13400F sechs P-Core-Worker, während `all` bis zur noch
+ausstehenden A/B weiterhin der Default bleibt. Ein defekter Wert fällt auf
+`all` zurück (nicht mehr auf einen ungetesteten `perf`-Versuch). `OMP_NUM_THREADS`
+und `COLI_NO_OMP_TUNE` haben weiterhin Vorrang. `coli` und der Direkt-Server
+lassen für V4 die Teamgröße (`OMP_NUM_THREADS`) frei, damit der Binary-Pfad nicht
+vor dem Start maskiert wird, und setzen keine Spin-Wait-Defaults mehr — setzen
+aber weiterhin `OMP_PROC_BIND=close` und `OMP_PLACES=cores` (nicht Teamgröße,
+sondern Platzierung): ohne die beiden ist ein auf sechs reduziertes Team auf
+Linux unbound und kann auf die E-Cores wandern, was die P-Core-Auswahl
+zunichtemacht.
 
 Commit 3 erkennt `/opt/cuda/bin/nvcc` vor `/usr/local/cuda/bin/nvcc` und reicht
 einen optionalen `NVCC_CCBIN` als `-ccbin` an nvcc durch. Auf dem Ziel sind CUDA

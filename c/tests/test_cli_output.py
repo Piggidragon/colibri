@@ -248,19 +248,36 @@ class OmpThreadsForEveryEngineTest(unittest.TestCase):
                                      temp=None, cap=None)
 
     def test_non_v4_sister_engines_get_physical_cores(self):
-        with mock.patch("resource_plan.physical_cpu_count", return_value=6):
+        # clear=True: env_for_engine copies the real os.environ, so an
+        # operator's own OMP_NUM_THREADS export would make setdefault() keep
+        # their value instead of "6" and fail this assertion (#4 in the
+        # review that added this test).
+        with mock.patch.dict(os.environ, {}, clear=True), \
+             mock.patch("resource_plan.physical_cpu_count", return_value=6):
             for arch in ("inkling", "kimi", "olmoe"):
                 with self.subTest(arch=arch):
                     env = self.coli.env_for_engine(self.args(), arch)
                     self.assertEqual(env.get("OMP_NUM_THREADS"), "6")
 
-    def test_v4_leaves_hybrid_omp_selection_to_the_binary(self):
+    def test_v4_leaves_thread_count_to_the_binary(self):
         with mock.patch.object(self.coli.sys, "platform", "linux"), \
-             mock.patch("resource_plan.physical_cpu_count", return_value=6):
+             mock.patch("resource_plan.physical_cpu_count", return_value=6), \
+             mock.patch.dict(os.environ, {}, clear=True):
             env = self.coli.env_for_engine(self.args(), "deepseek_v4")
-        for name in ("OMP_NUM_THREADS", "OMP_PROC_BIND", "OMP_PLACES",
-                     "OMP_WAIT_POLICY", "GOMP_SPINCOUNT", "OMP_DYNAMIC"):
+        # Thread count stays in the binary's hands (V4_OMP_CORES / logical
+        # default), and spin-wait tuning stays withheld from this disk-bound
+        # engine (docs/deepseek-v4-tuning-32gb.md). OMP_PROC_BIND/OMP_PLACES
+        # ARE set -- see the next test -- since neither controls thread count.
+        for name in ("OMP_NUM_THREADS", "OMP_WAIT_POLICY", "GOMP_SPINCOUNT", "OMP_DYNAMIC"):
             self.assertNotIn(name, env)
+
+    def test_v4_pins_placement_so_a_reduced_team_stays_off_e_cores(self):
+        with mock.patch.object(self.coli.sys, "platform", "linux"), \
+             mock.patch("resource_plan.physical_cpu_count", return_value=6), \
+             mock.patch.dict(os.environ, {}, clear=True):
+            env = self.coli.env_for_engine(self.args(), "deepseek_v4")
+        self.assertEqual(env.get("OMP_PROC_BIND"), "close")
+        self.assertEqual(env.get("OMP_PLACES"), "cores")
 
     def test_explicit_setting_still_wins(self):
         with mock.patch.dict(os.environ, {"OMP_NUM_THREADS": "3"}), \
@@ -271,8 +288,12 @@ class OmpThreadsForEveryEngineTest(unittest.TestCase):
     def test_kill_switch_is_honoured(self):
         with mock.patch.dict(os.environ, {"COLI_NO_OMP_TUNE": "1"}, clear=False):
             os.environ.pop("OMP_NUM_THREADS", None)
+            os.environ.pop("OMP_PROC_BIND", None)
+            os.environ.pop("OMP_PLACES", None)
             env = self.coli.env_for_engine(self.args(), "deepseek_v4")
         self.assertNotIn("OMP_NUM_THREADS", env)
+        self.assertNotIn("OMP_PROC_BIND", env)
+        self.assertNotIn("OMP_PLACES", env)
 
 
 if __name__ == "__main__":
