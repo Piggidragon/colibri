@@ -267,13 +267,17 @@ def main() -> int:
     parser.add_argument("--scratch-mb", type=int, default=128)
     parser.add_argument("--max-tokens", type=int, default=64)
     parser.add_argument("--warmup-tokens", type=int, default=8)
-    parser.add_argument("--omp-threads", type=int, default=os.cpu_count() or 1)
+    parser.add_argument(
+        "--omp-threads", type=int,
+        help="set OMP_NUM_THREADS; omit to measure V4_OMP_CORES auto-selection",
+    )
     parser.add_argument("--dspark", action="store_true")
     parser.add_argument("--env", action="append", type=parse_assignment, default=[])
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()
     if args.ctx < 2 or args.ram_gb <= 0 or args.scratch_mb < 1 or \
-       args.max_tokens < 1 or args.warmup_tokens < 1 or args.omp_threads < 1:
+       args.max_tokens < 1 or args.warmup_tokens < 1 or \
+       (args.omp_threads is not None and args.omp_threads < 1):
         parser.error("numeric benchmark arguments must be positive (CTX >= 2)")
     model = args.model.resolve()
     binary = args.binary.resolve()
@@ -293,11 +297,16 @@ def main() -> int:
     environment.update({
         "CTX": str(args.ctx),
         "V4_SCRATCH_MB": str(args.scratch_mb),
-        "OMP_NUM_THREADS": str(args.omp_threads),
         "SEED": "1",
         "COLI_TEMP": "0",
         "COLI_V4_SAVE_USAGE": "0",
     })
+    # The automatic V4 P-core path is measurable only when this variable is
+    # absent; an explicit --omp-threads remains the reproducible A/B override.
+    if args.omp_threads is None:
+        environment.pop("OMP_NUM_THREADS", None)
+    else:
+        environment["OMP_NUM_THREADS"] = str(args.omp_threads)
     configure_dspark_environment(environment, args.dspark, args.env)
     with tempfile.NamedTemporaryFile(prefix=f"bench-v4-{args.profile}-", suffix=".txt") as prompt:
         prompt.write(materialized)
@@ -332,7 +341,7 @@ def main() -> int:
         "max_tokens": args.max_tokens,
         "warmup_tokens": args.warmup_tokens if args.cache_state == "warm" else 0,
         "dspark_enabled": args.dspark,
-        "omp_threads": args.omp_threads,
+        "omp_threads": args.omp_threads if args.omp_threads is not None else "auto",
         "model": str(model),
         "binary": str(binary),
         "prompt_sha256": sha256(materialized),
