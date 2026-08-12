@@ -74,7 +74,7 @@ und nicht wiederholen.
 | 08 | [VRAM-Planner](plans/08-vram-planner.md) | fertig (#12) |
 | 09 | [Arch / CachyOS](plans/09-arch-cachyos.md) | Implementierung fertig; Hardwareprofil in Plan 15 |
 | 10 | [Dual-Streaming](plans/10-dual-streaming.md) | Implementierung fertig; Hardwareprofil in Plan 15 |
-| 11 | [Rückbau auf V4](plans/11-strip-to-v4.md) | offen, **zuletzt** |
+| 11 | [Rückbau auf V4](plans/11-strip-to-v4.md) | fertig (#18) |
 | 12 | [Expert-Cache-Politik](plans/12-expert-cache-policy.md) | Implementierung fertig (#14); Profilabnahme in Plan 15 |
 | 13 | [Frontend V4-only](plans/13-frontend-v4.md) | offen, optional |
 | 14 | [Chunked Prefill + DSpark](plans/14-chunked-prefill-dspark.md) | Commit 1+2 fertig; End-to-End-Abnahme in Plan 15 |

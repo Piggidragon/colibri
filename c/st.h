@@ -288,7 +288,7 @@ static void st_pread_full(int fd, void *buf, int64_t n, int64_t off, const char 
     }
 }
 
-/* Stamps are a resident-tensor convention (see docs/FORMATS.md's "Stamp-map
+/* Stamps are a resident-tensor convention (the V4 format note's "Stamp-map
  * scan bound"): a handful to a few hundred entries per model
  * (q_a/q_b/kv_a/kv_b_proj, o_proj, shared-expert and dense-MLP gate/up/down),
  * NEVER the tens of thousands of routed-expert tensors a large MoE model
@@ -329,8 +329,7 @@ static void st_pread_full(int fd, void *buf, int64_t n, int64_t off, const char 
  * shard aborts the ENTIRE model load immediately, before the user ever sees
  * which layer or tensor was implicated -- these messages name a shard FILE,
  * never a tensor, which is how to tell this abort surface apart from the
- * later per-tensor one at a glance. See docs/FORMATS.md's own section on
- * this. */
+ * later per-tensor one at a glance. */
 static void st_fmt_stamp_ingest(shards *S, jval *root, const char *shard_path) {
     jval *meta = json_get(root, "__metadata__");
     if (!meta || meta->t != J_OBJ) return;                /* no metadata object: unstamped, fine */
@@ -379,7 +378,7 @@ static void st_fmt_stamp_ingest(shards *S, jval *root, const char *shard_path) {
                     shard_path, inner->keys[i], v->str, S->fmt_val[dup]); exit(1); }
         if (S->fmt_n >= ST_FMT_STAMP_MAX) {
             fprintf(stderr, "%s: __metadata__[\"colibri.fmt\"] stamps more than %d tensor names across "
-                    "this container's shards -- stamps are a resident-tensor convention (docs/FORMATS.md), "
+                    "this container's shards -- stamps are a resident-tensor convention, "
                     "not a bulk migration path; a container stamping this many names is malformed, "
                     "refusing (untrusted container)\n",
                     shard_path, ST_FMT_STAMP_MAX); exit(1); }
@@ -411,8 +410,7 @@ static void st_fmt_stamp_ingest(shards *S, jval *root, const char *shard_path) {
  * router, or embed/lm_head is stored here like any other entry but never
  * looked up: it is silently ignored BY DESIGN, not an oversight -- the
  * convention exists to disambiguate a byte-count collision among quantized
- * formats, and only a .qs-backed tensor can have one. See docs/FORMATS.md's
- * "Scope: .qs-backed tensors only". */
+ * formats, and only a .qs-backed tensor can have one. */
 static const char *st_fmt_stamp(shards *S, const char *name) {
     for (int i = 0; i < S->fmt_n; i++)
         if (!strcmp(S->fmt_name[i], name)) return S->fmt_val[i];

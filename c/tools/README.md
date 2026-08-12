@@ -1,18 +1,17 @@
 # Tools
 
-These scripts support model preparation and offline engineering work. They are
-not runtime dependencies of the C engine.
+These scripts support DeepSeek-V4-Flash engineering. They are not runtime
+dependencies of the C engine.
 
-- `convert_fp8_to_int4.py`, `download_glm52.py`: model preparation
-- `repack_fp8_passthrough.py`: fmt=8 repack (byte-preserved FP8, resident kinds only;
-  see the module docstring -- synthetic-fixture-tested only, no real-shard runs yet)
-- `make_glm_oracle.py`, `make_glm_bench_model.py`: deterministic fixtures
-- `benchmark_cuda_fixture.py`, `eval_glm.py`, `fetch_benchmarks.py`: benchmarks
-- `gen_unicode.py`: tokenizer table generation
+- `bench_v4.py`: reproducible short, medium, and long V4 benchmark profiles.
+- `make_deepseek_v4_tiny.py`: generate the ignored deterministic Tiny fixture.
+- `make_deepseek_v4_oracle.py`: record and verify full-checkpoint target oracles.
+- `repack_fp8_passthrough.py`: byte-preserving FP8 repack utility.
+- `clean.py`: remove generated V4 build artifacts.
 
-Run them from `c/`, for example:
+Run tools from `c/`. The full checkpoint remains the only valid DSpark fixture:
 
 ```sh
-python3 tools/convert_fp8_to_int4.py --selftest
-python3 tools/make_glm_bench_model.py --output /tmp/colibri-bench
+python3 tools/bench_v4.py --model /path/to/deepseek-v4-flash --profile short
+make deepseek-v4-tiny-check
 ```

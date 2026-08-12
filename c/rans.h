@@ -14,9 +14,9 @@
  * construction); decode reads the resulting byte range FORWARDS and emits
  * symbols in the ORIGINAL forward order.
  *
- * RECORD FORMAT (`int4-rans256-g0`, one record = one tensor's nibble
- * stream; all integers little-endian; docs/int4-rans256-g0.md is the full
- * writeup):
+ * RECORD FORMAT (`int4-rans256-g0`, one record = one tensor's nibble stream;
+ * all integers little-endian). This legacy helper is not part of the supported
+ * DeepSeek V4 checkpoint path:
  *
  *   offset 0:  n_symbols     u64   -- nibble count
  *   offset 8:  packed_bytes  u64   -- original packed-byte count
