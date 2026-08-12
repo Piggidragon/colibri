@@ -73,7 +73,7 @@ und nicht wiederholen.
 | 07 | [Head und DSpark in VRAM](plans/07-head-dspark-vram.md) | fertig (#9) |
 | 08 | [VRAM-Planner](plans/08-vram-planner.md) | fertig (#12) |
 | 09 | [Arch / CachyOS](plans/09-arch-cachyos.md) | Commit 1 fertig (#11), Rest offen |
-| 10 | [Dual-Streaming](plans/10-dual-streaming.md) | offen |
+| 10 | [Dual-Streaming](plans/10-dual-streaming.md) | Implementierung fertig; Hardwareprofil in Plan 15 |
 | 11 | [Rückbau auf V4](plans/11-strip-to-v4.md) | offen, **zuletzt** |
 | 12 | [Expert-Cache-Politik](plans/12-expert-cache-policy.md) | Implementierung fertig (#14); Profilabnahme in Plan 15 |
 | 13 | [Frontend V4-only](plans/13-frontend-v4.md) | offen, optional |

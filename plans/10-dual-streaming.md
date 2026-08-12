@@ -3,8 +3,32 @@
 Voraussetzung: [00-reference.md](00-reference.md)
 
 *Commits:*
-1. `feat: port the multi-drive mirror machinery from colibri.c to V4`
+1. `feat: add a V4-local deterministic mirror reader`
 2. `perf: bandwidth-weighted stripe chunks for asymmetric drives`
+
+## Ergebnis
+
+Die GLM-Maschinerie bleibt bewusst in `colibri.c`: Der ursprünglich geplante
+gemeinsame Header hätte den nicht mehr zielgerichteten Motor berührt und dessen
+volle Gate-Matrix in diese V4-Phase gezogen. Stattdessen kapselt `v4_mirror.h`
+die V4-lokale, über `st.h` angebundene Variante. Ohne `COLI_MODEL_MIRROR` ist
+der Pfad unverändert: keine Zusatz-fd, kein Probe, kein Routing. Mit Spiegel
+werden nur Expert-Reads deterministisch geroutet, und der Prefetch verwendet
+dieselbe Replik. Große Gewichte auf vollständigen Spiegeln werden nach
+`COLI_DISK_WEIGHTS` in 4-KiB-ausgerichtete parallele Stripes geteilt; partielle
+Spiegel und kleine Reads fallen auf den einen gerouteten Reader zurück.
+
+Die automatische Bandbreitenprobe wurde nicht still geschätzt: Sie und der
+physische Zwei-Laufwerk-Vergleich liegen in [Plan 15](15-final-validation-and-tuning.md).
+Bis dahin ist V4 bei fehlendem `COLI_DISK_WEIGHTS` gleichgewichtet (`1,1,…`);
+der Default ohne Spiegel bleibt das einzelne Laufwerk.
+
+Der neue Gate `test_v4_mirror` erzeugt zwei byte-identische Safetensors-Kopien
+und prüft den kostenfreien Aus-Pfad, den deterministischen 2:1-Route-Split,
+Replica-Reads und einen 4-MiB-Stripecopy. `make -C c test && make -C c check`
+und der erzwungene `deepseek-v4-tiny-check` sind grün. Eine echte zweite SSD
+und der 161-GB-Checkpoint wurden absichtlich nicht für eine Durchsatzbehauptung
+verwendet; das ist die Abschlussmatrix von Plan 15.
 
 ## Das zweite Laufwerk ist optional — und bleibt es
 

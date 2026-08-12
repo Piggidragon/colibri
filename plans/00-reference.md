@@ -696,6 +696,8 @@ Neue Knöpfe dieses Branches:
 | `V4_VRAM_LIMIT_MB` | aus (kappt das gemeldete freie VRAM) | 08 | gebaut |
 | `V4_VRAM_FAIL_AT` | aus, nur unter `COLI_V4_TEST_HOOKS` | 08 | gebaut |
 | `V4_PREFILL_CHUNK` | 0 (Full-Prefill) | 14 | gebaut (Commit 1+2) |
+| `COLI_MODEL_MIRROR` | aus | 10 | gebaut |
+| `COLI_DISK_WEIGHTS` | `1,1,…` bei aktivem V4-Spiegel | 10 | gebaut |
 | `V4_OMP_CORES` | `perf`, wenn erkennbar; sonst `all` | 09 | geplant |
 | `V4_PIN_SLOTS` | compile-time `COLI_V4_MAX_PIN_SLOTS_PER_LAYER` (16 im gebauten Binary) | 12 | gebaut |
 | `V4_PIN_FRACTION` | aus (Alternative zu `V4_PIN_SLOTS`) | 12 | gebaut |
@@ -860,13 +862,11 @@ make -C c deepseek-v4-oracle \
   `inkling.c`, `kimi_k3.c`, `olmoe.c` und der gemeinsame `backend_cuda.cu` werden
   nicht angefasst. Der tote Kommentar zu KV8/TQ in
   [c/colibri.c:3567](../c/colibri.c) bleibt stehen.
-  **Ausnahme:** [10-dual-streaming.md](10-dual-streaming.md) Commit 1 darf die
-  Mirror-Maschinerie aus `colibri.c` in einen gemeinsamen `c/mirror.h` ziehen und
-  `colibri.c` auf den Header umstellen. Das ist ein Refactor ohne
-  Verhaltensänderung, kein GLM-Feature — und Plan 10 nennt die V4-lokale Kopie als
-  Rückfall, falls der Schnitt teurer wird als gedacht. Wer diese Ausnahme zieht,
-  belegt sie mit `make -C c colibri` plus den GLM-Gates, nicht nur mit den
-  V4-Gates.
+  **Plan 10 nutzt den vorgesehenen Rückfall:** Die Mirror-Maschinerie bleibt in
+  `colibri.c`; `c/v4_mirror.h` kapselt eine V4-lokale Variante über dem
+  Safetensors-Index. Damit bleibt der GLM-Pfad unverändert und Plan 11 erbt den
+  V4-Code direkt. Die V4-Gates belegen den Aus- und Mirror-Pfad; die physische
+  Zwei-Laufwerk-Messung liegt in Plan 15.
 - **Kein On-Disk-Format ändert sich.** `kv_persist.h` (COLIKV1) gehört zu
   `colibri.c`; `kv_prefix.h` speichert nur Token-IDs und ist von Codec-Änderungen
   unberührt.
