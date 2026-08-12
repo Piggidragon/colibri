@@ -75,9 +75,10 @@ und nicht wiederholen.
 | 09 | [Arch / CachyOS](plans/09-arch-cachyos.md) | Commit 1 fertig (#11), Rest offen |
 | 10 | [Dual-Streaming](plans/10-dual-streaming.md) | offen |
 | 11 | [Rückbau auf V4](plans/11-strip-to-v4.md) | offen, **zuletzt** |
-| 12 | [Expert-Cache-Politik](plans/12-expert-cache-policy.md) | Commit 1+2 fertig; Commit 3 als eigene Langlauf-Messung zurückgestellt |
+| 12 | [Expert-Cache-Politik](plans/12-expert-cache-policy.md) | Implementierung fertig (#14); Profilabnahme in Plan 15 |
 | 13 | [Frontend V4-only](plans/13-frontend-v4.md) | offen, optional |
-| 14 | [Chunked Prefill + DSpark](plans/14-chunked-prefill-dspark.md) | Commit 1+2 fertig; Full-Checkpoint-Grenzprobe und Commit 3 bewusst nach Merge zurückgestellt |
+| 14 | [Chunked Prefill + DSpark](plans/14-chunked-prefill-dspark.md) | Commit 1+2 fertig; End-to-End-Abnahme in Plan 15 |
+| 15 | [Abschlussabnahme und Tuning](plans/15-final-validation-and-tuning.md) | offen, **zuletzt** |
 
 Referenzdokumente ohne Nummer:
 [Paper](plans/paper-deepseek-v4.md) ·
@@ -92,8 +93,9 @@ Die Nummern sind Kennungen, keine Reihenfolge. So wird gearbeitet:
 Gewinn, siehe dessen Ergebnisblock). **08** ist der VRAM-Tier-Planner samt
 32GB+12GB-Doku-Profil, gegen den echten Checkpoint gemessen — siehe dessen
 Ergebnisblock; die exklusive KV-Host-Shadow-Entfernung bleibt offen, ist aber
-kein Teil dieses Plans mehr. Plan 12 Commit 3 bleibt als dedizierte
-Langlauf-Messung zurückgestellt; als nächstes wird **14** implementiert. Die Tabelle unten
+kein Teil dieses Plans mehr. Die verbliebenen Full-Checkpoint- und
+Langlaufmessungen aus 09, 10, 12 und 14 liegen gemeinsam in **Plan 15**; als
+nächstes wird **10** implementiert. Die Tabelle unten
 ist die ursprüngliche Empfehlung und wurde nicht buchstäblich befolgt: 12
 wurde bisher übersprungen, dafür lief 02 → 05 → 06 → 07 → 08 am Stück durch,
 und 04 kam vor 07 statt danach. Für den Rest gilt sie unverändert.
@@ -115,6 +117,7 @@ und 04 kam vor 07 statt danach. Für den Rest gilt sie unverändert.
 | 13 | **09 Rest** | THP, CUDA-Pfade, Tuning-Doku. |
 | 14 | **13** | Frontend. |
 | 15 | **11** | Rückbau. |
+| 16 | **15** | Finale Full-Checkpoint-Abnahme und ausschließlich messbasiertes Tuning. |
 
 **Harte Abhängigkeiten**, die man nicht umstellen darf:
 
@@ -127,7 +130,8 @@ und 04 kam vor 07 statt danach. Für den Rest gilt sie unverändert.
   und dessen endgültige VRAM-Planung übernehmen, nicht eine Zwischenform
 - **13 vor 11** — sonst ist der Launcher zwischenzeitlich kaputt
 - **10 vor 11** — 11 löscht den Mirror-Code, den 10 als Vorlage braucht
-- **11 zuletzt**, immer
+- **11 vor 15** — die Abschlussmatrix misst den tatsächlich ausgelieferten V4-only-Stand
+- **15 zuletzt**, immer
 
 Bei knapper Zeit: `01 → 09.1 → 03 → 12 → 06` hat den meisten Ertrag pro Aufwand.
 Das ist zugleich die Reihenfolge, in der die Gewinne am wenigsten voneinander
@@ -158,6 +162,7 @@ phase-11-strip-to-v4
 phase-12-expert-cache
 phase-13-frontend
 phase-14-chunked-prefill
+phase-15-final-validation
 ```
 
 - Branch von `main`, außer der Plan hängt an einem anderen — dann von dessen

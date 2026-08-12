@@ -260,13 +260,13 @@ Mengengleichheit — die Reihenfolge.
 Auswahl nicht, aber sie ändert die Reihenfolge, in der `scores[]` gefüllt wird,
 und ein Fehler dabei sieht aus wie ein Select-Fehler.
 
-## Commit 3 — Prefill
+## Abschlussabnahme in Plan 15
 
-**Zurückgestellt.** Die geforderte Messmatrix braucht wegen des kalten
-Expert-Cache mehrere lange, dedizierte Läufe und wird nicht mit einer
-Implementierungsphase vermischt. Sie bleibt als eigenständige Messaufgabe in
-diesem Plan offen; bis sie mit ausreichend Laufzeit durchgeführt wird, setzt
-sie weder eine Batch- noch eine Prefetch- oder Cache-Policy als neuen Default.
+Die geforderte Messmatrix braucht wegen des kalten Expert-Cache mehrere lange,
+dedizierte Läufe und wird nicht mit einer Implementierungsphase vermischt. Sie
+liegt deshalb in [Plan 15](15-final-validation-and-tuning.md). Bis diese Matrix
+grün ist, setzt sie weder eine Batch- noch eine Prefetch- oder Cache-Policy als
+neuen Default.
 
 Dieser Commit misst und stimmt die bestehende V4-Batchgröße, Prefetch- und
 Cache-Politik ab. Er ändert **nicht** die zwei auf `CTX` skalierten
@@ -324,18 +324,18 @@ Damit sie nicht vergessen, aber auch nicht ungeprüft eingebaut werden:
 - Trefferquoten-Messung als Skript, nicht als Gate: `c/tools/bench_v4_hitrate.py`,
   fester Promptsatz, gibt Hits/Misses/gelesene GB je Konfiguration aus.
 
-## Abnahme
+## Implementierungsabnahme
 
 - Indexer-Select liefert **bitgleiche** Indexlisten, ein- und mehrfädig, und ist
   bei `count = 250000` messbar schneller.
 - Die Bewertungsschleife skaliert mit der Teamgröße — gemessen, nicht angenommen.
   Wenn sie es nicht tut, ist sie speicherbandbreitengebunden und der Gewinn hängt
   an `V4_KV_INDEX=native` statt an OpenMP; auch das ist ein Ergebnis.
-- Die Trefferquoten-Messung liegt für ≥4 Pin-Konfigurationen vor; der Gewinner
-  steht als Default im Tuning-Doc, mit den Zahlen.
-- Prefill-Messung liegt vor, mit Empfehlung für Batchgröße und Prefetch.
 - Tokenfolge unverändert — Cache-Politik und Select-Algorithmus dürfen die
   Ausgabe nicht berühren.
+
+Die Trefferquoten-/Prefill-Matrix und mögliche Defaultänderungen sind
+Abnahmekriterien von Plan 15.
 
 ## Risiken
 

@@ -1,7 +1,7 @@
 # 00 — Referenzplan: DeepSeek V4 auf 32 GB RAM + RTX 4070
 
 Übergeordnetes Dokument. Hier stehen Zielbild, Hardware-Budget, Codekarte und
-Konventionen; die Phasenpläne `01`–`13` setzen das voraus und wiederholen es nicht.
+Konventionen; die Phasenpläne `01`–`15` setzen das voraus und wiederholen es nicht.
 
 - Jede Phase bekommt einen eigenen Branch und PR; Planänderungen laufen auf dem
   Branch der zugehörigen Phase mit (Schema und Reihenfolge in
@@ -750,6 +750,7 @@ daraus automatisch Gates. Keine zentrale Liste, kein Merge-Konflikt.
 | 12 | [Expert-Cache-Politik](12-expert-cache-policy.md) | Pin-Deckel, Indexer (Scan + Select), Prefill | — | — |
 | 13 | [Frontend V4-only](13-frontend-v4.md) | WebUI, CLI, Serve auf V4 | — | — |
 | 14 | [Chunked Prefill + DSpark](14-chunked-prefill-dspark.md) | 256k-Aktivierungsfenster und MTP-Handoff | spart bis zu `CTX/chunk`-fachen State | — |
+| 15 | [Abschlussabnahme und Tuning](15-final-validation-and-tuning.md) | Full-Checkpoint-Matrix, Profile und nur belegte Folgeoptimierungen | — | — |
 
 ¹ 03 hat den gesamten KV bereits von 1.68 auf 0.43 GiB (128k) gesenkt. 05 spiegelt
 den 0.388-GiB-Attention-Anteil auf die Karte, behält aber den Host-Shadow (die
@@ -808,7 +809,11 @@ bleibt in 10 Default und Pflicht-Abnahme** — die Zahlen der Baseline in 01 wer
 weiterhin ohne Spiegel gemessen, sonst ist der Vergleich über die Phasen hinweg
 kaputt.
 
-**11 zuletzt.** Er entfernt nur und braucht als Vorlage, was er löscht.
+**11 vor 15.** Er entfernt nur und braucht als Vorlage, was er löscht. Die
+hardwaregebundenen Voll-Checkpoint- und Langlaufmessungen aller Phasen sind in
+[15-final-validation-and-tuning.md](15-final-validation-and-tuning.md) gebündelt;
+Plan 15 ist immer zuletzt und ändert Defaults nur mit einem reproduzierten
+Vorher-/Nachher-Nachweis.
 
 ## Gemeinsame Verifikation
 

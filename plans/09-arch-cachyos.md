@@ -72,9 +72,9 @@ nicht, weil ein Gewinn belegt wäre. Er ist es nicht.
   voraus; ohne `CUDA=1 V4_VRAM=1` bleiben sie im RAM. Deshalb die 24 GiB oben —
   und deshalb liegen die absoluten Zahlen unter Phase 07 (15 statt 30 Slots).
 
-**Die eigentliche Abnahme steht weiter aus.** Sie verlangt den Dreiervergleich
-16 / 10 / nur-6-P-Cores, und die dritte Konfiguration ist ohne Commit 1b gar
-nicht fahrbar. Die Tabelle mit den P-Äquivalenten unten bleibt eine Abschätzung.
+Die hardwaregebundene Abschlussabnahme (16 / 10 / nur-6-P-Cores, THP-Nachweis
+und Durchsatz) liegt in [Plan 15](15-final-validation-and-tuning.md). Die
+Tabelle mit den P-Äquivalenten unten bleibt eine Abschätzung.
 
 ## Vorbemerkung zur Messbarkeit
 
@@ -402,17 +402,15 @@ als benannter Kandidat, nicht als Zusage.
 - Build-Test: `CUDA_HOME`-Autodetektion findet `/opt/cuda`, wenn vorhanden, und
   scheitert sonst mit der bestehenden verständlichen Meldung.
 
-## Abnahme
+## Implementierungsabnahme
 
 - `coli_omp_tune_threads` läuft im V4-Start und loggt die Teamgröße. Auf einer
   durchgängig SMT-fähigen CPU ist sie halb so groß wie vorher; **auf dem
   i5-13400F 10 statt 16**, weil nur die 6 P-Cores SMT haben und die 4 E-Cores
   nicht. Wer „halb" als Kriterium nimmt, hält den richtigen Wert für einen Fehler.
-- Durchsatzmessung vorher/nachher auf der Zielmaschine — die Erwartung aus #718
-  ist der Maßstab, nicht die Garantie.
-- `AnonHugePages` in `smaps_rollup` ist nach Commit 2 nennenswert von 0 verschieden
-  (nur relevant, wenn THP auf `madvise` steht).
 - `make -C c deepseek-v4 CUDA=1` baut auf CachyOS ohne manuelles `CUDA_HOME`.
+
+Die Durchsatz- und THP-Hardwaremessung ist Abnahme von Plan 15.
 
 ## Risiken
 

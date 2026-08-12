@@ -5,13 +5,13 @@ Voraussetzung: [00-reference.md](00-reference.md)
 *Commits:*
 1. `feat: port the multi-drive mirror machinery from colibri.c to V4`
 2. `perf: bandwidth-weighted stripe chunks for asymmetric drives`
-3. `perf: HMB-aware queue depth for DRAM-less SSDs`
 
 ## Das zweite Laufwerk ist optional — und bleibt es
 
 **Ein Laufwerk ist die Grundkonfiguration, nicht der Notfall.** Das zweite
 Laufwerk ist ein Beschleuniger, den dieses Setup zufällig danebenliegen hat; der
-Plan darf es nicht zur Voraussetzung machen. Verbindlich für alle drei Commits:
+Plan darf es nicht zur Voraussetzung machen. Verbindlich für beide
+Implementierungscommits:
 
 - **Default ist Einzellaufwerk.** Ohne `COLI_MODEL_MIRROR` bzw. `COLI_MODEL_DIRS`
   läuft exakt der heutige Lesepfad — dieselben `pread`s, dieselbe Koaleszenz,
@@ -25,9 +25,9 @@ Plan darf es nicht zur Voraussetzung machen. Verbindlich für alle drei Commits:
 - **Der Aus-Pfad ist der Pflicht-Pfad in der Abnahme.** Alle Gates laufen ohne
   zweites Laufwerk grün; die Dual-Gates kommen zusätzlich obendrauf, nicht
   stattdessen. Siehe [Abnahme](#abnahme).
-- **Commit 3 gilt für beide Konfigurationen.** HMB-Verhalten, Koaleszenz und
-  Queue-Tiefe hängen am einzelnen Laufwerk, nicht an ihrer Zahl — dieser Commit
-  ist auch dann der Ertrag des Plans, wenn nie ein zweites Laufwerk steckt.
+- **HMB-Profiling gilt für beide Konfigurationen.** Es hängt am einzelnen
+  Laufwerk, nicht an ihrer Zahl, ist aber eine hardwaregebundene Messaufgabe und
+  liegt deshalb in [Plan 15](15-final-validation-and-tuning.md).
 
 Damit ist der Plan auch auf einer Maschine mit nur Laufwerk A vollständig
 umsetzbar; es entfallen lediglich die Gewinne aus Commit 2.
@@ -51,9 +51,10 @@ Platte, also ~2.8 GB/Token. Auf Laufwerk A allein sind das bei ~7 GB/s
 **~0.40 s/Token** — das ist die Zahl der Grundkonfiguration, gegen die Commit 2
 antritt. Bei 128k sinkt die Residenz auf rund 8 %, entsprechend ~3.1 GB/Token oder
 ~0.44 s. Storage ist damit nach den VRAM-Phasen der dominante Posten; beide
-Kontexte gehören in die Messreihe, und zwar **je einmal mit und ohne zweites
-Laufwerk** — sonst ist der Beitrag des Laufwerks nicht von dem der Commits 1 und 3
-zu trennen.
+Kontexte gehören in die Abschlussmessreihe, und zwar **je einmal mit und ohne
+zweites Laufwerk** — sonst ist der Beitrag des Laufwerks nicht von dem der
+Implementierung zu trennen. Diese Matrix liegt in
+[Plan 15](15-final-validation-and-tuning.md).
 
 ## Der Fund: das meiste existiert schon — im falschen Motor
 
@@ -180,11 +181,16 @@ Bei einer Replik ist `nsf == 1`, `W == wt[0]` und die Schleife liefert
 Rückfallebene für den Fall, dass der Aus-Pfad aus Commit 1 einmal nicht greift,
 **nicht** der Aus-Pfad selbst: der liegt davor und spart auch den Aufruf.
 
-## Commit 3 — DRAM-lose SSDs
+## Abschlussprofil: DRAM-lose SSDs
 
-**Dieser Commit hängt nicht am zweiten Laufwerk.** Er gilt pro Laufwerk und trägt
-in der Grundkonfiguration genauso wie in der gespiegelten — wer nur Laufwerk A hat,
-holt hier trotzdem den Ertrag des Plans.
+Die folgenden HMB-/Queue-Experimente gehören in
+[Plan 15](15-final-validation-and-tuning.md). Sie sind kein dritter
+Implementierungscommit und setzen keinen Default, bevor die vollständige Matrix
+einen reproduzierbaren Gewinn zeigt.
+
+**Diese Profilierung hängt nicht am zweiten Laufwerk.** Sie gilt pro Laufwerk und
+trägt in der Grundkonfiguration genauso wie in der gespiegelten — wer nur
+Laufwerk A hat, erhält hier trotzdem einen vollständigen Messfall.
 
 Die Laufwerke haben **keinen eigenen DRAM** und nutzen HMB (Host Memory Buffer),
 also geliehenen Host-RAM für die FTL-Mapping-Tabelle — typisch 64 MB.
@@ -216,9 +222,9 @@ werden statt auf gut Glück:
 Readahead über einen O_DIRECT-Pfad ist wirkungslos, über den gepufferten
 verdoppelt er bei bereits koaleszierten 12-MB-Reads nur die Arbeit.
 
-Ergebnis dieses Commits ist primär eine **Messung mit dokumentierten Einstellungen**
-im Tuning-Doc, nicht notwendig Code. Wenn die Messung eine feste Workerzahl oder
-Queue-Tiefe nahelegt, wird daraus ein Default für dieses Profil.
+Ergebnis ist primär eine Messung mit dokumentierten Einstellungen im Tuning-Doc,
+nicht notwendig Code. Nur ein belegter Gewinn darf daraus einen Profilwert
+ableiten.
 
 ## Die drei Konfigurationen
 
@@ -264,29 +270,23 @@ laufen damit auch in CI und auf einer Maschine mit einer SSD.
 - End-to-end mit zwei Verzeichnissen auf demselben Dateisystem (Kopie des
   Tiny-Fixtures): identische Tokens mit und ohne `COLI_MODEL_MIRROR`.
 
-## Abnahme
+## Implementierungsabnahme
 
 **Pflicht — ohne zweites Laufwerk, auf jeder Maschine nachvollziehbar:**
 
 - `make -C c test && make -C c check` und `deepseek-v4-tiny-check` grün, Tokens
   identisch zum Stand vor dem Branch.
 - `test_v4_mirror_off` belegt: eine Replik, kein Probe, kein Verhaltensdelta.
-- Startzeit und Lesezeit pro Token unverändert gegenüber `main` — Commit 1 und 2
-  dürfen die Grundkonfiguration **nicht messbar** verlangsamen (Toleranz: innerhalb
-  der Streuung der Baseline aus [01](01-measure-and-ram-budget.md)).
-- Commit 3 liefert seine Messreihe für Laufwerk A allein; die daraus abgeleiteten
-  Defaults gelten unabhängig von der Zahl der Laufwerke.
 
 **Zusätzlich, wenn ein zweites Laufwerk steckt:**
 
 - `MIRROR:`-Statistikzeile zeigt beide Laufwerke mit Bytes und Reads.
-- Der Probe meldet ~7 und ~3.5 GB/s; die Cuts stehen ≈ 2:1.
-- Gemessene Lesezeit pro Token sinkt gegenüber Einzellaufwerk um **≥25 %**
-  (Erwartung ~7 → ~10 GB/s aggregiert, ~30 % weniger Zeit).
-- Gewichtete Stripes schlagen gleichmäßige messbar — beide Varianten gegeneinander
-  messen, nicht nur die neue.
 - Tokenfolge unverändert, mit und ohne Spiegel identisch. Storage-Routing darf nie
   Semantik berühren.
+
+Die Start-/Decodezeit-, HMB- und physische Zwei-Laufwerk-Messmatrix ist Abnahme
+von Plan 15. Fehlt Laufwerk B, bleibt dieser Plan mit den semantischen Gates
+abnahmefähig; der optionale Hardwarevergleich wird dort nachgeholt.
 
 Der PR ist mit dem Pflichtteil abnahmefähig. Fehlt das zweite Laufwerk, wird das
 in der PR-Beschreibung vermerkt und der Dual-Teil nachgereicht — er wird nicht
