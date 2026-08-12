@@ -6,7 +6,6 @@ dependencies of the C engine.
 - `bench_v4.py`: reproducible short, medium, and long V4 benchmark profiles.
 - `make_deepseek_v4_tiny.py`: generate the ignored deterministic Tiny fixture.
 - `make_deepseek_v4_oracle.py`: record and verify full-checkpoint target oracles.
-- `repack_fp8_passthrough.py`: byte-preserving FP8 repack utility.
 - `clean.py`: remove generated V4 build artifacts.
 
 Run tools from `c/`. The full checkpoint remains the only valid DSpark fixture:

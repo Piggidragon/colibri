@@ -46,8 +46,8 @@ make -C c deepseek-v4 CUDA=1 NVCC_CCBIN=g++-14
 ```
 
 `CUDA_HOME=/opt/cuda` remains a valid explicit override. `ARCH=native` is
-already the V4 Linux default; `make -C c check` intentionally uses its portable
-architecture, so do not compare its timing with an `ARCH=native` benchmark.
+already the V4 Linux default and `make -C c check` uses it too — don't compare
+timings across an explicit `ARCH=x86-64-v3` build and the `ARCH=native` default.
 
 On the target, THP reports `[always] madvise never`, so the kernel already backs
 the expert slabs with transparent hugepages without an engine hint. Verify a

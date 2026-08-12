@@ -19,6 +19,8 @@ Environment variables are for fixed profiles and controlled A/B runs.
 | `COLI_MAX_QUEUE` | `8` | Maximum requests waiting for the one active V4 context. |
 | `COLI_QUEUE_TIMEOUT` | `300` | Seconds a request may wait in that queue. |
 | `COLI_ALLOWED_HOSTS` | unset | Comma-separated extra host names accepted by the HTTP host-header guard. |
+| `SNAP` | required by `SERVE=1` | Model directory for the persistent serve protocol (`v4_serve_main`). `coli serve`/`coli web` set it from `--model`; the engine refuses to start without it in that mode. |
+| `SERVE` | unset | `1` selects the persistent SUBMIT/DATA/DONE serve protocol (`v4_serve_main`) instead of the one-shot CLI path. Set by the launcher, not normally by hand. |
 
 ## Runtime and memory
 
@@ -28,7 +30,7 @@ Environment variables are for fixed profiles and controlled A/B runs.
 | `RAM_GB` | automatic | RAM budget used by persistent `coli chat`/`serve`/`web`. The direct binary equivalent is `--memory-gb`. |
 | `NGEN` | `1024` in serve mode | Maximum generated tokens for the persistent engine. The direct binary uses `--max-tokens` (default 128). |
 | `V4_SCRATCH_MB` | `512` | Planner scratch reserve, clamped to 64–4096 MiB. `128` is the measured starting value for the target profile; it is a reservation, not an allocation limit. |
-| `V4_PREFILL_CHUNK` | `0` | Maximum tokens per prefill chunk. `0` keeps the full prompt as one chunk. A positive value bounds S-scaled activation memory; use it for the 256k/1M experiments only after a token A/B. |
+| `V4_PREFILL_CHUNK` | `0` | Maximum tokens per prefill chunk. `0` keeps the full prompt as one chunk. A positive value bounds S-scaled activation memory; use it for the 256k/1M experiments only after a token A/B. Clamped to 64–65536 tokens and rounded down to a multiple of 64; malformed, negative, or overflowing text falls back to `0`, same as unset. |
 
 ## CUDA and placement
 
@@ -52,9 +54,9 @@ Requires a `make -C c deepseek-v4 CUDA=1` build.
 
 | Variable | Default | Effect |
 |---|---:|---|
-| `V4_PIN_SLOTS` | automatic | Absolute number of pinned expert-cache slots per layer. Wins over `V4_PIN_FRACTION` when both are set. |
+| `V4_PIN_SLOTS` | automatic | Absolute number of pinned expert-cache slots per layer. Wins over `V4_PIN_FRACTION` when both are set. Ceiling is the build's `COLI_V4_MAX_PIN_SLOTS_PER_LAYER` (compile-time `-D`, `4` unless overridden; `16` in the shipped `Makefile.deepseek-v4` build). |
 | `V4_PIN_FRACTION` | automatic | Fraction of available slots pinned per layer. |
-| `V4_PIN_RAMP_REQUESTS` | build default (24) | Number of requests over which pins are introduced. `0` disables the ramp. |
+| `V4_PIN_RAMP_REQUESTS` | build default (24) | Number of requests over which pins are introduced. `0` disables the ramp. Default comes from the build's `COLI_V4_PIN_RAMP_REQUESTS` (compile-time `-D`, `0`/no ramp unless overridden; `24` in the shipped `Makefile.deepseek-v4` build). |
 | `COLI_V4_AUTOPIN` | on | Seed pins from recorded expert usage when available. |
 | `COLI_V4_PREWARM` | off | Preload selected pins at engine start. |
 | `COLI_V4_SAVE_USAGE` | off | Persist usage data used by the V4 cache policy. |
@@ -99,3 +101,14 @@ decode (`V4_MTP=0`, `V4_DRAFT=0`).
 The test-only `V4_VRAM_FAIL_AT` and the experimental knobs are not profile
 defaults. For the operating profile and why particular values are chosen, see
 [deepseek-v4-tuning-32gb.md](deepseek-v4-tuning-32gb.md).
+
+## Build-time-only flags
+
+Not environment variables: `-D` macros baked in at compile time via
+`Makefile.deepseek-v4`, not settable at runtime.
+
+| Macro | Shipped value | Effect |
+|---|---:|---|
+| `COLI_V4_TEST_HOOKS` | off (set by `make ... TEST_HOOKS=1`) | Compiles in test-only code paths, including `V4_VRAM_FAIL_AT` above. A release build constant-folds these away, so the corresponding env vars are unreachable outside a `TEST_HOOKS=1` build. |
+| `COLI_V4_MAX_PIN_SLOTS_PER_LAYER` | `16` | Compile-time ceiling `V4_PIN_SLOTS` is clamped against; see above. |
+| `COLI_V4_PIN_RAMP_REQUESTS` | `24` | Compile-time default `V4_PIN_RAMP_REQUESTS` falls back to when unset; see above. |

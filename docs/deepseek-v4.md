@@ -28,8 +28,10 @@ make -C c deepseek-v4
 make -C c deepseek-v4 CUDA=1 NVCC_CCBIN=g++-14
 ```
 
-`ARCH=native` is the default. `make -C c check` deliberately uses its portable
-test build; do not compare its timing with an `ARCH=native` benchmark.
+`ARCH=native` is the default for both `make -C c deepseek-v4` and `make -C c check`
+(`check` builds the engine then runs the test suite against it, same ARCH as any
+other invocation) — set `ARCH=x86-64-v3` explicitly if you need a binary portable
+across different x86-64 hosts, and don't compare timings across different ARCH values.
 
 ## Direct use
 

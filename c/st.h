@@ -64,7 +64,9 @@ typedef struct {
                            * (GLM: 256 expert x 78 layer x 3 x 2) la scansione lineare
                            * costava decine di secondi/token (misurato sul primo run reale) */
     int        hcap;
-    /* FORMAT METADATA STAMP (reference impl, see colibri.c's qt_verify_fmt_stamp):
+    /* FORMAT METADATA STAMP (this was colibri.c's qt_verify_fmt_stamp reference
+     * impl; colibri.c is gone, see plans/11-strip-to-v4.md, and this convention
+     * is dormant in the V4-only tree -- see the note above st_fmt_stamp below):
      * per-tensor {name -> format NAME string} pairs collected from every shard's
      * __metadata__["colibri.fmt"] JSON blob (safetensors __metadata__ values are
      * always strings, so colibri.fmt's value is itself JSON text, parsed a
@@ -288,20 +290,25 @@ static void st_pread_full(int fd, void *buf, int64_t n, int64_t off, const char 
     }
 }
 
-/* Stamps are a resident-tensor convention (the V4 format note's "Stamp-map
- * scan bound"): a handful to a few hundred entries per model
- * (q_a/q_b/kv_a/kv_b_proj, o_proj, shared-expert and dense-MLP gate/up/down),
- * NEVER the tens of thousands of routed-expert tensors a large MoE model
- * carries (tools/repack_fp8_passthrough.py never stamps routed experts). A
- * container whose combined __metadata__["colibri.fmt"] entries exceed this
- * cap is not using the convention as designed -- CAP, not a switch to a hash
- * table. Precisely what this bounds: the colibri.fmt blob is json_parse'd in
- * FULL before the per-entry check below fires, so the parse allocation
- * itself is bounded by ST_MAX_HEADER (the shard-header size cap), not by
- * this constant -- what the cap bounds is the PERSISTENT fmt_name/fmt_val
- * strdup arrays on `shards` (and every later st_fmt_stamp linear scan over
- * them), which would otherwise grow with an adversarial map. Refuse loudly
- * rather than carry an absurd stamp map forward. */
+/* Stamps are a resident-tensor convention: a handful to a few hundred
+ * entries per model (q_a/q_b/kv_a/kv_b_proj, o_proj, shared-expert and
+ * dense-MLP gate/up/down), NEVER the tens of thousands of routed-expert
+ * tensors a large MoE model carries. DORMANT in this V4-only fork: the only
+ * writer (tools/repack_fp8_passthrough.py, a GLM fmt=8 repacker) and the
+ * only other reader (qt_resolve_fmt/qt_verify_fmt_stamp in the deleted
+ * multi-engine colibri.c, see plans/11-strip-to-v4.md) were both removed
+ * with the other model engines; no in-tree writer ever sets
+ * __metadata__["colibri.fmt"] on a V4 checkpoint. Left in place because
+ * st_init_multi (below) still parses it defensively on every shard load --
+ * a container whose combined entries exceed this cap is not using the
+ * convention as designed -- CAP, not a switch to a hash table. Precisely
+ * what this bounds: the colibri.fmt blob is json_parse'd in FULL before the
+ * per-entry check below fires, so the parse allocation itself is bounded by
+ * ST_MAX_HEADER (the shard-header size cap), not by this constant -- what
+ * the cap bounds is the PERSISTENT fmt_name/fmt_val strdup arrays on
+ * `shards` (and every later st_fmt_stamp linear scan over them), which
+ * would otherwise grow with an adversarial map. Refuse loudly rather than
+ * carry an absurd stamp map forward. */
 #define ST_FMT_STAMP_MAX 4096
 
 /* Parses one shard's __metadata__["colibri.fmt"] value (a safetensors metadata
@@ -310,22 +317,24 @@ static void st_pread_full(int fd, void *buf, int64_t n, int64_t off, const char 
  * appends every entry to S->fmt_name/fmt_val. Absent __metadata__, or a
  * __metadata__ without a colibri.fmt key, is NOT an error: that's simply an
  * unstamped container, and byte-arithmetic inference alone decides, exactly as
- * before this feature existed (see qt_verify_fmt_stamp in colibri.c). A
- * colibri.fmt key that IS present but doesn't parse into that shape is refused
- * loudly -- same "untrusted container" discipline qt_resolve_fmt applies
- * elsewhere: a stamp the engine cannot make sense of must not be silently
- * ignored (that would be indistinguishable from a real mismatch going
- * unnoticed).
+ * before this feature existed (this was qt_verify_fmt_stamp's job in the
+ * now-deleted multi-engine colibri.c -- see the dormancy note above
+ * st_fmt_stamp). A colibri.fmt key that IS present but doesn't parse into
+ * that shape is refused loudly -- same "untrusted container" discipline
+ * colibri.c's qt_resolve_fmt applied elsewhere: a stamp the engine cannot
+ * make sense of must not be silently ignored (that would be
+ * indistinguishable from a real mismatch going unnoticed).
  *
  * DISCOVERY-TIME ABORT SURFACE: every exit(1) below (malformed stamp value,
  * malformed entry, or the ST_FMT_STAMP_MAX cap) fires from inside
  * st_init_multi's shard-header-parse loop -- i.e. at CONTAINER DISCOVERY
  * time, while the engine is still building its tensor index, before it has
  * resolved a single tensor against the model's architecture or read one byte
- * of weight data. This is coarser-grained and EARLIER than
- * qt_resolve_fmt/qt_verify_fmt_stamp's own per-tensor refusals in colibri.c
- * (which fire much later, during weight load, once a specific tensor's
- * [O,I] shape and stamp are both known): a malformed stamp anywhere in any
+ * of weight data. This was coarser-grained and EARLIER than
+ * qt_resolve_fmt/qt_verify_fmt_stamp's own per-tensor refusals in the
+ * now-deleted colibri.c (which fired much later, during weight load, once a
+ * specific tensor's [O,I] shape and stamp were both known): a malformed
+ * stamp anywhere in any
  * shard aborts the ENTIRE model load immediately, before the user ever sees
  * which layer or tensor was implicated -- these messages name a shard FILE,
  * never a tensor, which is how to tell this abort surface apart from the
@@ -403,10 +412,11 @@ static void st_fmt_stamp_ingest(shards *S, jval *root, const char *shard_path) {
  *
  * SCOPE: .qs-BACKED TENSORS ONLY. This function itself will happily look up
  * ANY name that got stamped -- st_fmt_stamp_ingest doesn't know or check
- * whether a stamped name belongs to a quantized (.qs-backed) tensor -- but
- * qt_from_disk (colibri.c) only ever CALLS this inside its `st_has(name+
- * ".qs")` branch, i.e. only for a tensor that already carries a quantized
- * scale sidecar. A colibri.fmt entry naming a raw f32/bf16 weight, a norm, a
+ * whether a stamped name belongs to a quantized (.qs-backed) tensor. The
+ * now-deleted colibri.c's qt_from_disk only ever called this inside its
+ * `st_has(name+".qs")` branch, i.e. only for a tensor that already carried a
+ * quantized scale sidecar -- any future caller should keep that same guard.
+ * A colibri.fmt entry naming a raw f32/bf16 weight, a norm, a
  * router, or embed/lm_head is stored here like any other entry but never
  * looked up: it is silently ignored BY DESIGN, not an oversight -- the
  * convention exists to disambiguate a byte-count collision among quantized
@@ -804,13 +814,14 @@ static int64_t st_read_scale_f32(shards *S, const char *name, float *out, int64_
  * into `out`, and has no bound of its own. st_init cannot supply one: it deliberately
  * skips its numel*esz==nbytes cross-check for dtype 3, because packed quant bytes
  * legitimately have numel != nbytes. So the caller MUST establish that its destination
- * is at least t->nbytes before calling. Today all callers do, by three routes:
- *   - colibri.c sizes the buffer from st_nbytes() itself, and qt_resolve_fmt validates
- *     both byte counts against [O,I];
- *   - kimi_k3.c makes the byte count the branch predicate (`if(t->nbytes==O*I ...)`),
- *     so identifying the format and validating it are the same act;
- *   - olmoe.c compares against a config-derived want_w and refuses by name.
- * A new caller with none of those wants st_read_raw_cap below. */
+ * is at least t->nbytes before calling -- either by sizing the buffer from
+ * st_nbytes() itself and validating the byte count against the expected
+ * [O,I] shape, or by making the byte count the branch predicate for which
+ * format to read as, so identifying the format and validating it are the
+ * same act. (The multi-engine callers that established this contract --
+ * colibri.c, kimi_k3.c, olmoe.c -- are gone, see plans/11-strip-to-v4.md;
+ * the contract itself still binds any future caller.) A new caller that
+ * cannot establish either of the above wants st_read_raw_cap below. */
 static void st_read_raw(shards *S, const char *name, void *out, int drop) {
     st_tensor *t = st_find(S, name);
     if (!t) { fprintf(stderr, "missing tensor: %s\n", name); exit(1); }

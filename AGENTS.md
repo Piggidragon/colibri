@@ -74,7 +74,7 @@ und nicht wiederholen.
 | 08 | [VRAM-Planner](plans/08-vram-planner.md) | fertig (#12) |
 | 09 | [Arch / CachyOS](plans/09-arch-cachyos.md) | Implementierung fertig; Hardwareprofil in Plan 15 |
 | 10 | [Dual-Streaming](plans/10-dual-streaming.md) | Implementierung fertig; Hardwareprofil in Plan 15 |
-| 11 | [Rückbau auf V4](plans/11-strip-to-v4.md) | fertig (#18) |
+| 11 | [Rückbau auf V4](plans/11-strip-to-v4.md) | Rückbau-Commits fertig; Launcher-Aufräumung und V4-only-Doku folgen in #18/[13](plans/13-frontend-v4.md) |
 | 12 | [Expert-Cache-Politik](plans/12-expert-cache-policy.md) | Implementierung fertig (#14); Profilabnahme in Plan 15 |
 | 13 | [Frontend V4-only](plans/13-frontend-v4.md) | offen, optional |
 | 14 | [Chunked Prefill + DSpark](plans/14-chunked-prefill-dspark.md) | Commit 1+2 fertig; End-to-End-Abnahme in Plan 15 |
@@ -228,8 +228,11 @@ in `make -C c check`; wer eine Kopie vergisst, wird dort rot.
 
 ### 4. Tests sind Teil des Commits
 
-Eine Make-Regel `tests/test_x$(EXE):` in `c/Makefile` genügt — `TEST_RULES`
-([c/Makefile:359](c/Makefile)) leitet die Gates daraus ab. Keine zentrale Liste.
+Eine Make-Regel `tests/test_x:` in `c/Makefile` genügt — `TEST_RULES`
+(`grep -n 'TEST_RULES :=' c/Makefile`) leitet die Gates daraus ab. Keine
+zentrale Liste. Tests, die den gelöschten Multi-Engine-Amalgam `colibri.c`
+brauchen (GLM/Inkling/Kimi K3/OLMoE, siehe Plan 11), haben bewusst keine
+Regel und sind daher keine Gates.
 
 Vor jedem PR:
 
