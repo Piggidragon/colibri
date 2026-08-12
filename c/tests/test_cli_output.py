@@ -231,7 +231,7 @@ class OmpThreadsForEveryEngineTest(unittest.TestCase):
     """#805 set OMP_NUM_THREADS from physical cores -- for glm only.
 
     env_for_engine() forwarded to env_for() when arch was "glm" and built its
-    own environment otherwise, so inkling, kimi_k3, olmoe and deepseek_v4 kept
+    own environment otherwise, so inkling, kimi_k3 and olmoe kept
     libgomp's nproc default: logical cores, a 2x over-subscription of a
     memory-bound int4 GEMV on any SMT host.
     """
@@ -247,21 +247,20 @@ class OmpThreadsForEveryEngineTest(unittest.TestCase):
         return types.SimpleNamespace(model="/x", ram=None, ctx=None, ngen=None,
                                      temp=None, cap=None)
 
-    def test_every_engine_gets_physical_cores(self):
+    def test_non_v4_sister_engines_get_physical_cores(self):
         with mock.patch("resource_plan.physical_cpu_count", return_value=6):
-            for arch in ("inkling", "kimi", "olmoe", "deepseek_v4"):
+            for arch in ("inkling", "kimi", "olmoe"):
                 with self.subTest(arch=arch):
                     env = self.coli.env_for_engine(self.args(), arch)
                     self.assertEqual(env.get("OMP_NUM_THREADS"), "6")
 
-    def test_v4_gets_memory_bound_affinity_defaults(self):
+    def test_v4_leaves_hybrid_omp_selection_to_the_binary(self):
         with mock.patch.object(self.coli.sys, "platform", "linux"), \
              mock.patch("resource_plan.physical_cpu_count", return_value=6):
             env = self.coli.env_for_engine(self.args(), "deepseek_v4")
-        self.assertEqual(env.get("OMP_PROC_BIND"), "close")
-        self.assertEqual(env.get("OMP_PLACES"), "cores")
-        self.assertEqual(env.get("OMP_WAIT_POLICY"), "active")
-        self.assertEqual(env.get("OMP_DYNAMIC"), "FALSE")
+        for name in ("OMP_NUM_THREADS", "OMP_PROC_BIND", "OMP_PLACES",
+                     "OMP_WAIT_POLICY", "GOMP_SPINCOUNT", "OMP_DYNAMIC"):
+            self.assertNotIn(name, env)
 
     def test_explicit_setting_still_wins(self):
         with mock.patch.dict(os.environ, {"OMP_NUM_THREADS": "3"}), \

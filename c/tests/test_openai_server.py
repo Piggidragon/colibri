@@ -675,11 +675,9 @@ class CapSentinelShimTest(unittest.TestCase):
 
     def test_direct_v4_server_gets_bounded_dspark_defaults(self):
         env = {"V4_MTP_CONF": "0.7"}
-        with patch("resource_plan.physical_cpu_count", return_value=6), \
-             patch("openai_server.sys.platform", "linux"):
-            tune_child_env(env, "deepseek_v4")
-        self.assertEqual(env["OMP_NUM_THREADS"], "6")
-        self.assertEqual(env["OMP_PROC_BIND"], "close")
+        tune_child_env(env, "deepseek_v4")
+        self.assertNotIn("OMP_NUM_THREADS", env)
+        self.assertNotIn("OMP_PROC_BIND", env)
         self.assertEqual(env["V4_DRAFT"], "0")
         self.assertEqual(env["V4_MTP"], "0")
         self.assertEqual(env["V4_MTP_DRAFT"], "3")

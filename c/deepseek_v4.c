@@ -8607,7 +8607,7 @@ static int has_sentence_end(const char *text, int length) {
 }
 
 int main(int argc, char **argv) {
-    coli_omp_tune_threads("deepseek_v4");   /* team on physical cores: see omp_tune.h */
+    coli_v4_omp_tune_threads("deepseek_v4");
     if (argc < 3 || argc > 6) {
         fprintf(stderr, "usage: %s MODEL_DIR INPUT_TOKEN_ID [TOKEN_COUNT]\n"
                         "       %s MODEL_DIR --prompt TEXT [MAX_NEW_TOKENS] [--stop-sentence]\n",
@@ -10146,7 +10146,7 @@ static void v4_serve_one(ColiV4Engine *engine, ColiV4Session *session,
 }
 
 static int v4_serve_main(void) {
-    coli_omp_tune_threads("deepseek_v4");   /* team on physical cores: see omp_tune.h */
+    coli_v4_omp_tune_threads("deepseek_v4");
     const char *model_dir = getenv("SNAP");
     if (!model_dir || !*model_dir) {
         fprintf(stderr, "set SNAP=<DeepSeek V4 model directory>\n");
@@ -10210,7 +10210,7 @@ static int v4_serve_main(void) {
 int main(int argc, char **argv) {
     if (getenv("SERVE") && getenv("SERVE")[0] == '1')
         return v4_serve_main();
-    coli_omp_tune_threads("deepseek_v4");   /* team on physical cores: see omp_tune.h */
+    coli_v4_omp_tune_threads("deepseek_v4");
     double process_started = spec_now();
     int result = 1;
     V4CliOptions cli;
