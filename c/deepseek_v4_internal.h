@@ -14,6 +14,7 @@
 #include "native_quant_dual.h"
 #include "native_quant_fp4_rows16.h"
 #include "st.h"
+#include "v4_mirror.h"
 
 #define COLI_ST_MAX_RANK ST_MAX_RANK
 #define COLI_ST_BF16 0

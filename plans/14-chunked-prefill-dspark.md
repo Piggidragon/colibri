@@ -10,7 +10,6 @@ Teil der optionalen Maximaldurchsatz-Messung.
 
 1. `feat: bound V4 prefill activations to configurable chunks`
 2. `feat: hand chunked V4 prefill history to DSpark decode`
-3. `perf: tune the 256k TurboQuant + DSpark profile`
 
 ## Ergebnis Commit 1
 
@@ -51,17 +50,9 @@ Reihenfolge. Das Tiny-Fixture enthält absichtlich keine `mtp.*`-Tensoren; die
 bereits grüne Full-Checkpoint-A/B aus Plan 07 bleibt deshalb der
 DSpark-Qualitätsbeleg.
 
-**Commit 3 ist zurückgestellt.** Die 256k-Profilmessung ist ein langer,
-dedizierter Lauf und wird erst mit ausreichend reservierter Laufzeit gemacht;
-es gibt noch keinen neuen Chunk-Default oder Durchsatzanspruch.
-
-**Nach-Merge-Abnahme bewusst offen:** Diese Implementierungs-PR darf vor der
-teuren Full-Checkpoint-Grenzprobe gemergt werden. Danach läuft ein Prompt über
-mindestens eine 64er-Chunkgrenze dreimal: unchunked Target-only, chunked
-Target-only und chunked `V4_MTP=1 V4_DRAFT=3`. Die beiden Target-Folgen müssen
-greedy identisch sein; im DSpark-Lauf müssen echte Proposals auftreten und die
-emittierte Folge ebenfalls der Target-Folge entsprechen. Das ist eine
-Korrektheitsabnahme, keine Ersatzmessung für Commit 3.
+Die 256k-Profilmessung, die Full-Checkpoint-Grenzprobe und ein möglicher
+Chunk-Default liegen gemeinsam in [Plan 15](15-final-validation-and-tuning.md).
+Bis dahin gibt es keinen neuen Durchsatzanspruch.
 
 ## Ziel
 
@@ -164,42 +155,6 @@ verdecken.
 - Tiny-Fixture: Chunk 64, DSpark on/off, korrekte Attempts/Drafted/Accepted und
   nach Plan-07-Fix identische Target-Tokens.
 
-## Commit 3 — 256k-Profil messen und dokumentieren
-
-Der Harness braucht neben One-shot-Kaltläufen einen **persistent geöffneten**
-Engine-/Serve-Lauf. Ein zweiter Prozess ist kein warmer Expert-Cache; er kann
-nur Pagecache und Usage-Historie wiederverwenden.
-
-Für `CTX=262144`, `V4_KV=turbo3`, `V4_MTP=1`, `V4_DRAFT=3` werden
-`V4_PREFILL_CHUNK={4096,8192,16384,32768,65536}` verglichen. Der Gewinner ist
-der größte Chunk, der ohne RAM-/CUDA-Druck durchläuft und die beste reale TTFT
-liefert. Bei ähnlichen Resultaten gewinnt der größere Chunk, weil er weniger
-Expert-Working-Sets erneut lädt.
-
-Pflichtmetriken: Peak RSS, `ram_tiers`, Target-/DSpark-Cache getrennt,
-`nvidia-smi` vor Open/nach Dense+Head/nach DSpark/Decode, TTFT, Prefill- und
-Decode-tok/s, Hits/Misses, gelesene GB, DSpark-Stufenzeiten sowie vollständige
-greedy Token-A/Bs. Einzellaufwerk ist Pflicht; der Plan-10-Mirror ist ein
-zusätzlicher Maximaldurchsatzwert, kein Ersatz.
-
-Danach dokumentieren `docs/deepseek-v4-tuning-32gb.md`,
-`docs/ENVIRONMENT.md` und `plans/00-reference.md` das echte Profil. Default
-bleibt unverändert; Turbo3, DSpark und Chunking sind Opt-ins.
-
-### 1M-Experiment
-
-Erst nach grüner 256k-Abnahme:
-
-```bash
-CTX=1048576 V4_KV=turbo3 V4_PREFILL_CHUNK=32768 \
-V4_MTP=1 V4_DRAFT=3 V4_VRAM=1
-```
-
-Der Planner muss die reale Device-Reserve zulassen. Gemessen werden Peak
-RSS/VRAM, 32 Prefill-Chunks, TTFT und Langkontext-Decode. Der Indexer-Scan
-wächst bei 1M auf rund 2.69 GB pro Decode-Token; ein erfolgreicher Lauf macht
-1M zu einem dokumentierten Experiment, nicht zum Standardprofil.
-
 ## Abnahme
 
 - 256k, Chunk 32k, Turbo3 und DSpark laufen auf 32 GiB + RTX 4070 ohne eine
@@ -208,10 +163,11 @@ wächst bei 1M auf rund 2.69 GB pro Decode-Token; ein erfolgreicher Lauf macht
   Prefix-Reuse bleibt erhalten.
 - Chunked DSpark startet erst nach dem finalen Prefill-Chunk, verifiziert exakt
   gegen Target und liefert dieselbe Tokenfolge.
-- Das 256k-Profil enthält kalte und prozesswarme Messungen auf einem Laufwerk,
-  plus optionalen Mirror-Lauf, nicht nur extrapolierte tok/s.
 - `make -C c test && make -C c check` sowie `make -C c deepseek-v4-tiny-check`
   sind grün.
+
+Die 256k-/1M-Matrix einschließlich kalter/prozesswarmer Messungen und optionalem
+Mirror-Lauf ist Abnahme von Plan 15.
 
 ## Risiken
 

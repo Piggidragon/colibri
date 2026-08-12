@@ -6559,6 +6559,8 @@ enum { V4_W1 = 0, V4_W2 = 1, V4_W3 = 2, V4_MATRIX_COUNT = 3 };
 typedef struct {
     const ColiSafetensorsTensor *weight[V4_MATRIX_COUNT];
     const ColiSafetensorsTensor *scale[V4_MATRIX_COUNT];
+    int layer;
+    int expert;
     int shard;
     uint64_t scale_offset;
     uint64_t scale_bytes;
@@ -6577,6 +6579,7 @@ typedef struct {
 
 typedef struct {
     ColiSafetensorsIndex *index;
+    int mirror_active;
     int layers;
     int experts_per_layer;
     int slots_per_layer;
@@ -6636,6 +6639,7 @@ static int build_record(V4ExpertStoreState *state, int layer, int expert,
     static const char *matrix_names[V4_MATRIX_COUNT] = {"w1", "w2", "w3"};
     char name[160];
     memset(record, 0, sizeof(*record));
+    record->layer = layer; record->expert = expert;
     for (int matrix = 0; matrix < V4_MATRIX_COUNT; matrix++) {
         snprintf(name, sizeof(name), "layers.%d.ffn.experts.%d.%s.weight",
                  layer, expert, matrix_names[matrix]);
@@ -6738,13 +6742,22 @@ static int lookup(ColiExpertStore *store, ColiExpertKey key,
         }
         /* A short read must never expose a partially overwritten old slot. */
         slot->expert = -1;
-        if (coli_st_read_at_streaming(
+        int read_failed;
+        if (state->mirror_active) {
+            int replica = v4_mirror_route(state->index, key.layer, key.expert);
+            read_failed = v4_mirror_read_at(state->index, record->shard, replica,
+                record->scale_offset, (size_t)record->scale_bytes, slot->slab) ||
+                v4_mirror_read_at(state->index, record->shard, replica,
+                record->weight_offset, (size_t)record->weight_bytes,
+                slot->slab + record->scale_bytes);
+        } else read_failed = coli_st_read_at_streaming(
                 state->index, record->shard, record->scale_offset,
-                (size_t)record->scale_bytes, slot->slab) != 0 ||
+                (size_t)record->scale_bytes, slot->slab) ||
             coli_st_read_at_streaming(
                 state->index, record->shard, record->weight_offset,
                 (size_t)record->weight_bytes,
-                slot->slab + record->scale_bytes) != 0) {
+                slot->slab + record->scale_bytes);
+        if (read_failed) {
             pthread_mutex_unlock(&state->mutex);
             memset(view, 0, sizeof(*view));
             return -1;
@@ -6822,10 +6835,28 @@ static int prefetch(ColiExpertStore *store, const ColiExpertKey *keys,
     for (size_t i = 0; i < count; i++) {
         V4ExpertRecord *record = get_record(state, keys[i]);
         if (!record) continue;
-        if (coli_st_prefetch_at(state->index, record->shard, record->scale_offset,
-                                (size_t)record->scale_bytes) == 0 &&
-            coli_st_prefetch_at(state->index, record->shard, record->weight_offset,
-                                (size_t)record->weight_bytes) == 0)
+        int scale, weight;
+        if (state->mirror_active) {
+            int replica = v4_mirror_route(state->index, keys[i].layer, keys[i].expert);
+            scale = v4_mirror_prefetch_at(state->index, record->shard, replica,
+                                          record->scale_offset, (size_t)record->scale_bytes);
+            /* Must name the same fds v4_read_expert_record's demand read will
+             * use: striped when the mirror is complete and the weight is
+             * large enough, the single routed replica otherwise. */
+            weight = v4_mirror_prefetch_striped(state->index, record->shard,
+                                                record->weight_offset,
+                                                (size_t)record->weight_bytes);
+            if (weight != 0)
+                weight = v4_mirror_prefetch_at(state->index, record->shard, replica,
+                                               record->weight_offset,
+                                               (size_t)record->weight_bytes);
+        } else {
+            scale = coli_st_prefetch_at(state->index, record->shard, record->scale_offset,
+                                        (size_t)record->scale_bytes);
+            weight = coli_st_prefetch_at(state->index, record->shard, record->weight_offset,
+                                         (size_t)record->weight_bytes);
+        }
+        if (scale == 0 && weight == 0)
             accepted++;
     }
 #endif
@@ -6886,6 +6917,7 @@ int coli_deepseek_v4_expert_store_open(
     state->experts_per_layer = options->experts_per_layer;
     if (coli_st_index_open(&state->index, options->model_dir, error, error_size) != 0)
         goto fail;
+    state->mirror_active = v4_mirror_setup(state->index);
     size_t record_count = (size_t)state->layers * state->experts_per_layer;
     state->records = calloc(record_count, sizeof(*state->records));
     if (!state->records) {
@@ -7185,6 +7217,20 @@ static int v4_read_direct_window(const V4ExpertStoreState *state, int shard,
 static int v4_read_expert_record(V4ExpertStoreState *state,
                                  const V4ExpertRecord *record,
                                  V4ExpertSlot *slot) {
+    if (state->mirror_active) {
+        int replica = v4_mirror_route(state->index, record->layer, record->expert);
+        if (v4_mirror_read_at(state->index, record->shard, replica,
+                              record->scale_offset, (size_t)record->scale_bytes,
+                              slot->slab)) return -1;
+        if (!v4_mirror_read_striped(state->index, record->shard,
+                                    record->weight_offset,
+                                    (size_t)record->weight_bytes,
+                                    slot->slab + record->scale_bytes)) return 0;
+        return v4_mirror_read_at(state->index, record->shard, replica,
+                                 record->weight_offset,
+                                 (size_t)record->weight_bytes,
+                                 slot->slab + record->scale_bytes);
+    }
     int direct_available = slot->aligned_slab &&
         coli_st_streaming_direct_available(state->index, record->shard);
     if (direct_available &&
@@ -7426,6 +7472,8 @@ static void destroy_hot(ColiExpertStore *store) {
                     &v4_direct_fallbacks, __ATOMIC_RELAXED),
                 (unsigned long long)__atomic_load_n(
                     &v4_direct_payload_bytes, __ATOMIC_RELAXED));
+        if (store && store->state)
+            v4_mirror_report(((V4ExpertStoreState *)store->state)->index, stderr);
         free(policy->history_path);
         free(policy->packed); free(policy->pins);
         free(policy->layer_requests); free(policy->usage); free(policy);
@@ -10762,6 +10810,8 @@ enum { V4_W1 = 0, V4_W2 = 1, V4_W3 = 2, V4_MATRIX_COUNT = 3 };
 typedef struct {
     const ColiSafetensorsTensor *weight[V4_MATRIX_COUNT];
     const ColiSafetensorsTensor *scale[V4_MATRIX_COUNT];
+    int layer;
+    int expert;
     int shard;
     uint64_t scale_offset;
     uint64_t scale_bytes;
@@ -10779,6 +10829,7 @@ typedef struct {
 
 typedef struct {
     ColiSafetensorsIndex *index;
+    int mirror_active;
     int layers;
     int experts_per_layer;
     int slots_per_layer;
@@ -10838,6 +10889,7 @@ static int build_record(V4ExpertStoreState *state, int layer, int expert,
     static const char *matrix_names[V4_MATRIX_COUNT] = {"w1", "w2", "w3"};
     char name[160];
     memset(record, 0, sizeof(*record));
+    record->layer = layer; record->expert = expert;
     for (int matrix = 0; matrix < V4_MATRIX_COUNT; matrix++) {
         snprintf(name, sizeof(name), "layers.%d.ffn.experts.%d.%s.weight",
                  layer, expert, matrix_names[matrix]);
@@ -10940,13 +10992,22 @@ static int lookup(ColiExpertStore *store, ColiExpertKey key,
         }
         /* A short read must never expose a partially overwritten old slot. */
         slot->expert = -1;
-        if (coli_st_read_at_streaming(
+        int read_failed;
+        if (state->mirror_active) {
+            int replica = v4_mirror_route(state->index, key.layer, key.expert);
+            read_failed = v4_mirror_read_at(state->index, record->shard, replica,
+                record->scale_offset, (size_t)record->scale_bytes, slot->slab) ||
+                v4_mirror_read_at(state->index, record->shard, replica,
+                record->weight_offset, (size_t)record->weight_bytes,
+                slot->slab + record->scale_bytes);
+        } else read_failed = coli_st_read_at_streaming(
                 state->index, record->shard, record->scale_offset,
-                (size_t)record->scale_bytes, slot->slab) != 0 ||
+                (size_t)record->scale_bytes, slot->slab) ||
             coli_st_read_at_streaming(
                 state->index, record->shard, record->weight_offset,
                 (size_t)record->weight_bytes,
-                slot->slab + record->scale_bytes) != 0) {
+                slot->slab + record->scale_bytes);
+        if (read_failed) {
             pthread_mutex_unlock(&state->mutex);
             memset(view, 0, sizeof(*view));
             return -1;
@@ -11024,10 +11085,25 @@ static int prefetch(ColiExpertStore *store, const ColiExpertKey *keys,
     for (size_t i = 0; i < count; i++) {
         V4ExpertRecord *record = get_record(state, keys[i]);
         if (!record) continue;
-        if (coli_st_prefetch_at(state->index, record->shard, record->scale_offset,
-                                (size_t)record->scale_bytes) == 0 &&
-            coli_st_prefetch_at(state->index, record->shard, record->weight_offset,
-                                (size_t)record->weight_bytes) == 0)
+        int scale, weight;
+        if (state->mirror_active) {
+            int replica = v4_mirror_route(state->index, keys[i].layer, keys[i].expert);
+            scale = v4_mirror_prefetch_at(state->index, record->shard, replica,
+                                          record->scale_offset, (size_t)record->scale_bytes);
+            weight = v4_mirror_prefetch_striped(state->index, record->shard,
+                                                record->weight_offset,
+                                                (size_t)record->weight_bytes);
+            if (weight != 0)
+                weight = v4_mirror_prefetch_at(state->index, record->shard, replica,
+                                               record->weight_offset,
+                                               (size_t)record->weight_bytes);
+        } else {
+            scale = coli_st_prefetch_at(state->index, record->shard, record->scale_offset,
+                                        (size_t)record->scale_bytes);
+            weight = coli_st_prefetch_at(state->index, record->shard, record->weight_offset,
+                                         (size_t)record->weight_bytes);
+        }
+        if (scale == 0 && weight == 0)
             accepted++;
     }
 #endif
@@ -11086,6 +11162,7 @@ int coli_deepseek_v4_expert_store_open(
     state->experts_per_layer = options->experts_per_layer;
     if (coli_st_index_open(&state->index, options->model_dir, error, error_size) != 0)
         goto fail;
+    state->mirror_active = v4_mirror_setup(state->index);
     size_t record_count = (size_t)state->layers * state->experts_per_layer;
     state->records = calloc(record_count, sizeof(*state->records));
     if (!state->records) {

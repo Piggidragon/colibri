@@ -1,7 +1,7 @@
 # 00 — Referenzplan: DeepSeek V4 auf 32 GB RAM + RTX 4070
 
 Übergeordnetes Dokument. Hier stehen Zielbild, Hardware-Budget, Codekarte und
-Konventionen; die Phasenpläne `01`–`13` setzen das voraus und wiederholen es nicht.
+Konventionen; die Phasenpläne `01`–`15` setzen das voraus und wiederholen es nicht.
 
 - Jede Phase bekommt einen eigenen Branch und PR; Planänderungen laufen auf dem
   Branch der zugehörigen Phase mit (Schema und Reihenfolge in
@@ -696,6 +696,8 @@ Neue Knöpfe dieses Branches:
 | `V4_VRAM_LIMIT_MB` | aus (kappt das gemeldete freie VRAM) | 08 | gebaut |
 | `V4_VRAM_FAIL_AT` | aus, nur unter `COLI_V4_TEST_HOOKS` | 08 | gebaut |
 | `V4_PREFILL_CHUNK` | 0 (Full-Prefill) | 14 | gebaut (Commit 1+2) |
+| `COLI_MODEL_MIRROR` | aus | 10 | gebaut |
+| `COLI_DISK_WEIGHTS` | `1,1,…` bei aktivem V4-Spiegel | 10 | gebaut |
 | `V4_OMP_CORES` | `perf`, wenn erkennbar; sonst `all` | 09 | geplant |
 | `V4_PIN_SLOTS` | compile-time `COLI_V4_MAX_PIN_SLOTS_PER_LAYER` (16 im gebauten Binary) | 12 | gebaut |
 | `V4_PIN_FRACTION` | aus (Alternative zu `V4_PIN_SLOTS`) | 12 | gebaut |
@@ -750,6 +752,7 @@ daraus automatisch Gates. Keine zentrale Liste, kein Merge-Konflikt.
 | 12 | [Expert-Cache-Politik](12-expert-cache-policy.md) | Pin-Deckel, Indexer (Scan + Select), Prefill | — | — |
 | 13 | [Frontend V4-only](13-frontend-v4.md) | WebUI, CLI, Serve auf V4 | — | — |
 | 14 | [Chunked Prefill + DSpark](14-chunked-prefill-dspark.md) | 256k-Aktivierungsfenster und MTP-Handoff | spart bis zu `CTX/chunk`-fachen State | — |
+| 15 | [Abschlussabnahme und Tuning](15-final-validation-and-tuning.md) | Full-Checkpoint-Matrix, Profile und nur belegte Folgeoptimierungen | — | — |
 
 ¹ 03 hat den gesamten KV bereits von 1.68 auf 0.43 GiB (128k) gesenkt. 05 spiegelt
 den 0.388-GiB-Attention-Anteil auf die Karte, behält aber den Host-Shadow (die
@@ -808,7 +811,11 @@ bleibt in 10 Default und Pflicht-Abnahme** — die Zahlen der Baseline in 01 wer
 weiterhin ohne Spiegel gemessen, sonst ist der Vergleich über die Phasen hinweg
 kaputt.
 
-**11 zuletzt.** Er entfernt nur und braucht als Vorlage, was er löscht.
+**11 vor 15.** Er entfernt nur und braucht als Vorlage, was er löscht. Die
+hardwaregebundenen Voll-Checkpoint- und Langlaufmessungen aller Phasen sind in
+[15-final-validation-and-tuning.md](15-final-validation-and-tuning.md) gebündelt;
+Plan 15 ist immer zuletzt und ändert Defaults nur mit einem reproduzierten
+Vorher-/Nachher-Nachweis.
 
 ## Gemeinsame Verifikation
 
@@ -855,13 +862,11 @@ make -C c deepseek-v4-oracle \
   `inkling.c`, `kimi_k3.c`, `olmoe.c` und der gemeinsame `backend_cuda.cu` werden
   nicht angefasst. Der tote Kommentar zu KV8/TQ in
   [c/colibri.c:3567](../c/colibri.c) bleibt stehen.
-  **Ausnahme:** [10-dual-streaming.md](10-dual-streaming.md) Commit 1 darf die
-  Mirror-Maschinerie aus `colibri.c` in einen gemeinsamen `c/mirror.h` ziehen und
-  `colibri.c` auf den Header umstellen. Das ist ein Refactor ohne
-  Verhaltensänderung, kein GLM-Feature — und Plan 10 nennt die V4-lokale Kopie als
-  Rückfall, falls der Schnitt teurer wird als gedacht. Wer diese Ausnahme zieht,
-  belegt sie mit `make -C c colibri` plus den GLM-Gates, nicht nur mit den
-  V4-Gates.
+  **Plan 10 nutzt den vorgesehenen Rückfall:** Die Mirror-Maschinerie bleibt in
+  `colibri.c`; `c/v4_mirror.h` kapselt eine V4-lokale Variante über dem
+  Safetensors-Index. Damit bleibt der GLM-Pfad unverändert und Plan 11 erbt den
+  V4-Code direkt. Die V4-Gates belegen den Aus- und Mirror-Pfad; die physische
+  Zwei-Laufwerk-Messung liegt in Plan 15.
 - **Kein On-Disk-Format ändert sich.** `kv_persist.h` (COLIKV1) gehört zu
   `colibri.c`; `kv_prefix.h` speichert nur Token-IDs und ist von Codec-Änderungen
   unberührt.

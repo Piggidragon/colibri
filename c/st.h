@@ -52,6 +52,14 @@ typedef struct {
     int        mdfds[ST_MAX_MIR][512]; /* O_DIRECT twins of the replica copies, -1 = absent */
     int        nmirror[ST_MAX_MIR];    /* files accepted into replica r+1 */
     int        nrep;       /* registered replica copies (0 = mirror inactive) */
+    /* V4-local mirror routing.  colibri.c owns its historic globals; V4 keeps
+     * this state with the index so an engine with no mirror does not pay for a
+     * route, probe or helper thread. */
+    int        v4_mirror_active;
+    int        v4_mirror_reps;
+    int        v4_mirror_cut[1 + ST_MAX_MIR];
+    uint64_t   v4_mirror_bytes[1 + ST_MAX_MIR];
+    uint64_t   v4_mirror_reads[1 + ST_MAX_MIR];
     int       *hidx;      /* hash map nome->indice (open addressing): con ~120k tensori
                            * (GLM: 256 expert x 78 layer x 3 x 2) la scansione lineare
                            * costava decine di secondi/token (misurato sul primo run reale) */

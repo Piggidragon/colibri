@@ -58,7 +58,7 @@ Testorakel dafür. Phase 05 setzt den rotierten Modus deshalb nicht voraus und
 beginnt mit direkter Turbo-Dequantisierung im Originalraum. Entsprechend sind
 die beiden nicht implementierten Variablen aus der Referenztabelle entfernt
 worden. Ein Full-Checkpoint-Durchsatz- und Tokenqualitätstest gegen den lokalen
-Checkpoint steht noch aus. `make test` und `make check` sind
+Checkpoint steht in [Plan 15](15-final-validation-and-tuning.md) aus. `make test` und `make check` sind
 grün. Das vorhandene Tiny-Fixture besteht Oracle und Prefix-Reuse mit Defaults
 und mit `V4_KV{,_INDEX}=turbo2|turbo3|turbo4`; alle drei Einstellungen warnen
 wie vorgesehen und fallen wegen der 32er-Dimension token-identisch auf `native`

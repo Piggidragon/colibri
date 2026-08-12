@@ -50,10 +50,10 @@ sollten sie stattdessen **den Stufenplan zeigen** — was landet in VRAM, was in
 RAM, wie viele Expert-Slots ergibt das. Das ist dieselbe Information wie die
 `ram_tiers`/`vram_tiers`-Zeilen, nur bevor man startet.
 
-**`cmd_tune`** ([:768](../c/coli)) ist der natürliche Ort für die Messungen aus
-[12-expert-cache-policy.md](12-expert-cache-policy.md) und
-[10-dual-streaming.md](10-dual-streaming.md): Laufwerksbandbreite proben,
-Pin-Konfigurationen durchmessen, Empfehlung ausgeben.
+**`cmd_tune`** ([:768](../c/coli)) ist der natürliche Ort für die Ergebnisse aus
+[Plan 15](15-final-validation-and-tuning.md): dokumentierte Profilwerte,
+Laufwerksbandbreite und Cache-Empfehlungen sichtbar machen. Die teure Messmatrix
+bleibt im Abschlussplan statt in diesem optionalen Frontend-Commit.
 
 ## Commit 2 — Dashboard
 
