@@ -34,6 +34,42 @@ The default remains unchanged: without `V4_SCRATCH_MB`, the reserve is 512 MiB.
 Numeric values are clamped to 64–4096 MiB, and malformed values fall back to the
 default.
 
+## Arch / CachyOS
+
+The target has CUDA 13.3 under `/opt/cuda` and GCC 16.  The V4 makefile finds
+`/opt/cuda` automatically before the runfile location `/usr/local/cuda`; when
+nvcc rejects the system compiler, select the installed supported compiler:
+
+```bash
+make -C c deepseek-v4 CUDA=1 NVCC_CCBIN=g++-14
+```
+
+`CUDA_HOME=/opt/cuda` remains a valid explicit override. `ARCH=native` is
+already the V4 Linux default; `make -C c check` intentionally uses its portable
+architecture, so do not compare its timing with an `ARCH=native` benchmark.
+
+On the target, THP reports `[always] madvise never`, so the kernel already backs
+the expert slabs with transparent hugepages without an engine hint. Verify a
+live run through `AnonHugePages` in `/proc/<pid>/smaps_rollup`; if the host
+policy changes to `madvise`, revisit this conclusion rather than assuming it.
+
+Do not set `OMP_WAIT_POLICY=active`, `GOMP_SPINCOUNT`, or `KMP_BLOCKTIME` for
+this disk-bound workload: spinning the OpenMP team competes with expert I/O.
+V4 keeps the established physical-core team by default. When the kernel exposes
+`/sys/devices/system/cpu/types/intel_core_*/cpumap`,
+`V4_OMP_CORES=perf` selects the six P-cores for the required A/B; use
+`V4_OMP_CORES=<n>` or the higher-priority `OMP_NUM_THREADS=<n>` for other
+measured overrides. `bench_v4.py` now leaves
+`OMP_NUM_THREADS` unset by default so this path is measurable; pass
+`--omp-threads <n>` for a fixed A/B run.
+
+CachyOS currently has zram enabled (31.2 GiB on the target). It makes
+`MemAvailable` overly optimistic for an expert cache that will touch its pages;
+keep an explicit `--memory-gb`/`RAM_GB` budget. The CPU-only `--memory-gb 28`
+profile reached the OOM killer; use the measured GPU-tier `--memory-gb 24`
+profile for the 128k stress run. `ananicy-cpp` is normally harmless, but check
+its policy first when a long-run throughput change has no explanation.
+
 ## VRAM tiers (12 GiB RTX 4070, `CUDA=1 V4_VRAM=1`)
 
 With the CUDA build and the card otherwise idle, add `V4_VRAM=1` to the command

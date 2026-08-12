@@ -52,7 +52,16 @@ ifeq ($(CUDA),1)
 ifneq ($(UNAME_S),Linux)
 $(error CUDA=1 for the V4 engine is supported only on Linux)
 endif
-CUDA_HOME ?= /usr/local/cuda
+ifeq ($(strip $(CUDA_HOME)),)
+ifneq ($(wildcard /opt/cuda/bin/nvcc),)
+CUDA_HOME := /opt/cuda
+else ifneq ($(wildcard /usr/local/cuda/bin/nvcc),)
+CUDA_HOME := /usr/local/cuda
+else
+# Preserve the familiar error below when CUDA is not installed anywhere.
+CUDA_HOME := /usr/local/cuda
+endif
+endif
 NVCC ?= $(CUDA_HOME)/bin/nvcc
 CUDA_ARCH ?= native
 ifeq ($(CUDA_ARCH),portable)
@@ -66,6 +75,11 @@ else
 CUDA_GENCODE = -arch=$(CUDA_ARCH)
 endif
 NVCCFLAGS ?= -O3 -std=c++17 $(CUDA_GENCODE) -Xcompiler=-Wall,-Wextra,-fPIE
+# Arch/CachyOS can ship a newer GCC than this CUDA release accepts.  Keep
+# nvcc's default unless the operator explicitly selects a supported compiler.
+ifneq ($(NVCC_CCBIN),)
+NVCCFLAGS += -ccbin $(NVCC_CCBIN)
+endif
 # GCC LTO cannot consume nvcc's host objects.  Keep the CPU default unchanged.
 override LTO := 0
 CFLAGS += -DCOLI_V4_CUDA

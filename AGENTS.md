@@ -72,7 +72,7 @@ und nicht wiederholen.
 | 06 | [Dense in VRAM](plans/06-dense-vram.md) | fertig (#8) |
 | 07 | [Head und DSpark in VRAM](plans/07-head-dspark-vram.md) | fertig (#9) |
 | 08 | [VRAM-Planner](plans/08-vram-planner.md) | fertig (#12) |
-| 09 | [Arch / CachyOS](plans/09-arch-cachyos.md) | Commit 1 fertig (#11), Rest offen |
+| 09 | [Arch / CachyOS](plans/09-arch-cachyos.md) | Implementierung fertig; Hardwareprofil in Plan 15 |
 | 10 | [Dual-Streaming](plans/10-dual-streaming.md) | Implementierung fertig; Hardwareprofil in Plan 15 |
 | 11 | [Rückbau auf V4](plans/11-strip-to-v4.md) | offen, **zuletzt** |
 | 12 | [Expert-Cache-Politik](plans/12-expert-cache-policy.md) | Implementierung fertig (#14); Profilabnahme in Plan 15 |
@@ -94,8 +94,9 @@ Gewinn, siehe dessen Ergebnisblock). **08** ist der VRAM-Tier-Planner samt
 32GB+12GB-Doku-Profil, gegen den echten Checkpoint gemessen — siehe dessen
 Ergebnisblock; die exklusive KV-Host-Shadow-Entfernung bleibt offen, ist aber
 kein Teil dieses Plans mehr. Die verbliebenen Full-Checkpoint- und
-Langlaufmessungen aus 09, 10, 12 und 14 liegen gemeinsam in **Plan 15**; als
-nächstes wird **10** implementiert. Die Tabelle unten
+Langlaufmessungen aus 09, 10, 12 und 14 liegen gemeinsam in **Plan 15**; 10
+und der Rest von 09 sind implementiert. Als Nächstes folgt der optionale
+Plan **13**, damit Plan 11 den Launcher nicht zwischenzeitlich bricht. Die Tabelle unten
 ist die ursprüngliche Empfehlung und wurde nicht buchstäblich befolgt: 12
 wurde bisher übersprungen, dafür lief 02 → 05 → 06 → 07 → 08 am Stück durch,
 und 04 kam vor 07 statt danach. Für den Rest gilt sie unverändert.
@@ -114,7 +115,7 @@ und 04 kam vor 07 statt danach. Für den Rest gilt sie unverändert.
 | 10 | **04** | TurboQuant — Pflicht für das 256k-/1M-Langkontextprofil. |
 | 11 | **14** | Macht 256k mit TurboQuant und DSpark ohne Voll-Prefill-Buffer möglich; vor jedem 1M-Versuch. |
 | 12 | **10** | Dual-Streaming. Unabhängig, kann ab Schritt 2 jederzeit dazwischen. Das zweite Laufwerk ist **optional** — Einzellaufwerk bleibt Default und Pflicht-Abnahme. |
-| 13 | **09 Rest** | THP, CUDA-Pfade, Tuning-Doku. |
+| 13 | **09 Rest** | THP, CUDA-Pfade, Tuning-Doku. — erledigt |
 | 14 | **13** | Frontend. |
 | 15 | **11** | Rückbau. |
 | 16 | **15** | Finale Full-Checkpoint-Abnahme und ausschließlich messbasiertes Tuning. |
@@ -344,11 +345,17 @@ Agent nichts wieder.
   verrechnet oder etwas anderes gemessen.
 - **DFlash ≠ DeepSeek-V4-Flash.** In llama.cpp ist `dflash` eine Drafter-Arch;
   das 284B-Modell heißt dort `deepseek4`.
-- **`coli_physical_cores()` ist auf Linux hybrid-blind.** Es zählt eindeutige
-  `thread_siblings_list`-Einträge ([c/omp_tune.h:111](c/omp_tune.h)) und liefert
-  auf dem i5-13400F **10** — 6 P- plus 4 E-Cores, als wären sie gleich. Der
-  macOS-Zweig löst genau das ([c/omp_tune.h:98](c/omp_tune.h), gemessen
-  −4.2 % Decode auf M1 Max), der Linux-Zweig nicht. Siehe Plan 09.
+- **Linux-Hybrid-Fallback.** Fehlt
+  `/sys/devices/system/cpu/types/intel_core_*/cpumap`, zählt
+  `coli_physical_cores()` weiter die eindeutigen `thread_siblings_list`-Einträge
+  und sieht auf dem i5-13400F 10 P- und E-Cores zusammen. `/sys/devices/system/cpu/types/`
+  existiert auf der Zielmaschine (CachyOS, Kernel 7.1.6-1) selbst **nicht** —
+  `coli_linux_performance_cores()` fällt dann auf die Range-Liste
+  `/sys/devices/cpu_core/cpus` zurück (hier `0-11`), sonst wäre `V4_OMP_CORES=perf`
+  dort ein stiller No-Op. Der V4-Pfad zählt deren SMT-Siblings zu sechs
+  P-Core-Workern; bis dessen A/B vorliegt, bleibt der physische `all`-Default,
+  und ein defekter `V4_OMP_CORES`-Wert fällt ebenfalls auf `all` zurück, nicht
+  auf einen ungetesteten `perf`-Versuch. Siehe Plan 09.
 - **Kein separater DSpark-Download.** Der Drafter liegt im Hauptcheckpoint unter
   `mtp.<stage>.`. Wer nach einem eigenen DSpark-Repo sucht, sucht falsch.
 - **MTP-Tiefe 1, aber drei DSpark-Stufen.** Das Paper nennt

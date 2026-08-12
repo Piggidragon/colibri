@@ -267,7 +267,8 @@ def env_for_engine(a, arch):
     if arch == "glm":
         return env_for(a)
     env = os.environ.copy()
-    # OMP_NUM_THREADS for the sister engines too.
+    # V4's engine selects P-cores itself: setting OMP_NUM_THREADS here would
+    # mask V4_OMP_CORES before its hybrid-aware sysfs probe can run.
     #
     # #805 set this from physical cores "on every platform" -- but only inside
     # env_for(), which this function calls only for glm. inkling, kimi_k3,
@@ -282,16 +283,17 @@ def env_for_engine(a, arch):
     #
     # setdefault, so an explicit OMP_NUM_THREADS still wins -- which is also
     # how to A/B it: OMP_NUM_THREADS=12 reproduces the old behaviour.
-    if not env.get("COLI_NO_OMP_TUNE"):
+    if not env.get("COLI_NO_OMP_TUNE") and arch != "deepseek_v4":
         from resource_plan import physical_cpu_count
         env.setdefault("OMP_NUM_THREADS", str(physical_cpu_count()))
-        if arch == "deepseek_v4":
-            env.setdefault("OMP_WAIT_POLICY", "active")
-            env.setdefault("GOMP_SPINCOUNT", "200000")
-            env.setdefault("OMP_DYNAMIC", "FALSE")
-            if sys.platform != "win32":
-                env.setdefault("OMP_PROC_BIND", "close")
-                env.setdefault("OMP_PLACES", "cores")
+    if arch == "deepseek_v4" and not env.get("COLI_NO_OMP_TUNE") and sys.platform != "win32":
+        # coli_v4_omp_tune_threads sizes the team (OMP_NUM_THREADS) in-binary,
+        # but libgomp's default placement is unbound: a reduced team is then
+        # free to migrate onto E-cores, which defeats V4_OMP_CORES=perf. These
+        # two don't set thread count, so they don't fight the in-binary sizing
+        # the way the removed OMP_NUM_THREADS setdefault here used to.
+        env.setdefault("OMP_PROC_BIND", "close")
+        env.setdefault("OMP_PLACES", "cores")
     if a.ngen: env["NGEN"] = str(a.ngen)
     if a.temp is not None: env["COLI_TEMP"] = str(a.temp)
     if arch == "deepseek_v4":

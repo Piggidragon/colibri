@@ -698,7 +698,7 @@ Neue Knöpfe dieses Branches:
 | `V4_PREFILL_CHUNK` | 0 (Full-Prefill) | 14 | gebaut (Commit 1+2) |
 | `COLI_MODEL_MIRROR` | aus | 10 | gebaut |
 | `COLI_DISK_WEIGHTS` | `1,1,…` bei aktivem V4-Spiegel | 10 | gebaut |
-| `V4_OMP_CORES` | `perf`, wenn erkennbar; sonst `all` | 09 | geplant |
+| `V4_OMP_CORES` | `all` (physische Kerne) | 09 | gebaut |
 | `V4_PIN_SLOTS` | compile-time `COLI_V4_MAX_PIN_SLOTS_PER_LAYER` (16 im gebauten Binary) | 12 | gebaut |
 | `V4_PIN_FRACTION` | aus (Alternative zu `V4_PIN_SLOTS`) | 12 | gebaut |
 | `V4_PIN_RAMP_REQUESTS` | compile-time `COLI_V4_PIN_RAMP_REQUESTS` (24 im gebauten Binary) | 12 | gebaut |

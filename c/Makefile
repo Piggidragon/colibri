@@ -868,6 +868,9 @@ tests/test_v4_pin_env$(EXE): tests/test_v4_pin_env.c deepseek_v4.c deepseek_v4_i
 		-DCOLI_V4_MAX_PIN_SLOTS_PER_LAYER=16 -DCOLI_V4_PIN_RAMP_REQUESTS=24 \
 		deepseek_v4.c $< -o $@ $(LDFLAGS)
 
+tests/test_v4_omp_tune$(EXE): tests/test_v4_omp_tune.c omp_tune.h
+	$(CC) $(CFLAGS) $< -o $@ $(LDFLAGS)
+
 tests/test_v4_mirror$(EXE): tests/test_v4_mirror.c v4_mirror.h st.h compat.h json.h
 	$(CC) $(CFLAGS) $< -o $@ $(LDFLAGS)
 
