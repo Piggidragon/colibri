@@ -12,6 +12,57 @@ Teil der optionalen Maximaldurchsatz-Messung.
 2. `feat: hand chunked V4 prefill history to DSpark decode`
 3. `perf: tune the 256k TurboQuant + DSpark profile`
 
+## Ergebnis Commit 1
+
+`V4_PREFILL_CHUNK=0` erhält den bisherigen Full-Prefill-Pfad. Positive Werte
+werden auf 64…65536 Token geklemmt, auf 64er-Grenzen abgerundet und bei der
+Session-Eröffnung gegen ihre Prompt-Kapazität begrenzt. `state` und `next`
+allokieren dann nur diese Kapazität; der frische Prompt-Suffix wird in
+aufeinanderfolgenden Target-Batches mit absoluten Positionen verarbeitet.
+Attention-, Compressor- und Indexer-Zustand bleiben dabei durchgehend. Das
+Tiny-Gate prüft Chunk 64 gegen den unchunked Oracle-Pfad für Long-Prompt,
+Prefix-Reuse und Serve.
+
+**Nachtrag aus dem Review:** `build_runtime_plan` budgetierte den
+Aktivierungs-Reserveposten anfangs weiterhin mit dem vollen `CTX`, obwohl
+`coli_v4_session_create` bei gesetztem `V4_PREFILL_CHUNK` nur die Chunk-Größe
+allokiert — das im "Ziel" unten genannte 256k/32k-Profil wäre am
+RAM-Planner gescheitert, bevor die kleineren Puffer je zugeteilt wurden.
+Nachträglich behoben: der Planer ruft `coli_v4_prefill_chunk_tokens(context)`
+genauso auf wie `coli_v4_session_create` und bucht bei gesetztem Chunk die
+Chunk-Größe statt `CTX`.
+
+Ebenfalls aus dem Review: `setup_done` musste vor die Chunk-Schleife und
+damit vor das Laden der Prompt-Embeddings wandern, weil die Chunk-Schleife
+das Embedding-Laden mit umschließt. Die gemeldete Time-to-First-Token
+enthält dadurch jetzt die Embedding-Lesezeit (~470 MB bei 32k Tokens), die
+die `main`-Baseline aus Plan 01 nicht mitzählt — TTFT-Zahlen dieses Branches
+sind also nicht direkt mit der Baseline vergleichbar, arguably aber die
+ehrlichere Messung.
+
+## Ergebnis Commit 2
+
+Der vorhandene DSpark-Übergabevertrag trägt ohne zusätzlichen Laufzeitpfad
+über die Chunkgrenzen: `target_batch` tappt jede Target-Position, ein neuer
+Prompt setzt die Historie einmal vor der Chunk-Schleife zurück, und
+`full_mtp_ready` bleibt bis nach dem letzten Chunk falsch. DSpark-Proposals
+beginnen folglich erst im verifizierten Decode. Der Source-Gate prüft diese
+Reihenfolge. Das Tiny-Fixture enthält absichtlich keine `mtp.*`-Tensoren; die
+bereits grüne Full-Checkpoint-A/B aus Plan 07 bleibt deshalb der
+DSpark-Qualitätsbeleg.
+
+**Commit 3 ist zurückgestellt.** Die 256k-Profilmessung ist ein langer,
+dedizierter Lauf und wird erst mit ausreichend reservierter Laufzeit gemacht;
+es gibt noch keinen neuen Chunk-Default oder Durchsatzanspruch.
+
+**Nach-Merge-Abnahme bewusst offen:** Diese Implementierungs-PR darf vor der
+teuren Full-Checkpoint-Grenzprobe gemergt werden. Danach läuft ein Prompt über
+mindestens eine 64er-Chunkgrenze dreimal: unchunked Target-only, chunked
+Target-only und chunked `V4_MTP=1 V4_DRAFT=3`. Die beiden Target-Folgen müssen
+greedy identisch sein; im DSpark-Lauf müssen echte Proposals auftreten und die
+emittierte Folge ebenfalls der Target-Folge entsprechen. Das ist eine
+Korrektheitsabnahme, keine Ersatzmessung für Commit 3.
+
 ## Ziel
 
 **256k Kontext ist das tägliche Langkontext-Profil** dieser Maschine:
@@ -23,8 +74,10 @@ V4_MTP=1 V4_DRAFT=3 V4_VRAM=1
 
 `turbo3` bleibt ein explizites, verlustbehaftetes Opt-in; es ändert weder
 Router noch Top-k. Chunking und die DSpark-Übergabe müssen gegen den
-unchunked Target-Pfad token-identisch bleiben. DSpark wird erst Bestandteil
-dieses Profils, wenn die offene Full-Checkpoint-A/B-Abnahme aus Plan 07 grün ist.
+unchunked Target-Pfad token-identisch bleiben. Die Token-A/B-Abnahme aus Plan
+07 ist grün (je Backend Target-only gegen DSpark); die noch offene
+Durchsatz-/Akzeptanzmessung bleibt eine Profilfrage und blockiert den
+Übergabevertrag nicht.
 
 **1M (`CTX=1048576`) ist experimentell**, kein Default und keine
 Durchsatz-Zusage. Es benutzt ebenfalls Turbo3 und Chunking, braucht aber eine

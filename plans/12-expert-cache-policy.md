@@ -262,6 +262,12 @@ und ein Fehler dabei sieht aus wie ein Select-Fehler.
 
 ## Commit 3 — Prefill
 
+**Zurückgestellt.** Die geforderte Messmatrix braucht wegen des kalten
+Expert-Cache mehrere lange, dedizierte Läufe und wird nicht mit einer
+Implementierungsphase vermischt. Sie bleibt als eigenständige Messaufgabe in
+diesem Plan offen; bis sie mit ausreichend Laufzeit durchgeführt wird, setzt
+sie weder eine Batch- noch eine Prefetch- oder Cache-Policy als neuen Default.
+
 Dieser Commit misst und stimmt die bestehende V4-Batchgröße, Prefetch- und
 Cache-Politik ab. Er ändert **nicht** die zwei auf `CTX` skalierten
 Session-Aktivierungspuffer; deren Chunk-/DSpark-Übergabe gehört in

@@ -860,6 +860,9 @@ tests/test_native_quant$(EXE): tests/test_native_quant.c deepseek_v4.c native_qu
 tests/test_v4_scratch_env$(EXE): tests/test_v4_scratch_env.c deepseek_v4.c deepseek_v4_internal.h
 	$(CC) $(CFLAGS) -DCOLI_V4_UNIT_RESOURCE_PLAN deepseek_v4.c $< -o $@ $(LDFLAGS)
 
+tests/test_v4_prefill_chunk$(EXE): tests/test_v4_prefill_chunk.c deepseek_v4.c deepseek_v4_internal.h
+	$(CC) $(CFLAGS) -DCOLI_V4_UNIT_RESOURCE_PLAN deepseek_v4.c $< -o $@ $(LDFLAGS)
+
 tests/test_v4_pin_env$(EXE): tests/test_v4_pin_env.c deepseek_v4.c deepseek_v4_internal.h
 	$(CC) $(CFLAGS) -DCOLI_V4_UNIT_RESOURCE_PLAN \
 		-DCOLI_V4_MAX_PIN_SLOTS_PER_LAYER=16 -DCOLI_V4_PIN_RAMP_REQUESTS=24 \

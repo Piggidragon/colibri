@@ -695,6 +695,7 @@ Neue Knöpfe dieses Branches:
 | `V4_VRAM_RESERVE_MB` | `free/8`, geklemmt 256…1024 | 06 (vorgezogen), 08 | gebaut |
 | `V4_VRAM_LIMIT_MB` | aus (kappt das gemeldete freie VRAM) | 08 | gebaut |
 | `V4_VRAM_FAIL_AT` | aus, nur unter `COLI_V4_TEST_HOOKS` | 08 | gebaut |
+| `V4_PREFILL_CHUNK` | 0 (Full-Prefill) | 14 | gebaut (Commit 1+2) |
 | `V4_OMP_CORES` | `perf`, wenn erkennbar; sonst `all` | 09 | geplant |
 | `V4_PIN_SLOTS` | compile-time `COLI_V4_MAX_PIN_SLOTS_PER_LAYER` (16 im gebauten Binary) | 12 | gebaut |
 | `V4_PIN_FRACTION` | aus (Alternative zu `V4_PIN_SLOTS`) | 12 | gebaut |

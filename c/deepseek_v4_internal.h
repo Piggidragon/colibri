@@ -720,10 +720,16 @@ typedef struct { float score; int index; } ColiV4IndexScore;
 
 /* True if `a` sorts strictly after `b`: lower score first, ties broken by
  * ascending index. Mirrors deepseek_v4.c's descending_score() qsort
- * comparator exactly (same total order), so coli_v4_indexer_select()'s
- * output for the retained set is byte-identical to what
- * qsort(scores, count, sizeof(*scores), descending_score) would have put in
- * scores[0..topk). */
+ * comparator exactly (same total order for finite scores), so
+ * coli_v4_indexer_select()'s output for the retained set is byte-identical
+ * to what qsort(scores, count, sizeof(*scores), descending_score) would have
+ * put in scores[0..topk) -- as long as every score is finite. A NaN score
+ * makes `<` and `>` both false against everything, which falls into the
+ * index tiebreak below for that pair specifically; the resulting order is
+ * non-transitive (NaN@0 vs 2.0@1 vs 1.0@2 has no consistent ranking), so a
+ * heap-select and a full sort can retain different sets once NaN appears.
+ * Indexer inputs are dot products of finite decoded KV and query weights, so
+ * this is not expected to trigger in practice. */
 static inline int coli_v4_index_score_worse(const ColiV4IndexScore *a,
                                             const ColiV4IndexScore *b) {
     /* Mirrors the removed descending_score()'s branch structure, not just
@@ -771,9 +777,10 @@ static inline void coli_v4_index_score_sift_down(
  * qsort(..., descending_score) would produce, without sorting the discarded
  * remainder (O(count log topk) instead of O(count log count), see
  * plans/12-expert-cache-policy.md Commit 2). count < 0 is treated as 0;
- * topk <= 0 is a no-op. Returns min(topk, count). Router semantics: the
- * selected set and order must never differ from a full descending qsort --
- * see test_v4_indexer_select.c. */
+ * topk <= 0 is a no-op. Returns min(topk, count). Router semantics: for
+ * finite scores, the selected set and order must never differ from a full
+ * descending qsort -- see test_v4_indexer_select.c and the NaN caveat on
+ * coli_v4_index_score_worse() above. */
 static inline int coli_v4_indexer_select(
     ColiV4IndexScore *scores, int count, int topk) {
     if (count < 0) count = 0;
@@ -796,6 +803,10 @@ static inline int coli_v4_indexer_select(
 
 int coli_v4_session_state_bytes(int context_tokens, int hc_mult,
                                 int hidden_size, uint64_t *bytes);
+/* V4_PREFILL_CHUNK=0 preserves the full-prompt allocation.  A valid value is
+ * clamped to the V4 chunk contract and then capped by this session's prompt
+ * capacity, so callers can use the answer directly as a buffer length. */
+int coli_v4_prefill_chunk_tokens(int max_prompt_tokens);
 int coli_v4_resource_plan_compute(
     ColiDeepSeekV4ResourcePlan *plan,
     const ColiDeepSeekV4ResourceInputs *inputs,
@@ -964,6 +975,7 @@ struct ColiV4Session {
     int *prompt_ids;
     int *generated;
     int max_prompt_tokens;
+    int prefill_chunk_tokens; /* 0 => full prompt, otherwise buffer capacity */
     int max_new_tokens_cap;
     int prompt_count;
     int generated_count;
