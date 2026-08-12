@@ -13,10 +13,17 @@ gemeinsame Header hätte den nicht mehr zielgerichteten Motor berührt und desse
 volle Gate-Matrix in diese V4-Phase gezogen. Stattdessen kapselt `v4_mirror.h`
 die V4-lokale, über `st.h` angebundene Variante. Ohne `COLI_MODEL_MIRROR` ist
 der Pfad unverändert: keine Zusatz-fd, kein Probe, kein Routing. Mit Spiegel
-werden nur Expert-Reads deterministisch geroutet, und der Prefetch verwendet
-dieselbe Replik. Große Gewichte auf vollständigen Spiegeln werden nach
-`COLI_DISK_WEIGHTS` in 4-KiB-ausgerichtete parallele Stripes geteilt; partielle
-Spiegel und kleine Reads fallen auf den einen gerouteten Reader zurück.
+werden Expert-Reads deterministisch geroutet, und der Prefetch benennt
+dieselben fds wie der spätere Demand-Read: für kleine oder partiell
+gespiegelte Gewichte dieselbe geroutete Replik, für große Gewichte auf
+vollständigen Spiegeln dieselben nach `COLI_DISK_WEIGHTS` in
+4-KiB-ausgerichtete parallele Stripes geteilten Bereiche — Prefetch und
+Demand-Read teilen die Bounds-Berechnung, damit sie nie auseinanderlaufen.
+Wo ein O_DIRECT-Zwilling für eine Replik existiert, liest sowohl der Mirror-
+als auch der Non-Mirror-Pfad daran vorbei die Page Cache; der Mirror-Read
+kopiert dafür über einen privaten ausgerichteten Bounce-Buffer, weil parallele
+Stripes sonst mit derselben Alignment-Padding gegenseitig überschreiben
+könnten.
 
 Die automatische Bandbreitenprobe wurde nicht still geschätzt: Sie und der
 physische Zwei-Laufwerk-Vergleich liegen in [Plan 15](15-final-validation-and-tuning.md).

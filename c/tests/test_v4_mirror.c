@@ -10,15 +10,18 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#define PRIMARY "tmp_v4_mirror_primary"
+#define MIRROR "tmp_v4_mirror_replica"
+
+static void cleanup(void);
+
 #define CHECK(condition) do { \
     if (!(condition)) { \
         fprintf(stderr, "%s:%d: check failed: %s\n", __FILE__, __LINE__, #condition); \
+        cleanup(); \
         return 1; \
     } \
 } while (0)
-
-#define PRIMARY "tmp_v4_mirror_primary"
-#define MIRROR "tmp_v4_mirror_replica"
 
 static int write_shard(const char *directory) {
     char path[256];

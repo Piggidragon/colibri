@@ -6835,18 +6835,27 @@ static int prefetch(ColiExpertStore *store, const ColiExpertKey *keys,
     for (size_t i = 0; i < count; i++) {
         V4ExpertRecord *record = get_record(state, keys[i]);
         if (!record) continue;
-        int replica = state->mirror_active
-            ? v4_mirror_route(state->index, keys[i].layer, keys[i].expert) : 0;
-        int scale = state->mirror_active
-            ? v4_mirror_prefetch_at(state->index, record->shard, replica,
-                                    record->scale_offset, (size_t)record->scale_bytes)
-            : coli_st_prefetch_at(state->index, record->shard, record->scale_offset,
-                                  (size_t)record->scale_bytes);
-        int weight = state->mirror_active
-            ? v4_mirror_prefetch_at(state->index, record->shard, replica,
-                                    record->weight_offset, (size_t)record->weight_bytes)
-            : coli_st_prefetch_at(state->index, record->shard, record->weight_offset,
-                                  (size_t)record->weight_bytes);
+        int scale, weight;
+        if (state->mirror_active) {
+            int replica = v4_mirror_route(state->index, keys[i].layer, keys[i].expert);
+            scale = v4_mirror_prefetch_at(state->index, record->shard, replica,
+                                          record->scale_offset, (size_t)record->scale_bytes);
+            /* Must name the same fds v4_read_expert_record's demand read will
+             * use: striped when the mirror is complete and the weight is
+             * large enough, the single routed replica otherwise. */
+            weight = v4_mirror_prefetch_striped(state->index, record->shard,
+                                                record->weight_offset,
+                                                (size_t)record->weight_bytes);
+            if (weight != 0)
+                weight = v4_mirror_prefetch_at(state->index, record->shard, replica,
+                                               record->weight_offset,
+                                               (size_t)record->weight_bytes);
+        } else {
+            scale = coli_st_prefetch_at(state->index, record->shard, record->scale_offset,
+                                        (size_t)record->scale_bytes);
+            weight = coli_st_prefetch_at(state->index, record->shard, record->weight_offset,
+                                         (size_t)record->weight_bytes);
+        }
         if (scale == 0 && weight == 0)
             accepted++;
     }
@@ -11076,10 +11085,25 @@ static int prefetch(ColiExpertStore *store, const ColiExpertKey *keys,
     for (size_t i = 0; i < count; i++) {
         V4ExpertRecord *record = get_record(state, keys[i]);
         if (!record) continue;
-        if (coli_st_prefetch_at(state->index, record->shard, record->scale_offset,
-                                (size_t)record->scale_bytes) == 0 &&
-            coli_st_prefetch_at(state->index, record->shard, record->weight_offset,
-                                (size_t)record->weight_bytes) == 0)
+        int scale, weight;
+        if (state->mirror_active) {
+            int replica = v4_mirror_route(state->index, keys[i].layer, keys[i].expert);
+            scale = v4_mirror_prefetch_at(state->index, record->shard, replica,
+                                          record->scale_offset, (size_t)record->scale_bytes);
+            weight = v4_mirror_prefetch_striped(state->index, record->shard,
+                                                record->weight_offset,
+                                                (size_t)record->weight_bytes);
+            if (weight != 0)
+                weight = v4_mirror_prefetch_at(state->index, record->shard, replica,
+                                               record->weight_offset,
+                                               (size_t)record->weight_bytes);
+        } else {
+            scale = coli_st_prefetch_at(state->index, record->shard, record->scale_offset,
+                                        (size_t)record->scale_bytes);
+            weight = coli_st_prefetch_at(state->index, record->shard, record->weight_offset,
+                                         (size_t)record->weight_bytes);
+        }
+        if (scale == 0 && weight == 0)
             accepted++;
     }
 #endif
