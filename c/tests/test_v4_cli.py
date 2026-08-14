@@ -42,6 +42,15 @@ class V4CliTest(unittest.TestCase):
         finally:
             directory.cleanup()
 
+    def test_non_v4_checkpoint_gets_a_clear_launcher_error(self):
+        directory, root = self.make_model("inkling")
+        try:
+            with self.assertRaises(SystemExit) as stopped:
+                self.cli.need_model(str(root))
+            self.assertIn("supports DeepSeek-V4-Flash-0731 only", str(stopped.exception))
+        finally:
+            directory.cleanup()
+
     def test_engine_for_selects_deepseek_v4_binary(self):
         directory, root = self.make_model()
         try:

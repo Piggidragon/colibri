@@ -169,7 +169,7 @@ footer li a:hover{color:var(--on-dark)}
     <a class="brand" href="#top"><span class="mark"><svg><use href="#logo"/></svg></span><span class="word">colibri</span></a>
     <div class="nl">
       <a href="#engine">Engine</a>
-      <a href="#models">Models</a>
+      <a href="#models">Checkpoint</a>
       <a href="#hardware">Hardware</a>
       <a href="https://github.com/JustVugg/colibri/blob/main/docs/benchmarks.md">Benchmarks</a>
       <a class="btn" href="https://github.com/JustVugg/colibri">Star on GitHub</a>
@@ -179,12 +179,11 @@ footer li a:hover{color:var(--on-dark)}
 
 <header class="hero" id="top">
   <div class="wrap hero-grid">
-    <h1>These models do not fit in your machine. <u>They run in it anyway.</u></h1>
+    <h1>This model does not fit in your machine. <u>It runs in it anyway.</u></h1>
     <div class="aside">
       A Mixture-of-Experts token touches a small fraction of the weights, so colibri keeps that part
-      resident and streams the rest from disk as it is needed. Four families run today — GLM-5.2
-      (744B), Inkling (975B), Kimi K3 (2.8T) and OLMoE (7B) — in pure C, with zero dependencies.
-      No cluster, no cloud, no API key.
+      resident and streams the rest from disk as it is needed. DeepSeek V4 Flash runs from its
+      native checkpoint on one Linux machine — no cluster, no cloud, no API key.
       <div class="cta">
         <a class="btn" href="https://github.com/JustVugg/colibri">Star on GitHub</a>
         <a class="btn ghost" href="https://github.com/JustVugg/colibri#quick-start">Quick start →</a>
@@ -207,12 +206,11 @@ footer li a:hover{color:var(--on-dark)}
     <div class="split">
       <h2>Weights are not state to hold. They are data to stage.</h2>
       <div>
-        <p class="lead" style="margin-bottom:1.3rem">A token through GLM-5.2 activates only <strong>~40B parameters</strong>, and just
-          <strong>~11 GB</strong> of those change from token to token — the routed experts. colibri keeps the dense weights resident
-          and treats the 19,456 experts as a storage hierarchy: measured routing heat decides which experts earn VRAM, which earn
-          pinned RAM, and which stream from NVMe. The router runs a layer ahead, so prefetch hides the latency.</p>
-        <p class="lead">Everything is validated <strong>token-exact</strong> against the reference transformers implementation —
-          speed never buys drift.</p>
+        <p class="lead" style="margin-bottom:1.3rem">A DeepSeek V4 Flash token selects six experts in each routed layer. colibri keeps
+          the dense weights resident and treats the expert set as a storage hierarchy: the V4 planner assigns VRAM, RAM, and NVMe
+          while the dashboard makes those tiers and their cache hit rate visible.</p>
+        <p class="lead">The lossless native KV codec is the default; every opt-in lossy profile stays explicit and is checked against
+          the target path before it is considered for daily use.</p>
       </div>
     </div>
   </div>
@@ -220,26 +218,11 @@ footer li a:hover{color:var(--on-dark)}
 
 <section id="models">
   <div class="wrap reveal">
-    <div class="eyebrow">The models — one engine, more minds coming</div>
+    <div class="eyebrow">The checkpoint</div>
     <div class="cards">
-      <div class="card"><h3>GLM-5.2</h3><p class="desc">The flagship target: an int4 container, token-exact versus reference, with the full expert atlas published.</p>
-        <div class="meta"><div class="row"><span class="k">Maker</span><span class="v">Z.ai</span></div><div class="row"><span class="k">Size · Status</span><span class="v">744B MoE · Live</span></div></div>
-        <a class="btn" href="https://github.com/JustVugg/colibri">Run it →</a></div>
-      <div class="card"><h3>OLMoE</h3><p class="desc">The small research workhorse — quantization A/Bs and quality ablations run here first.</p>
-        <div class="meta"><div class="row"><span class="k">Maker</span><span class="v">Allen AI</span></div><div class="row"><span class="k">Size · Status</span><span class="v">7B MoE · Live</span></div></div>
-        <a class="btn" href="https://github.com/JustVugg/colibri">Run it →</a></div>
-      <div class="card"><h3>Inkling</h3><p class="desc">A 975B reasoning MoE, running today. An int4 dense container brings the resident set to 15.3 GB, so it fits a 25 GB box.</p>
-        <div class="meta"><div class="row"><span class="k">Maker</span><span class="v">Thinking Machines</span></div><div class="row"><span class="k">Size · Status</span><span class="v">975B MoE · Live</span></div></div>
-        <a class="btn" href="https://github.com/JustVugg/colibri/blob/main/docs/inkling.md">Run it →</a></div>
-      <div class="card"><h3>DeepSeek</h3><p class="desc">A widely-studied frontier MoE family — the tiered engine's next large-scale target.</p>
-        <div class="meta"><div class="row"><span class="k">Maker</span><span class="v">DeepSeek AI</span></div><div class="row"><span class="k">Size · Status</span><span class="v">671B–1T MoE · Planned</span></div></div>
-        <a class="btn soon">On the roadmap</a></div>
-      <div class="card"><h3>Kimi K3</h3><p class="desc">The largest model here, running today — its QAT-trained MXFP4 experts are streamed straight from the original checkpoint, with no conversion.</p>
-        <div class="meta"><div class="row"><span class="k">Maker</span><span class="v">Moonshot AI</span></div><div class="row"><span class="k">Size · Status</span><span class="v">2.8T MoE · Live</span></div></div>
-        <a class="btn" href="https://github.com/JustVugg/colibri/blob/main/docs/kimi_k3.md">Run it →</a></div>
-      <div class="card"><h3>Qwen3 MoE</h3><p class="desc">The most widely-deployed open family — broad hardware coverage meets broad adoption.</p>
-        <div class="meta"><div class="row"><span class="k">Maker</span><span class="v">Alibaba Qwen</span></div><div class="row"><span class="k">Size · Status</span><span class="v">MoE · Planned</span></div></div>
-        <a class="btn soon">On the roadmap</a></div>
+      <div class="card"><h3>DeepSeek V4 Flash</h3><p class="desc">The single checkpoint for this fork: native FP8 dense weights, streamed FP4 experts, and three built-in DSpark drafting stages.</p>
+        <div class="meta"><div class="row"><span class="k">Maker</span><span class="v">DeepSeek AI</span></div><div class="row"><span class="k">Size · Status</span><span class="v">284B MoE · target platform</span></div></div>
+        <a class="btn" href="https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash-0731">Checkpoint →</a></div>
     </div>
   </div>
 </section>
@@ -248,8 +231,7 @@ footer li a:hover{color:var(--on-dark)}
   <canvas id="atlasCanvas"></canvas>
   <div class="inner reveal">
     <h2>The mind, measured.</h2>
-    <p>Every point behind this text is a real measured expert — 13,260 characterised experts, specialists clustering by topic,
-      generalists drifting to the centre. The first expert atlas of a 700B-class model, mapped on ordinary machines.</p>
+    <p>Every point behind this text is a routed V4 expert. The dashboard shows where the expert cache, VRAM tiers, and storage reads land on the target machine.</p>
   </div>
   <div class="atlas-hint">drag to spin · position is measured routing affinity, not a learned embedding</div>
 </section>
@@ -296,9 +278,8 @@ footer li a:hover{color:var(--on-dark)}
         <li><a href="https://github.com/JustVugg/colibri/blob/main/docs/api.md">API</a></li>
         <li><a href="https://github.com/JustVugg/colibri/blob/main/docs/benchmarks.md">Benchmarks</a></li>
       </ul></div>
-      <div><h4>Models</h4><ul>
-        <li><a href="#models">GLM-5.2</a></li><li><a href="#models">OLMoE</a></li>
-        <li><a href="#models">Inkling</a></li><li><a href="#models">Kimi K3</a></li>
+      <div><h4>Checkpoint</h4><ul>
+        <li><a href="#models">DeepSeek V4 Flash</a></li>
       </ul></div>
       <div><h4>Project</h4><ul>
         <li><a href="https://github.com/JustVugg/colibri/issues">Issues</a></li>

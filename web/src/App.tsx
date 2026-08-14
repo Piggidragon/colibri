@@ -60,8 +60,7 @@ export default function App() {
     return saved
   })
   const [apiKey, setApiKey] = useState("")
-  const [models, setModels] = useState<string[]>([])
-  const [model, setModel] = useState(() => stored(localStorage, "colibri.model", "glm-5.2-colibri"))
+  const [model, setModel] = useState(() => stored(localStorage, "colibri.model", "deepseek-v4-flash-0731"))
   const [temperature, setTemperature] = useState(0.7)
   const [maxTokens, setMaxTokens] = useState(4096)
   const [thinking, setThinking] = useState(false)
@@ -151,7 +150,6 @@ export default function App() {
     setError("")
     try {
       const found = await listModels(baseUrl, apiKey, controller.signal)
-      setModels(found)
       if (found.length && !found.includes(model)) setModel(found[0])
       setConnected(true)
       try {
@@ -315,7 +313,7 @@ export default function App() {
 
         <section className="side-section">
           <div className="section-title"><SlidersHorizontal className="size-3.5" /> {t("sidebar.inference")}</div>
-          <label>{t("sidebar.model")}<select value={model} onChange={(event) => setModel(event.target.value)}>{models.length ? models.map((id) => <option key={id}>{id}</option>) : <option>{model}</option>}</select></label>
+          <label>{t("sidebar.model")}<Input value={model} readOnly aria-label={t("sidebar.model")} /></label>
           {health?.kv_slots && health.kv_slots > 1 ? <label>{t("sidebar.kvSession")}<select value={cacheSlot} onChange={(event) => setCacheSlot(Number(event.target.value))} disabled={loading}>
             {Array.from({ length: kvSlots }, (_, slot) => <option key={slot} value={slot}>{t("sidebar.sessionLabel", { slot: slot + 1 })}</option>)}
           </select><span className="field-help">{t("sidebar.kvSessionHelp")}</span></label> : null}
