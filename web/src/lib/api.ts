@@ -41,12 +41,33 @@ export interface HwinfoHealth {
   gpu: string
 }
 
+export interface V4Health {
+  ctx: string
+  kv: string
+  kv_location: "vram" | "ram"
+  dense: "vram" | "ram" | "streamed"
+  head: "vram" | "ram" | "streamed"
+  dspark: "vram" | "ram" | "off"
+}
+
+export interface V4MetricsHealth {
+  hit_rate: number
+  requests: number
+  hits: number
+  misses: number
+  bytes: number
+  drive0: number
+  drive1: number
+}
+
 export interface HealthResponse {
   status: string
   scheduler?: SchedulerHealth
   kv_slots?: number
   tiers?: TiersHealth
   hwinfo?: HwinfoHealth
+  v4?: V4Health
+  v4_metrics?: V4MetricsHealth
 }
 
 export interface ProfileTurn {

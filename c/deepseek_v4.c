@@ -10142,6 +10142,15 @@ static void v4_serve_one(ColiV4Engine *engine, ColiV4Session *session,
            decode > 0.0 ? completion / decode : 0.0,
            hit_rate, v4_serve_rss_gb(), stats.prompt_tokens, length_limited,
            session->prefix_reused);
+    uint64_t read_bytes = after.bytes_read - before.bytes_read;
+    shards *index = engine->target_index;
+    printf("V4METRIC hit_rate=%.3f requests=%llu hits=%llu misses=%llu bytes=%llu "
+           "drive0=%llu drive1=%llu\n",
+           hit_rate, (unsigned long long)(hits + misses),
+           (unsigned long long)hits, (unsigned long long)misses,
+           (unsigned long long)read_bytes,
+           (unsigned long long)(index ? index->v4_mirror_bytes[0] : 0),
+           (unsigned long long)(index ? index->v4_mirror_bytes[1] : 0));
     fflush(stdout);
 }
 
@@ -10189,6 +10198,15 @@ static int v4_serve_main(void) {
     setvbuf(stdin, NULL, _IONBF, 0);
     fputs("\x01\x01READY\x01\x01\n", stdout);
     printf("STAT 0 0.0 0.0 %.2f 0 0\n", v4_serve_rss_gb());
+    printf("V4INFO ctx=%d kv=%s kv_location=%s dense=%s head=%s dspark=%s\n",
+           context, coli_v4_kv_codec_name(engine->runtime.kv_codec),
+           engine->runtime.kv_vram_enabled ? "vram" : "ram",
+           engine->runtime.dense_location == COLI_V4_DENSE_VRAM ? "vram" :
+           engine->runtime.dense_location == COLI_V4_DENSE_RAM ? "ram" : "streamed",
+           engine->head_cache.device ? "vram" :
+           engine->head_cache.data ? "ram" : "streamed",
+           engine->runtime.dspark_vram_enabled ? "vram" :
+           coli_v4_full_dspark_wanted ? "ram" : "off");
     fflush(stdout);
     for (;;) {
         V4ServeRequest request = {0};

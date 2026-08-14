@@ -51,5 +51,5 @@
   <text x="252" y="94" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace"
         font-size="19" fill="#808080" font-style="italic">tiny engine, immense model</text>
   <text x="252" y="122" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace"
-        font-size="15" fill="#9a9a9a">GLM-5.2 &#183; 744B MoE &#183; int4 &#183; streaming CPU</text>
+        font-size="15" fill="#9a9a9a">DeepSeek V4 Flash &#183; 284B MoE &#183; DSpark &#183; Linux x86-64</text>
 </svg>

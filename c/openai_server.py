@@ -28,15 +28,8 @@ HERE = Path(__file__).resolve().parent
 
 
 def default_engine():
-    """The engine next to this file. Since #391 it is built as `colibri`; `glm` stays as a
-    fallback so an old tree (or an old hand-built binary) still starts. Reported by
-    @RDouglasSharp in #488: the default still said `glm`, so `python3 openai_server.py`
-    on a clean checkout looked for a file the build no longer produces."""
-    for name in ("colibri", "colibri.exe", "glm", "glm.exe"):
-        candidate = HERE / name
-        if candidate.exists():
-            return candidate
-    return HERE / "colibri"
+    """The only engine shipped by this fork."""
+    return HERE / ("deepseek_v4.exe" if os.name == "nt" else "deepseek_v4")
 END = b"\x01\x01END\x01\x01\n"
 READY = b"\x01\x01READY\x01\x01\n"
 MAX_BODY = 4 << 20
@@ -374,7 +367,9 @@ def parse_tool_calls(reply, tools=None):
     return text.strip(), calls
 
 
-ARCH = "glm"   # set in main(): glm | inkling | kimi | deepseek_v4
+# main() always selects deepseek_v4 before serving.  Keeping this import-time
+# value preserves the isolated legacy protocol fixtures; no launcher path uses it.
+ARCH = "glm"
 
 INK_THINK, INK_TEXT = "<|content_thinking|>", "<|content_text|>"
 
@@ -1373,47 +1368,26 @@ def read_engine_turn(stream, sentinel, on_bytes):
     }
 
 
+def v4_frame_fields(fields):
+    """Parse the key=value telemetry frames emitted by the V4 serve loop."""
+    return dict(field.split("=", 1) for field in fields[1:] if "=" in field)
+
+
 def model_arch(model):
-    """The model's engine family from its config.json model_type -- the same
-    rule as coli's model_arch(): "inkling"/"kimi" substring, everything else
-    (including an unreadable config) is glm."""
+    """Return the supported architecture, or ``None`` for another checkpoint."""
     try:
         with open(Path(model) / "config.json", encoding="utf-8") as fh:
             model_type = (json.load(fh).get("model_type") or "").lower()
     except (OSError, ValueError, TypeError):
-        return "glm"
-    if "inkling" in model_type:
-        return "inkling"
-    if "kimi" in model_type:
-        return "kimi"
+        return None
     if "deepseek_v4" in model_type or ("deepseek" in model_type and "v4" in model_type):
         return "deepseek_v4"
-    return "glm"
+    return None
 
 
 def cap_for_arch(arch, cap):
-    """Cap-sentinel shim (#379): CURRENT-STATE CALIBRATION, not durable core.
-
-    An absent cap (None) means different things across today's engines --
-    platform-auto in colibri.c (coli_resolve_cap resolves the 0 sentinel
-    Metal/darwin/SSD-aware), RAM-auto in inkling.c (cap <= 0 fits the expert
-    LRU to available RAM), while the coli wrapper historically forced 8 on
-    every engine. This shim INTERNALIZES that external inconsistency at the
-    one funnel every engine launch passes through: with no explicit cap, a
-    glm-arch model's engine receives the 0 sentinel to resolve platform-aware
-    and a non-glm arch receives the legacy 8. An EXPLICIT cap passes through
-    verbatim to any engine -- including an explicit 0, which for inkling means
-    upstream's RAM-auto (people who ask for upstream semantics get them).
-    Keyed on the MODEL's arch (config.json model_type), not the engine
-    binary's file name: COLI_ENGINE users package the glm engine under
-    arbitrary names (glm52, colibri-1.2, ...), and basename keying silently
-    disabled the platform default for exactly them.
-
-    MOOTING TRIGGER: upstream unifies cap-sentinel semantics across engines
-    -> this shim must be removed and re-derived."""
-    if cap is not None:
-        return cap
-    return 0 if arch == "glm" else 8
+    """Keep the unused positional cap field harmless for V4 serve mode."""
+    return 0 if cap is None else cap
 
 
 def tune_child_env(env, arch):
@@ -1471,6 +1445,8 @@ class Engine:
         self.kv_slots = kv_slots
         self.tiers = None
         self.hwinfo = None
+        self.v4 = None
+        self.v4_metrics = None
         self.emap = None
         self.hits = None
         self.hits_seq = 0                      # latest "TIERS" snapshot from the engine
@@ -1580,6 +1556,22 @@ class Engine:
                     self.tiers = {"vram": int(fields[1]), "ram": int(fields[2]),
                                   "disk": int(fields[3]), "vram_gb": float(fields[4]),
                                   "ram_gb": float(fields[5])}
+                elif kind == "V4INFO":
+                    self.v4 = v4_frame_fields(fields)
+                elif kind == "V4METRIC":
+                    values = v4_frame_fields(fields)
+                    try:
+                        self.v4_metrics = {
+                            "hit_rate": float(values["hit_rate"]),
+                            "requests": int(values["requests"]),
+                            "hits": int(values["hits"]),
+                            "misses": int(values["misses"]),
+                            "bytes": int(values["bytes"]),
+                            "drive0": int(values["drive0"]),
+                            "drive1": int(values["drive1"]),
+                        }
+                    except (KeyError, ValueError):
+                        raise RuntimeError(f"invalid V4 telemetry: {' '.join(fields)}")
                 elif kind == "ERROR" and len(fields) >= 2:
                     request_id = fields[1]
                     message = " ".join(fields[2:]) or "engine request failed"
@@ -2092,6 +2084,10 @@ class APIHandler(BaseHTTPRequestHandler):
                     if tiers: payload["tiers"] = tiers
                     hwinfo = getattr(self.server.engine, "hwinfo", None) if self.server.engine else None
                     if hwinfo: payload["hwinfo"] = hwinfo
+                    v4 = getattr(self.server.engine, "v4", None) if self.server.engine else None
+                    if v4: payload["v4"] = v4
+                    v4_metrics = getattr(self.server.engine, "v4_metrics", None) if self.server.engine else None
+                    if v4_metrics: payload["v4_metrics"] = v4_metrics
                 self.send_json(200, payload, request_id)
                 return
             if path == "/experts":
@@ -2821,17 +2817,14 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--model", default=os.environ.get("COLI_MODEL"), required=not os.environ.get("COLI_MODEL"))
     parser.add_argument("--engine", default=str(default_engine()))
-    parser.add_argument("--arch", choices=("auto", "glm", "inkling", "kimi", "deepseek_v4"), default="auto",
-                        help="chat-template family; auto reads model_type from the model's config.json")
+    parser.add_argument("--arch", choices=("auto", "deepseek_v4"), default="auto",
+                        help="DeepSeek V4 chat template (auto validates config.json)")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8000)
     parser.add_argument("--model-id", default=os.environ.get("COLI_MODEL_ID"))
     parser.add_argument("--api-key", default=os.environ.get("COLI_API_KEY"))
     parser.add_argument("--cors-origin", action="append", default=None,
                         help="allowed browser origin; repeat as needed (use '*' for any origin)")
-    # Absent = not explicitly set: mirrors coli's --cap (see cap_for_arch and issue
-    # #379 -- glm arch resolves platform-aware, non-glm gets the legacy 8). An
-    # explicit value, 0 included, reaches the engine verbatim.
     parser.add_argument("--cap", type=int, default=None, help="cache slots/layer (default: auto)")
     parser.add_argument("--max-tokens", type=int, default=1024)
     parser.add_argument("--max-queue", type=int, default=int(os.environ.get("COLI_MAX_QUEUE", "8")))
@@ -2848,11 +2841,10 @@ def main():
     ARCH = args.arch
     if ARCH == "auto":
         ARCH = model_arch(args.model)
+    if ARCH != "deepseek_v4":
+        parser.error("only DeepSeek-V4-Flash-0731 checkpoints are supported (model_type deepseek_v4)")
     if args.model_id is None:
-        args.model_id = ("inkling-colibri" if ARCH == "inkling" else
-                         "kimi-k3-colibri" if ARCH == "kimi" else
-                         "deepseek-v4-colibri" if ARCH == "deepseek_v4" else
-                         "glm-5.2-colibri")
+        args.model_id = "deepseek-v4-flash-0731"
     serve(args.model, args.host, args.port, args.model_id, args.api_key,
           args.cap,args.max_tokens,args.engine,cors_origins=args.cors_origin,
           max_queue=args.max_queue,queue_timeout=args.queue_timeout,kv_slots=args.kv_slots,

@@ -44,6 +44,11 @@ const message = (role: ChatMessage["role"], content: string): ChatMessage => {
   return { id, role, content }
 }
 
+const formatBytes = (bytes: number) => {
+  if (bytes < 1_000_000_000) return `${(bytes / 1_000_000).toFixed(0)} MB`
+  return `${(bytes / 1_000_000_000).toFixed(2)} GB`
+}
+
 export default function App() {
   const { t, locale, setLocale, locales } = useLocale()
 
@@ -55,8 +60,7 @@ export default function App() {
     return saved
   })
   const [apiKey, setApiKey] = useState("")
-  const [models, setModels] = useState<string[]>([])
-  const [model, setModel] = useState(() => stored(localStorage, "colibri.model", "glm-5.2-colibri"))
+  const [model, setModel] = useState(() => stored(localStorage, "colibri.model", "deepseek-v4-flash-0731"))
   const [temperature, setTemperature] = useState(0.7)
   const [maxTokens, setMaxTokens] = useState(4096)
   const [thinking, setThinking] = useState(false)
@@ -146,7 +150,6 @@ export default function App() {
     setError("")
     try {
       const found = await listModels(baseUrl, apiKey, controller.signal)
-      setModels(found)
       if (found.length && !found.includes(model)) setModel(found[0])
       setConnected(true)
       try {
@@ -263,6 +266,21 @@ export default function App() {
             <div className="hw-row"><MemoryStick className="size-3.5" /><span>{health.hwinfo.ram_total_gb.toFixed(0)} GB RAM<small>{health.hwinfo.ram_avail_gb.toFixed(0)} GB free</small></span></div>
             <div className="hw-row"><HardDrive className="size-3.5" /><span>{health.hwinfo.cores} cores</span></div>
           </div> : null}
+          {health?.v4 ? <div className="v4-panel">
+            <div className="v4-panel-head"><span>DeepSeek V4 Flash</span><code>{health.v4.ctx} ctx · {health.v4.kv} KV</code></div>
+            <div className="v4-tier-grid">
+              <span>KV <strong>{health.v4.kv_location}</strong></span>
+              <span>Dense <strong>{health.v4.dense}</strong></span>
+              <span>Head <strong>{health.v4.head}</strong></span>
+              <span>DSpark <strong>{health.v4.dspark}</strong></span>
+            </div>
+          </div> : null}
+          {health?.v4_metrics ? <div className="v4-metrics">
+            <span><strong>{health.v4_metrics.hit_rate.toFixed(1)}%</strong> expert-cache hits</span>
+            <span>{health.v4_metrics.hits.toLocaleString()} hits · {health.v4_metrics.misses.toLocaleString()} misses</span>
+            <span>{formatBytes(health.v4_metrics.bytes)} read this turn</span>
+            {health.v4_metrics.drive1 > 0 ? <span>SSD A {formatBytes(health.v4_metrics.drive0)} · SSD B {formatBytes(health.v4_metrics.drive1)}</span> : null}
+          </div> : null}
           {health?.scheduler ? <>
             <div className="runtime-grid">
               <div><span>{t("dashboard.active")}</span><strong>{active}<small> / {capacity}</small></strong></div>
@@ -295,7 +313,7 @@ export default function App() {
 
         <section className="side-section">
           <div className="section-title"><SlidersHorizontal className="size-3.5" /> {t("sidebar.inference")}</div>
-          <label>{t("sidebar.model")}<select value={model} onChange={(event) => setModel(event.target.value)}>{models.length ? models.map((id) => <option key={id}>{id}</option>) : <option>{model}</option>}</select></label>
+          <label>{t("sidebar.model")}<Input value={model} readOnly aria-label={t("sidebar.model")} /></label>
           {health?.kv_slots && health.kv_slots > 1 ? <label>{t("sidebar.kvSession")}<select value={cacheSlot} onChange={(event) => setCacheSlot(Number(event.target.value))} disabled={loading}>
             {Array.from({ length: kvSlots }, (_, slot) => <option key={slot} value={slot}>{t("sidebar.sessionLabel", { slot: slot + 1 })}</option>)}
           </select><span className="field-help">{t("sidebar.kvSessionHelp")}</span></label> : null}
