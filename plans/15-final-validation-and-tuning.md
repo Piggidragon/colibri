@@ -1,7 +1,8 @@
 # 15 — Abschlussabnahme und profilgeführtes Tuning
 
 Voraussetzung: Alle Implementierungspläne 01–14 einschließlich der verbleibenden
-Commits aus 09 und 10 sowie [13-frontend-v4.md](13-frontend-v4.md). Dieser Plan
+Commits aus 09 und 10 sowie [13-frontend-v4.md](13-frontend-v4.md) und
+[11-strip-to-v4.md](11-strip-to-v4.md). Dieser Plan
 ist **immer der letzte**: Er führt keine vorab vermuteten Optimierungen ein,
 sondern misst den integrierten Stand auf der Zielmaschine und begründet daraus
 kleine, getrennte Folge-Commits.

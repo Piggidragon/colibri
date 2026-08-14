@@ -2,6 +2,49 @@
 
 Voraussetzung: **alle vorherigen Pläne**, insbesondere [10-dual-streaming.md](10-dual-streaming.md)
 
+## Ergebnis
+
+Die Löschcommits sind in PR #18. Der Baum enthält nur noch die
+Linux-x86-64-V4-Engine, den CUDA-Pfad, den V4-Mirror-Reader und die für
+`coli chat`, `coli serve` und `coli web` benötigten Teile. Die anderen
+Modellmotoren, GPU-/Plattformbackends, Konverter, Fixtures und ihre Tests
+sind entfernt; die transitive V4-Hülle bleibt als
+`plans/v4-dependency-closure.txt` geprüft.
+
+**Nicht Teil dieses Rückbaus, weiterhin offen in #18 (siehe PR-Checkliste):**
+`c/coli` dispatcht immer noch auf die gelöschten Architekturen (`glm`,
+`olmoe`, `inkling`, `kimi_k3`) und die Modul-Docstring/Banner nennen weiter
+GLM-5.2 — das ist bewusst [Plan 13](13-frontend-v4.md)s Aufgabe, nicht
+dieses Rückbaus (siehe "13 vor 11" oben). Die Statuszeile in AGENTS.md
+bleibt deshalb bis 13 gelandet ist ohne "fertig".
+
+Eine Review-Runde der Löschcommits (`/code-review 18`) fand, dass der
+Löschvorgang selbst mehrere Regressionen eingeführt hatte, die inzwischen
+im selben Branch behoben sind: `c/Makefile`s `test`-Ziel verlor kommentarlos
+alle 42 C-Test-Gates (nur noch 4 Python-Module liefen); `deepseek-v4-oracle`
+verlor `MEMORY_GB`/`ORACLE_*`; `install`/`uninstall` verloren das
+Web-Dashboard bzw. räumten nicht vollständig auf; `flake.nix`,
+`docker/Dockerfile.slim` und die Root-`Makefile` riefen gelöschte Ziele auf;
+`coli bench`/`coli convert` stürzten ab (ihre Werkzeuge — `eval_glm.py`,
+`convert_fp8_to_int4.py` — sind GLM-spezifisch und gelöscht); und
+`tools/repack_fp8_passthrough.py` plus zugehörige Tests waren bereits vor
+diesem Rückbau tote GLM-fmt=8-Werkzeuge, die jetzt mitentfernt sind. Details
+siehe die Commits nach der Review auf diesem Branch.
+
+Die öffentliche Dokumentation wurde auf den einzigen Checkpoint, den DSpark im
+selben Checkpoint, die i5-13400F/32-GiB/RTX-4070-Zielmaschine und die verbleibenden
+V4-Bedienwege reduziert. Historische Upstream-Release- und Modellseiten wurden
+gelöscht statt als scheinbar gültige Anleitung stehen zu bleiben. Die
+Full-Checkpoint- und Langlaufmessungen gehören weiterhin bewusst in
+[Plan 15](15-final-validation-and-tuning.md), nicht in diesen Rückbau.
+
+Abgenommen auf dem Branch mit `make -C c test && make -C c check` (42
+C-Test-Gates plus 335 Python-Tests) sowie der gepinnten Tiny-Neugenerierung und
+`make -C c PYTHON="$PWD/.venv-v4-tiny/bin/python" deepseek-v4-tiny-check`:
+Target-Orakel und Prefix-Reuse sind token-identisch. Die Tiny-Fixture enthält
+keine Drafter-Tensoren; sie ist deshalb kein Ersatz für die in Plan 15 offene
+Full-Checkpoint-DSpark-Abnahme.
+
 *Commits:*
 1. `chore: audit the V4 dependency closure`
 2. `chore: drop the GLM, Inkling, Kimi K3 and OLMoE engines`

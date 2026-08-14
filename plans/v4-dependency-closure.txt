@@ -1,0 +1,40 @@
+# V4 dependency closure
+#
+# Generated on phase-11-strip-to-v4 with:
+#   for unit in $(sed -n '/^V4_TARGET_UNITS =/,/^V4_TEST_UNITS =/p' \
+#       c/Makefile.deepseek-v4.units | tr '\\' ' ' | awk '/COLI_V4_UNIT_/ { print $1 }'); do
+#     gcc -MM -I c -D"$unit" c/deepseek_v4.c 2>/dev/null
+#     gcc -MM -I c -D"$unit" -DCOLI_V4_CUDA c/deepseek_v4.c 2>/dev/null
+#   done | tr ' \\' '\n' | sed '/^$/d' | grep '\.h$' | sort -u
+#   gcc -MM -I c -x c++ -DCOLI_V4_CUDA c/backend_cuda.cu 2>/dev/null
+#   gcc -MM -I c -x c++ -DCOLI_V4_CUDA c/backend_cuda_v4.cu 2>/dev/null
+#
+# This manifest is deliberately only the transitive headers of every production
+# V4 amalgamation unit -- the non-CUDA build, the CUDA=1 build (-DCOLI_V4_CUDA),
+# and the two backend_cuda*.cu translation units nvcc compiles separately (not
+# reachable from deepseek_v4.c's own #include graph). The source test checks it
+# against the compiler, so adding an include requires consciously retaining and
+# documenting the header.
+c/backend_cuda.h
+c/backend_cuda_v4.h
+c/backend_gpu_compat.h
+c/compat.h
+c/deepseek_v4.h
+c/deepseek_v4_internal.h
+c/expert_store.h
+c/json.h
+c/kv_prefix.h
+c/native_quant.h
+c/native_quant_batch.h
+c/native_quant_dual.h
+c/native_quant_fp4_rows16.h
+c/omp_tune.h
+c/quant.h
+c/st.h
+c/tensor.h
+c/tok.h
+c/tok_unicode.h
+c/tok_unicode_o200k.h
+c/turbo_quant.h
+c/v4_kv_codec.h
+c/v4_mirror.h

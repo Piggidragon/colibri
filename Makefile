@@ -1,4 +1,4 @@
-.PHONY: all glm deepseek-v4 portable test check cuda-test clean install uninstall
+.PHONY: all deepseek-v4 test check clean install uninstall
 
-all glm deepseek-v4 portable test check cuda-test clean install uninstall:
+all deepseek-v4 test check clean install uninstall:
 	$(MAKE) -C c $@

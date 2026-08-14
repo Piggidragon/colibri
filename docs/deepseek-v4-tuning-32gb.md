@@ -3,7 +3,8 @@
 This is the measurement record and operating profile for
 DeepSeek-V4-Flash-0731 on the target i5-13400F, 32 GiB DDR4-3200, headless RTX
 4070 machine. Estimates are labelled as estimates; blank measurements are not
-silently filled from planner arithmetic.
+silently filled from planner arithmetic. The remaining end-to-end matrix is
+defined in [Plan 15](../plans/15-final-validation-and-tuning.md).
 
 ## Current recommendation
 
@@ -45,8 +46,8 @@ make -C c deepseek-v4 CUDA=1 NVCC_CCBIN=g++-14
 ```
 
 `CUDA_HOME=/opt/cuda` remains a valid explicit override. `ARCH=native` is
-already the V4 Linux default; `make -C c check` intentionally uses its portable
-architecture, so do not compare its timing with an `ARCH=native` benchmark.
+already the V4 Linux default and `make -C c check` uses it too — don't compare
+timings across an explicit `ARCH=x86-64-v3` build and the `ARCH=native` default.
 
 On the target, THP reports `[always] madvise never`, so the kernel already backs
 the expert slabs with transparent hugepages without an engine hint. Verify a
@@ -73,9 +74,8 @@ its policy first when a long-run throughput change has no explanation.
 ## VRAM tiers (12 GiB RTX 4070, `CUDA=1 V4_VRAM=1`)
 
 With the CUDA build and the card otherwise idle, add `V4_VRAM=1` to the command
-above (`CUDA_HOME=/opt/cuda` on Arch/CachyOS, see
-[plans/09-arch-cachyos.md](../plans/09-arch-cachyos.md) Commit 3, not yet
-built). Measured against the full checkpoint, `--memory-gb 24`,
+above (`CUDA_HOME=/opt/cuda` on Arch/CachyOS; use `NVCC_CCBIN=g++-14` when nvcc
+rejects the system compiler). Measured against the full checkpoint, `--memory-gb 24`,
 `CTX=131072`, `V4_KV=native`:
 
 ```

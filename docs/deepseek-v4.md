@@ -1,122 +1,82 @@
-# DeepSeek V4 engine
+# DeepSeek V4 Flash engine
 
-The DeepSeek V4 Flash engine, target path plus the DSpark drafter.
+`c/deepseek_v4.c` is the only inference engine in this fork. It opens the
+official `deepseek-ai/DeepSeek-V4-Flash-0731` safetensors checkpoint directly;
+the target model and the three DSpark stages are one checkpoint, not two model
+directories.
 
-## Scope
+## What is loaded
 
-- Production code is in `c/deepseek_v4.c`; the experimental public engine and
-  session API is in `c/deepseek_v4.h`. The drafter lives in
-  `c/deepseek_v4_dspark.inc`.
-- Official sharded safetensors checkpoints load through shared `st.h`.
-- Standard MXFP4 matrix multiplication uses shared `quant.h`.
-- Unified `c/coli` routes `run`, `chat`, `serve`, and `web` to V4. Serving keeps
-  the engine and caches warm across requests.
-- **DSpark speculative decoding is built in** — three drafter stages read from
-  the `mtp.<stage>.` tensors of the same checkpoint, verified against the exact
-  target. It is opt-in: `c/coli` starts it disabled (`V4_MTP=0`, `V4_DRAFT=0`),
-  and `--no-dspark` switches it off explicitly. Drafting is output-preserving
-  within one backend; the acceptance rate is reported per run.
-- Build targets are x86-64/aarch64 Linux and Windows/MSYS2. This fork only
-  maintains **Linux x86-64**; see `AGENTS.md`.
+- 43 V4 layers with a 4096-wide hidden state and 256 routed experts (top-k 6).
+- Native FP8 dense weights and FP4 expert weights; no conversion is required.
+- DSpark tensors at `mtp.0`, `mtp.1`, and `mtp.2`. The Tiny fixture has no
+  `mtp.*` tensors, so only the full checkpoint can validate drafter behavior.
+- The default `native` KV codecs store the checkpoint's existing quantized
+  representation compactly and reconstruct it bit-exactly. TurboQuant codecs
+  remain explicit lossy experiments.
 
-Destroy every session before destroying its engine.
+The public runtime supports Linux x86-64 only. It has a dependency-free CPU
+path and an optional CUDA path for the headless RTX 4070.
 
-## Shared migration status
-
-| Checkpoint path | Current implementation | Follow-up |
-|---|---|---|
-| Safetensors index/range reads | shared `st.h` | done |
-| fmt7 standard MXFP4 matmul | shared `quant.h` | done |
-| fmt7 resident rows16 expert cache | temporary V4-private layout | **TODO:** migrate after upstream exposes a resident rows16 API |
-| fmt8 E4M3 + UE8M0 128x128 scales | shared `st_read_scale_f32` + `quant.h` `matmul_fp8` | done |
-
-Only the rows16 resident-cache layout remains V4-private. Its
-`TODO(upstream-fmt7-rows16)` marker names the shared API still needed before
-that specialized cache layout can be removed.
-
-## Memory policy
-
-A typical checkpoint has 43 transformer layers, hidden size 4096, and 256
-routed experts per sparse layer with top-k 6. Dense weights occupy about
-6.27 GiB in total: 5.456 GiB of FP8 weights and expanded scales can move to
-VRAM, while 0.810 GiB of BF16/f32/i64 tensors remains on the host. A resident
-BF16 output head occupies about 0.99 GiB (1.06 GB). Routed-expert weights are
-streamed and cached according to the RAM budget.
-
-The planner reserves workspace and a minimum expert working set, then enables
-dense/head residency and grows the expert cache when memory permits. Dense
-residency is independent of DSpark and works with `--no-dspark` as well.
-
-With the full drafter enabled, the planner books a DSpark reserve of
-`V4_MTP_GB × 1e9 + 768 MiB` — 1.169 GiB at the `0.45` default — *before* it
-sizes the expert cache, because the lazy first draft must not borrow its upload
-peak from that cache. On the target machine that costs two expert-cache slots.
-
-`--ram GiB` is a planner budget, not an OS-enforced limit. Without it, the
-budget is derived from currently available OS memory.
-
-For the 32 GiB target machine, scratch-reserve guidance, the reproducible
-benchmark protocol, and the current before/after measurements are maintained in
-[DeepSeek V4 tuning for 32 GiB](deepseek-v4-tuning-32gb.md).
-
-## Download
+## Build
 
 ```bash
-hf download deepseek-ai/DeepSeek-V4-Flash-0731 \
-  --local-dir /path/to/DeepSeek-V4-Flash
+make -C c deepseek-v4
+
+# Target CachyOS CUDA build. NVCC_CCBIN is necessary only when CUDA rejects
+# the system compiler.
+make -C c deepseek-v4 CUDA=1 NVCC_CCBIN=g++-14
 ```
 
-A download can finish with a truncated shard even when the client reports
-success. If `st.h` rejects a shard as out of bounds, compare every local shard
-size with the Hugging Face repository before treating it as an engine failure.
+`ARCH=native` is the default for both `make -C c deepseek-v4` and `make -C c check`
+(`check` builds the engine then runs the test suite against it, same ARCH as any
+other invocation) — set `ARCH=x86-64-v3` explicitly if you need a binary portable
+across different x86-64 hosts, and don't compare timings across different ARCH values.
 
-## Build and use
+## Direct use
+
+```bash
+c/deepseek_v4 /path/to/deepseek-v4-flash "Hello" \
+  --memory-gb 24 --max-tokens 64
+
+c/deepseek_v4 /path/to/deepseek-v4-flash --prompt-file prompt.txt \
+  --system "Answer precisely." --thinking --memory-gb 24
+```
+
+The direct CLI uses the V4 chat template. `--raw-prompt` bypasses it,
+`--stop-sentence` stops at the first sentence terminator, and `--no-dspark`
+disables verified drafting for that request.
+
+## Persistent interfaces
+
+`c/coli chat`, `c/coli serve`, and `c/coli web` launch the same V4 engine and
+keep the model process warm. `serve` and `web` provide a local OpenAI-compatible
+HTTP API; its V4 limits and examples are in [api.md](api.md).
 
 ```bash
 cd c
-make deepseek-v4
-python ./coli run --model /path/to/DeepSeek-V4-Flash --ram 32 \
-  "What is the capital of France?"
-python ./coli chat --model /path/to/DeepSeek-V4-Flash --ram 32
-python ./coli serve --model /path/to/DeepSeek-V4-Flash --ram 32
-python ./coli web --model /path/to/DeepSeek-V4-Flash --ram 32
+./coli chat --model /path/to/deepseek-v4-flash --ram 24 --ctx 32768
+./coli serve --model /path/to/deepseek-v4-flash --ram 24 --ctx 32768
 ```
 
-V4 chat uses native model markers. Native serving currently supports greedy
-generation and one active KV slot; tools and grammar are rejected. Requests
-re-prefill their context, while the process, weights, dense tensors, head, and
-expert cache stay warm.
+The V4 server is greedy and serves one active context. It accepts ordinary text
+chat/completion requests and rejects unsupported tools explicitly rather than
+pretending to execute them.
 
 ## Validation
 
-The tiny safetensors fixture is generated locally, ignored, and not committed:
-
 ```bash
-python -m pip install -r tools/requirements-deepseek-v4-tiny.txt
-make deepseek-v4-tiny-check
+make -C c test && make -C c check
+make -C c deepseek-v4-tiny-check
+
+make -C c deepseek-v4-oracle MODEL=/path/to/deepseek-v4-flash \
+  MEMORY_GB=24 ORACLE_TEACHER_FORCING=32 ORACLE_GREEDY=20
 ```
 
-This covers loading, teacher forcing, greedy decode, long/repeated sessions,
-`--no-dspark` compatibility, and two requests through the persistent
-`SUBMIT`/`DATA`/`DONE` protocol. The fixture contains **no `mtp.*` tensors**, so
-it cannot exercise any DSpark path — a drafter change that is only green here is
-untested.
+The first two commands are required on every change. The Tiny fixture verifies
+the regular target path, while the full-checkpoint oracle is needed for the
+actual model. A DSpark change additionally needs a real-checkpoint run that
+records proposals, acceptance, and target-token equality.
 
-For a real checkpoint:
-
-```bash
-make deepseek-v4-oracle MODEL=/path/to/DeepSeek-V4-Flash \
-  MEMORY_GB=32 ORACLE_TEACHER_FORCING=32 ORACLE_GREEDY=20
-```
-
-The oracle is target-only. DSpark on/off speed, acceptance and token-identity
-evidence are measured separately with `c/tools/bench_v4.py --dspark`; the
-current numbers are in [plans/07-head-dspark-vram.md](../plans/07-head-dspark-vram.md).
-
-## Follow-ups
-
-- Add non-greedy sampling and more serving slots.
-- Add shared replacements for the two temporary private quant paths above.
-- DSpark does not yet pay for itself in throughput — it loses against
-  target-only on both the CPU and the CUDA path. That is a property of the
-  drafter, not of its placement, and needs its own plan.
+For the target hardware profile, placement reports, and benchmark protocol,
+see [deepseek-v4-tuning-32gb.md](deepseek-v4-tuning-32gb.md).

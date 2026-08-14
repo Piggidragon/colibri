@@ -10,8 +10,6 @@ Run GLM-5.2 (744B) locally on CPU with roughly 15-26 GB of RAM.
   coli plan                 Disk / RAM / VRAM resource plan
   coli mirror               Plan, stage, or verify a learned partial mirror
   coli doctor               installation and execution-plan diagnostics
-  coli bench [task...]      quality benchmarks (MMLU/HellaSwag/...)
-  coli convert              convert GLM-5.2-FP8 to int4, one shard at a time
   coli build                build the engine
 
 Configuration through environment variables or flags (also valid after the subcommand):
@@ -1236,62 +1234,6 @@ def cmd_web(a):
     print(f"dashboard: {url}  (opens automatically when the engine is ready)")
     cmd_serve(a)
 
-def cmd_bench(a):
-    need_model(a.model)
-    banner("bench")
-    # python con `tokenizers`: l'ambiente del progetto se c'e', altrimenti quello corrente
-    venv_py = os.path.join(HERE, "mio_env", "Scripts" if sys.platform == "win32" else "bin", "python3")
-    py = venv_py if os.path.exists(venv_py) else sys.executable
-    tasks = ",".join(a.tasks) if a.tasks else "hellaswag,arc_challenge,mmlu"
-    # dataset mancanti -> li scarica una volta (fetch_benchmarks.py li mette in --data come JSONL)
-    missing=[t for t in tasks.split(",") if not os.path.exists(os.path.join(a.data,f"{t}.jsonl"))]
-    if missing:
-        print(f"  {C.dim}downloading missing datasets: {', '.join(missing)}{C.r}")
-        subprocess.call([py, os.path.join(TOOLS,"fetch_benchmarks.py"),
-                         "--out", a.data, "--tasks", ",".join(missing), "--limit", str(max(a.limit,200))])
-        # il fetch riprova da solo (#304), ma se l'hub resta giu' il bench gira sui task
-        # disponibili invece di passare a eval file inesistenti.
-        # EN: the fetch retries on its own (#304), but if the hub stays down the bench
-        # runs on the available tasks instead of handing eval nonexistent files.
-        still=[t for t in tasks.split(",") if not os.path.exists(os.path.join(a.data,f"{t}.jsonl"))]
-        if still:
-            tasks=",".join(t for t in tasks.split(",") if t not in still)
-            print(f"  {C.yel}skipping (download failed, rerun later): {', '.join(still)}{C.r}")
-            if not tasks:
-                print(f"  {C.yel}no datasets available — nothing to bench{C.r}"); sys.exit(1)
-    cmd=[py, os.path.join(TOOLS,"eval_glm.py"), "--glm", GLM, "--snap",a.model,
-         "--tasks", tasks, "--limit", str(a.limit), "--data", a.data]
-    if a.ram: cmd+=["--ram",str(a.ram)]
-    e=env_for(a)
-    print(f"  {C.dim}decode is disk-bound: this takes HOURS on slow hardware. Raise --limit on faster machines.{C.r}\n")
-    sys.exit(subprocess.call(cmd, env=e))
-
-def cmd_convert(a):
-    banner("convert")
-    # here --model is the DESTINATION the converted weights are written to, not an
-    # existing snapshot, so it needs its own wording rather than need_model's.
-    if not a.model:
-        sys.exit(f"{C.yel}no output directory given.{C.r}\n"
-                 f"  --model <dir> is where the converted model is written")
-    # python con torch/safetensors: l'ambiente del progetto se c'e', altrimenti quello corrente
-    venv_py = os.path.join(HERE, "mio_env", "Scripts" if sys.platform == "win32" else "bin", "python3")
-    py = venv_py if os.path.exists(venv_py) else sys.executable
-    base=[py, os.path.join(TOOLS,"convert_fp8_to_int4.py"),
-          "--repo", a.repo, "--outdir", a.model, "--ebits", str(a.ebits), "--io-bits", str(a.io_bits),
-          "--group-size", str(a.group_size)]
-    if a.xbits: base+=["--xbits",str(a.xbits)]
-    # passo 1: modello principale (78 layer). Resumabile: riparte dagli shard mancanti.
-    print(f"  {C.dim}[1/2] model: {' '.join(base)}{C.r}")
-    rc=subprocess.call(base)
-    if rc!=0: sys.exit(rc)
-    if a.no_mtp: sys.exit(0)
-    # passo 2: testa MTP (layer 78). SEMPRE int8: a int4 i draft sbagliano quasi sempre
-    # (acceptance 0-4% vs 39-59%, misurato — issue #8) e la speculazione non parte mai.
-    mtp_cmd=list(base); i=mtp_cmd.index("--ebits"); mtp_cmd[i+1]=str(max(8,a.ebits))
-    print(f"  {C.dim}[2/2] int8 MTP head (speculative drafts){C.r}")
-    sys.exit(subprocess.call(mtp_cmd+["--mtp"]))
-
-
 def cmd_mirror(a):
     if not a.mirror:
         sys.exit("mirror path required: pass --mirror or set COLI_MODEL_MIRROR")
@@ -1397,24 +1339,11 @@ def main():
                        help="additional Host header accepted by the DNS-rebinding guard; repeat as needed"))):
         pw.add_argument(arg,**kw)
     pw.add_argument("--no-browser",action="store_true",help="don't auto-open the browser")
-    pb=sub.add_parser("bench", parents=[common]); pb.add_argument("tasks", nargs="*")
-    pb.add_argument("--limit",type=int,default=40)
-    if sys.platform == "win32":
-        _cache_root = os.environ.get("LOCALAPPDATA", os.path.expanduser("~\\AppData\\Local"))
-    else:
-        _cache_root = os.environ.get("XDG_CACHE_HOME", os.path.expanduser("~/.cache"))
-    _bench_cache = os.path.join(_cache_root, "colibri", "bench")
-    pb.add_argument("--data",default=_bench_cache)
-    pc=sub.add_parser("convert", parents=[common]); pc.add_argument("--repo",default="zai-org/GLM-5.2-FP8")
-    pc.add_argument("--ebits",type=int,default=4); pc.add_argument("--io-bits",type=int,default=8); pc.add_argument("--xbits",type=int,default=0)
-    pc.add_argument("--group-size",type=int,default=64,
-        help="int4 scale group size: 64 (default, group-scaled quality) or 0 (legacy per-row)")
-    pc.add_argument("--no-mtp",action="store_true",help="skip the MTP head (no speculative drafts)")
     a=ap.parse_args()
     handler={"build":cmd_build,"info":cmd_info,"plan":cmd_plan,"mirror":cmd_mirror,
              "doctor":cmd_doctor,"tune":cmd_tune,
-             "run":cmd_run,"chat":cmd_chat,"serve":cmd_serve,"stop":cmd_stop,"bench":cmd_bench,
-             "convert":cmd_convert,"web":cmd_web}.get(a.cmd)
+             "run":cmd_run,"chat":cmd_chat,"serve":cmd_serve,"stop":cmd_stop,
+             "web":cmd_web}.get(a.cmd)
     if handler: sys.exit(handler(a) or 0)
     banner(); print(__doc__)
 
