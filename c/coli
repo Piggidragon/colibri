@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-colibri — tiny engine, immense model.
-Run GLM-5.2 (744B) locally on CPU with roughly 15-26 GB of RAM.
+colibri — DeepSeek V4 Flash on one machine.
+Run DeepSeek-V4-Flash-0731 locally with the target-machine RAM/VRAM plan.
 
   coli chat                 interactive chat (loads the model once)
   coli serve                OpenAI-compatible HTTP API (persistent engine)
@@ -67,20 +67,16 @@ except ModuleNotFoundError:
 # guess is right (e.g. a custom packaging layout).
 _EXE = ".exe" if sys.platform == "win32" else ""
 _LIBEXEC = os.path.join(os.path.dirname(HERE), "libexec", "colibri")
-_here_colibri = os.path.join(HERE, "colibri" + _EXE)
-_here_glm = os.path.join(HERE, "glm" + _EXE)
+_here_v4 = os.path.join(HERE, "deepseek_v4" + _EXE)
 
 if os.environ.get("COLI_ENGINE"):
-    GLM = os.environ["COLI_ENGINE"]
-    TOOLS = os.path.join(os.path.dirname(GLM), "tools")
-elif os.path.exists(_here_colibri):
-    GLM = _here_colibri
-    TOOLS = os.path.join(HERE, "tools")
-elif os.path.exists(_here_glm):
-    GLM = _here_glm
+    V4 = os.environ["COLI_ENGINE"]
+    TOOLS = os.path.join(os.path.dirname(V4), "tools")
+elif os.path.exists(_here_v4):
+    V4 = _here_v4
     TOOLS = os.path.join(HERE, "tools")
 else:
-    GLM = os.path.join(_LIBEXEC, "colibri" + _EXE)
+    V4 = os.path.join(_LIBEXEC, "deepseek_v4" + _EXE)
     TOOLS = os.path.join(_LIBEXEC, "tools")
     sys.path.insert(0, _LIBEXEC)   # so `import resource_plan`, `doctor`, `openai_server` still resolve
 
@@ -135,31 +131,9 @@ def sprite_lines():
         out.append(row+"\033[0m")
     return out
 
-# Display names for the banner, keyed on the RAW model_type -- deliberately not
-# on model_arch(), which returns "glm" for everything it does not recognise.
-# That fallback is right for picking an engine (colibri.c is the general path)
-# and wrong for telling someone what they loaded: it is why the banner said
-# GLM-5.2 over an Inkling, a Kimi K3 and a DeepSeek V4 alike.
-#
-# Parameter counts are the roster's, i.e. the README's, so the two cannot drift
-# apart quietly. A model_type absent from this table is NOT forced into a name
-# here -- it prints its own model_type and its measured geometry instead.
-_BANNER_MODELS = (
-    ("deepseek_v4", "DeepSeek V4 Flash", "284B"),   # before "deepseek": V4 is its own engine
-    ("inkling",     "Inkling",           "975B"),
-    ("kimi",        "Kimi K3",           "2.8T"),
-    ("olmoe",       "OLMoE",             "7B"),
-    ("glm",         "GLM-5.2",           "744B"),
-)
-
 def model_banner_line(model):
-    """Third banner line: what is actually loaded, or the generic tagline.
-
-    Reads config.json and stats the shards. No safetensors headers are parsed:
-    this runs before every command, and a banner may not cost a scan of a
-    400 GB checkpoint.
-    """
-    generic = "GLM-5.2 · 744B MoE · int4 · streaming CPU"
+    """Third banner line for the only checkpoint this launcher supports."""
+    generic = "DeepSeek V4 Flash · 284B MoE · DSpark · Linux x86-64"
     if not model:
         return generic
     try:
@@ -169,24 +143,10 @@ def model_banner_line(model):
         return generic
     kind = (cfg.get("model_type") or "").lower()
 
-    name, scale = "", ""
-    for key, display, params in _BANNER_MODELS:
-        if key in kind:
-            name, scale = display, params
-            break
-    if not name:
-        # Unknown checkpoint: say so with its own words rather than guess.
-        name = kind or "unknown model"
+    if model_arch(model) != "deepseek_v4":
+        return f"unsupported model · {kind or 'missing model_type'}"
 
-    bits = [name]
-    if scale:
-        bits.append(f"{scale} MoE" if cfg.get("n_routed_experts") else scale)
-    else:
-        layers, experts = cfg.get("num_hidden_layers"), cfg.get("n_routed_experts")
-        if layers and experts:
-            bits.append(f"{layers}L x {experts}E MoE")
-        elif layers:
-            bits.append(f"{layers} layer")
+    bits = ["DeepSeek V4 Flash", "284B MoE"]
     try:
         size = sum(os.path.getsize(os.path.join(model, x))
                    for x in os.listdir(model) if x.endswith(".safetensors"))
@@ -229,23 +189,13 @@ def model_arch(model):
         with open(os.path.join(model, "config.json"), encoding="utf-8") as f:
             model_type = (json.load(f).get("model_type") or "").lower()
     except (OSError, ValueError, TypeError):
-        return "glm"
-    if "inkling" in model_type:
-        return "inkling"
-    if "kimi" in model_type:
-        return "kimi"
+        return None
     if "deepseek_v4" in model_type or ("deepseek" in model_type and "v4" in model_type):
         return "deepseek_v4"
-    return "glm"
+    return None
 
 def engine_for(model):
-    arch = model_arch(model)
-    if arch == "glm" or os.environ.get("COLI_ENGINE"):
-        return GLM
-    name = {"inkling": "inkling", "kimi": "kimi_k3",
-            "deepseek_v4": "deepseek_v4"}[arch]
-    local = os.path.join(HERE, name + _EXE)
-    return local if os.path.exists(local) else os.path.join(_LIBEXEC, name + _EXE)
+    return V4
 
 def need_model(model, engine=None):
     if not model:
@@ -254,37 +204,19 @@ def need_model(model, engine=None):
         sys.exit(f"{C.yel}model not found:{C.r} {model}\n  set COLI_MODEL or use --model")
     if not os.path.exists(os.path.join(model,"tokenizer.json")):
         sys.exit(f"{C.yel}tokenizer.json is missing from {model}{C.r}")
+    if model_arch(model) != "deepseek_v4":
+        sys.exit(f"{C.yel}unsupported model:{C.r} {model}\n"
+                 "  coli supports DeepSeek-V4-Flash-0731 only (config.json model_type deepseek_v4).")
     engine = engine or engine_for(model)
     if not os.path.exists(engine):
-        arch = model_arch(model)
-        target = ("kimi_k3" if arch == "kimi" else "inkling" if arch == "inkling" else
-                  "deepseek-v4" if arch == "deepseek_v4" else "colibri")
-        sys.exit(f"{C.yel}{target} engine is not built.{C.r} Run: make -C c {target}")
+        sys.exit(f"{C.yel}DeepSeek V4 engine is not built.{C.r} Run: make -C c deepseek-v4")
 
-def env_for_engine(a, arch):
-    if arch == "glm":
-        return env_for(a)
+def env_for_engine(a, arch="deepseek_v4"):
     env = os.environ.copy()
     # V4's engine selects P-cores itself: setting OMP_NUM_THREADS here would
     # mask V4_OMP_CORES before its hybrid-aware sysfs probe can run.
     #
-    # #805 set this from physical cores "on every platform" -- but only inside
-    # env_for(), which this function calls only for glm. inkling, kimi_k3,
-    # olmoe and deepseek_v4 all took the branch below and got libgomp's
-    # default, nproc, i.e. LOGICAL cores. On any SMT host that is a 2x
-    # over-subscription of a memory-bound int4 GEMV, which is the collapse
-    # measured in #718 (2.3x on Zen3) and again here: an i7-1355U reports 6
-    # physical and 12 logical, and DeepSeek V4 was running the 12.
-    #
-    # Same defect shape as the one #805 fixed, one level out: a mechanism that
-    # reaches one engine and not its siblings.
-    #
-    # setdefault, so an explicit OMP_NUM_THREADS still wins -- which is also
-    # how to A/B it: OMP_NUM_THREADS=12 reproduces the old behaviour.
-    if not env.get("COLI_NO_OMP_TUNE") and arch != "deepseek_v4":
-        from resource_plan import physical_cpu_count
-        env.setdefault("OMP_NUM_THREADS", str(physical_cpu_count()))
-    if arch == "deepseek_v4" and not env.get("COLI_NO_OMP_TUNE") and sys.platform != "win32":
+    if not env.get("COLI_NO_OMP_TUNE") and sys.platform != "win32":
         # coli_v4_omp_tune_threads sizes the team (OMP_NUM_THREADS) in-binary,
         # but libgomp's default placement is unbound: a reduced team is then
         # free to migrate onto E-cores, which defeats V4_OMP_CORES=perf. These
@@ -294,44 +226,26 @@ def env_for_engine(a, arch):
         env.setdefault("OMP_PLACES", "cores")
     if a.ngen: env["NGEN"] = str(a.ngen)
     if a.temp is not None: env["COLI_TEMP"] = str(a.temp)
-    if arch == "deepseek_v4":
-        if a.ram: env["RAM_GB"] = str(a.ram)
-        if a.ctx: env["CTX"] = str(a.ctx)
-        # Speculation stays opt-in. Real multi-turn chat measured only 1/15
-        # accepted prompt-lookup candidates; recurrent-state replay dominated
-        # the visible decode. V4_DRAFT=5 remains available for repeated code.
-        env.setdefault("V4_DRAFT", "0")
-        # Full three-stage DSpark remains opt-in.  In a real multi-turn chat it
-        # accepted only 10/24 candidates and rejected-suffix replay turned a
-        # 14-token answer into 495 seconds.  V4_MTP=1 still enables A/B runs;
-        # exact zero-I/O prompt lookup above remains enabled by default.
-        env.setdefault("V4_MTP", "0")
-        env.setdefault("V4_MTP_DRAFT", "3")
-        env.setdefault("V4_MTP_GB", "0.45")
-        env.setdefault("V4_MTP_MISS", "96")
-        env.setdefault("V4_MTP_MIN", "3")
-        env.setdefault("V4_MTP_CONF", "0.55")
+    if a.ram: env["RAM_GB"] = str(a.ram)
+    if a.ctx: env["CTX"] = str(a.ctx)
+    # Speculation remains opt-in until Plan 15 has measured it end-to-end.
+    env.setdefault("V4_DRAFT", "0")
+    env.setdefault("V4_MTP", "0")
+    env.setdefault("V4_MTP_DRAFT", "3")
+    env.setdefault("V4_MTP_GB", "0.45")
+    env.setdefault("V4_MTP_MISS", "96")
+    env.setdefault("V4_MTP_MIN", "3")
+    env.setdefault("V4_MTP_CONF", "0.55")
     return env
 
 def cuda_binary():
-    if not os.path.exists(GLM): return False
+    if not os.path.exists(V4): return False
     if sys.platform == "linux":
         try:
-            linked=subprocess.run(["ldd",GLM],capture_output=True,text=True,timeout=3)
-            # Detect both CUDA (libcudart) and HIP (libamdhip64) builds.
-            return any(("libcudart" in line or "libamdhip64" in line) and "not found" not in line
+            linked=subprocess.run(["ldd",V4],capture_output=True,text=True,timeout=3)
+            return any("libcudart" in line and "not found" not in line
                        for line in linked.stdout.splitlines())
         except (OSError,subprocess.SubprocessError): return False
-    if sys.platform == "win32":
-        # Windows CUDA_DLL=1 builds never link libcudart directly: glm.exe loads
-        # coli_cuda.dll at runtime via LoadLibrary (backend_loader.c), so there's no
-        # import-table entry for ldd/dumpbin to see. Detect the COLI_CUDA build via a
-        # marker string baked into glm.c's #ifdef COLI_CUDA block instead, and require
-        # coli_cuda.dll to actually sit next to glm.exe (else CUDA init fails at startup).
-        try:
-            with open(GLM,"rb") as f: built=b"[CUDA] mode: routed experts" in f.read()
-        except OSError: return False
-        return built and os.path.exists(os.path.join(os.path.dirname(GLM),"coli_cuda.dll"))
     return False
 
 def resource_request(a, env):
@@ -431,7 +345,7 @@ def env_for(a):
         e=environment_for_plan(plan,e,has_cuda)
         if not getattr(a, "no_tune_profile", False):
             from autotune import apply_profile, load_profile
-            profile=load_profile(plan,a.model,GLM)
+            profile=load_profile(plan,a.model,V4)
             if profile:
                 e=apply_profile(e,profile,explicit_env)
                 gain=100.0*profile["gain"]
@@ -678,11 +592,8 @@ def cmd_build(a):
     banner("build")
     if not os.path.exists(os.path.join(HERE, "Makefile")):
         sys.exit(f"{C.yel}coli build{C.r} only works from a source checkout (this is an installed copy).\n"
-                  f"  Clone https://github.com/JustVugg/colibri and run ./setup.sh, or make -C c colibri.")
-    arch=model_arch(a.model) if a.model else "glm"
-    target={"glm":"colibri","inkling":"inkling","kimi":"kimi_k3",
-            "deepseek_v4":"deepseek-v4"}[arch]
-    sys.exit(subprocess.call(["make","-C",HERE,target]))
+                  f"  Clone the V4 fork and run: make -C c deepseek-v4.")
+    sys.exit(subprocess.call(["make","-C",HERE,"deepseek-v4"]))
 
 def cmd_info(a):
     banner("info", model=a.model)
@@ -711,7 +622,7 @@ def cmd_info(a):
         row("disk", f"{fs.free/1e9:.0f} GB free")
     except OSError:
         row("disk", "? GB (unavailable)")
-    row("engine", "ready ✓" if os.path.exists(GLM) else "not built (coli build)")
+    row("engine", "ready ✓" if os.path.exists(V4) else "not built (make -C c deepseek-v4)")
     knobs=[]
     if a.ram: knobs.append(f"ram {a.ram}GB")
     if a.topp: knobs.append(f"topp {a.topp}")
@@ -755,11 +666,7 @@ def cmd_doctor(a):
         print(json.dumps(report,indent=2) if a.json else format_doctor(report))
         return 2
     report=run_doctor(
-        # engine_path was hardcoded to GLM, so `coli doctor` inspected colibri
-        # no matter which model it was pointed at: a built kimi_k3/inkling was
-        # reported "engine is not built", and a stale colibri would have been
-        # reported ready for a model that never runs on it (#783).
-        a.model, ram, ctx, devices, vram, engine_path=engine_for(a.model), deep=a.deep,
+        a.model, ram, ctx, devices, vram, engine_path=V4, deep=a.deep,
         mirror_dir=os.environ.get("COLI_MODEL_MIRROR"),
     )
     print(json.dumps(report,indent=2) if a.json else format_doctor(report))
@@ -783,14 +690,14 @@ def cmd_tune(a):
         sys.exit(f"{C.yel}cannot create tuning plan:{C.r} {error}")
     a.auto_tier=True
     a.no_tune_profile=True
-    base_env=env_for(a)
-    prompt=f"[gMASK]<sop><|user|>{a.prompt}<|assistant|><think></think>"
+    base_env=env_for_engine(a)
+    prompt=a.prompt
     banner("tune · measured execution profile", model=a.model)
     print(f"  fixed replay: {a.tokens} tokens · {a.repeats} run(s) per candidate")
     print("  only quality-preserving scheduling knobs are eligible\n")
     try:
         profile,path=run_tune(
-            GLM,a.cap,base_env,plan,a.model,prompt,tokens=a.tokens,
+            V4,a.cap,base_env,plan,a.model,prompt,tokens=a.tokens,
             repeats=a.repeats,timeout=a.timeout,min_gain=a.min_gain,
             profile_dir=a.profile_dir,
             progress=lambda message: print(f"  {C.dim}· {message}{C.r}",flush=True),
@@ -837,12 +744,7 @@ def cmd_run(a):
                 try: os.unlink(prompt_path)
                 except OSError: pass
         sys.exit(result)
-    # template ufficiale GLM-5.2: niente \n dopo i ruoli; <think></think> = risposta diretta (nothink).
-    # THINK=1 lascia <think> aperto, stessa convenzione del serve mode (glm.c). EN: THINK=1 leaves
-    # <think> open so the engine emits its reasoning block; the default stays nothink.
-    tk="<think>" if os.environ.get("THINK","0")=="1" else "<think></think>"
-    e=env_for(a); e["PROMPT"]=f"[gMASK]<sop><|user|>{prompt}<|assistant|>{tk}"
-    sys.exit(subprocess.call([GLM, str(a.cap if a.cap is not None else 0)], env=e))
+    raise AssertionError("need_model accepted a non-V4 model")
 
 def server_probe(base, api_key=None, timeout=1.5):
     """Is a coli serve alive at `base`? Returns its model_id, or None.
@@ -970,18 +872,12 @@ def cmd_chat(a):
         if getattr(a,"attach",None):
             sys.exit(f"--attach: no coli serve answering at {base} (start one with: coli serve --model <dir>)")
     arch=model_arch(a.model)
-    if arch!="glm":
+    if arch == "deepseek_v4":
         engine=engine_for(a.model)
         need_model(a.model,engine)
-        model_id=("kimi-k3-colibri" if arch=="kimi" else
-                  "inkling-colibri" if arch=="inkling" else "deepseek-v4-colibri")
+        model_id="deepseek-v4-flash-0731"
         banner(f"chat · {model_id} · local server", model=a.model)
         import openai_server
-        # --cap rides along so an explicit `coli chat --cap N` reaches the
-        # engine (it was silently eaten for years -- disclosed behavior
-        # change); absent stays absent, and openai_server translates the
-        # missing flag per model arch (cap_for_arch, #379: non-glm gets the
-        # legacy 8, an explicit value -- 0 included -- passes verbatim).
         cmd=[sys.executable,openai_server.__file__,"--model",a.model,
              "--engine",engine,"--arch",arch,"--model-id",model_id,
              "--host","127.0.0.1","--port","8000","--max-tokens",str(a.ngen)]
@@ -1005,8 +901,7 @@ def cmd_chat(a):
                 try: p.wait(timeout=10)
                 except subprocess.TimeoutExpired: p.kill()
     need_model(a.model)
-    banner(f"chat · {os.path.basename(a.model)} · ram {a.ram or '-'}GB · topp {a.topp or 'off'}", model=a.model)
-    kv_resume_notice(a.model)
+    raise AssertionError("need_model accepted a non-V4 model")
     errlog=tempfile.NamedTemporaryFile(mode="w+", suffix=".log", delete=False)
     e=env_for(a); e["SERVE"]="1"
     # stderr -> PIPE, NOT stderr=errlog (file). On Windows/MinGW, pointing the
@@ -1018,7 +913,7 @@ def cmd_chat(a):
     # once the READY sentinel arrives, so the status-line display below works
     # exactly as before. (Do NOT add a concurrent stderr drain thread: on
     # Windows, reading two child pipes simultaneously deadlocks CPython's IO.)
-    p=subprocess.Popen([GLM,str(a.cap if a.cap is not None else 0)], env=e, stdin=subprocess.PIPE,
+    p=subprocess.Popen([V4,str(a.cap if a.cap is not None else 0)], env=e, stdin=subprocess.PIPE,
                        stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=0)
     sp=Spinner("waking the giant (744B)…"); sp.start()
     st=stream_turn(p, READY, lambda b: None)
@@ -1142,22 +1037,18 @@ def cmd_chat(a):
 def serve_pidfile(port): return os.path.join(tempfile.gettempdir(), f"coli-serve-{port}.pid")
 
 def cmd_serve(a):
-    arch=model_arch(a.model)
     engine=engine_for(a.model)
     need_model(a.model,engine)
-    if arch!="glm" and a.kv_slots!=1:
-        sys.exit(f"{arch} currently supports exactly one KV slot")
+    if a.kv_slots!=1:
+        sys.exit("DeepSeek V4 currently supports exactly one KV slot")
     # pidfile: cosi' `coli stop` spegne tutto con un comando, senza pkill a mano.
     # EN: pidfile so `coli stop` can shut everything down without manual pkill.
     try:
         with open(serve_pidfile(a.port),"w") as f: f.write(f"{os.getpid()} {a.model}\n")
     except OSError: pass
     import openai_server
-    openai_server.ARCH=arch
-    model_id=a.model_id or ("kimi-k3-colibri" if arch=="kimi" else
-                            "inkling-colibri" if arch=="inkling" else
-                            "deepseek-v4-colibri" if arch=="deepseek_v4" else
-                            "glm-5.2-colibri")
+    openai_server.ARCH="deepseek_v4"
+    model_id=a.model_id or "deepseek-v4-flash-0731"
     try:
         openai_server.serve(a.model,a.host,a.port,model_id,a.api_key,
               a.cap,a.ngen,engine,env_for_engine(a,arch),a.cors_origin,
@@ -1168,10 +1059,8 @@ def cmd_serve(a):
 
 def cmd_stop(a):
     """Shut down a running `coli serve` AND its engine — one command, no pkill.
-    The engine re-execs itself for OMP tuning, so its process is named `exe`,
-    not `glm`: every `pkill -x glm` in history silently killed nothing (that is
-    how two 17+5 GB ghost engines OOM'd this box on 2026-07-16). This finds the
-    real processes: the pidfile first, then /proc by cmdline/environ — only
+    This finds the real processes: the pidfile first, then /proc by
+    cmdline/environ — only
     processes that are demonstrably ours (SERVE=1 + our SNAP, or `coli serve`
     in the command line)."""
     banner("stop")
@@ -1189,7 +1078,7 @@ def cmd_stop(a):
             if "coli" in cmd and " serve" in cmd and pid!=os.getpid():
                 if not any(p==pid for p,_ in targets): targets.append((pid,"coli serve (cmdline)"))
             comm=open(f"/proc/{pd}/comm").read().strip()
-            if comm in ("colibri","glm","exe","olmoe","inkling","kimi_k3","deepseek_v4"):
+            if comm == "deepseek_v4":
                 env=open(f"/proc/{pd}/environ","rb").read().replace(b"\0",b"\n").decode("utf-8","replace")
                 if "SERVE=1" in env: targets.append((pid,f"engine `{comm}` (SERVE=1)"))
         except (OSError,PermissionError): continue
@@ -1267,16 +1156,11 @@ def main():
                         default=os.environ.get("COLI_POLICY","quality"),
                         help="resource policy (explicit --topk/--topp overrides warn and proceed)")
     common.add_argument("--repin", type=int, default=0, help="adapt RAM/VRAM experts every N tokens")
-    # Absent (None) = not explicitly set: the glm engine gets the 0 sentinel and picks
-    # (8 historically; 1 on Metal+darwin+fast SSD, #379 -- an honest F_NOCACHE probe
-    # measures "fast", cached in <model>/.coli_ssd), while non-glm arches get the
-    # legacy 8 (openai_server.cap_for_arch). An explicit --cap N -- 0 included --
-    # reaches the engine verbatim; see colibri.c's coli_resolve_cap().
     common.add_argument("--cap", type=int, default=None, help="cache slots/layer (default: auto)")
     common.add_argument("--ngen", type=int, default=1024)  # rete di sicurezza: la fine vera la decidono gli stop token
     common.add_argument("--topp", type=float, default=0); common.add_argument("--topk", type=int, default=0)
     common.add_argument("--temp", type=float, default=None)  # temperatura token (0=greedy, default 1.0+nucleus .95)
-    ap=argparse.ArgumentParser(prog="coli", parents=[common], description="colibri — run GLM-5.2 locally")
+    ap=argparse.ArgumentParser(prog="coli", parents=[common], description="colibri — run DeepSeek V4 Flash locally")
     ap.add_argument("--version", action="version", version=f"colibri {_version}")
     sub=ap.add_subparsers(dest="cmd")
     sub.add_parser("build", parents=[common]); sub.add_parser("info", parents=[common])

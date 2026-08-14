@@ -30,7 +30,7 @@ class CliOutputLanguageTest(unittest.TestCase):
     def test_help_is_english(self):
         result = self.run_cli("--help")
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("run GLM-5.2 locally", result.stdout)
+        self.assertIn("run DeepSeek V4 Flash locally", result.stdout)
         self.assertIn("automatically apply the RAM/VRAM plan", result.stdout)
         self.assertNotIn("modello", result.stdout.lower())
         self.assertNotIn("motore", result.stdout.lower())
@@ -64,13 +64,7 @@ class CliOutputLanguageTest(unittest.TestCase):
 
 
 class ChatCapForwardingTest(unittest.TestCase):
-    """#379/#386 r2 (F9): `coli chat` on a non-glm model spawns openai_server
-    as its local server. An explicit --cap must ride along on that command
-    line (it was silently eaten for years -- keeping it is a DISCLOSED
-    behavior change: a long-ignored `coli chat --cap 32` now takes effect),
-    and an absent --cap must stay absent so openai_server's arch-keyed
-    default (cap_for_arch) applies. This drives the real cmd_chat with the
-    process boundary faked, and pins the argv it builds."""
+    """`coli chat` always starts the V4 server and forwards an explicit cap."""
 
     @classmethod
     def setUpClass(cls):
@@ -105,14 +99,14 @@ class ChatCapForwardingTest(unittest.TestCase):
 
         model = tempfile.mkdtemp()
         self.addCleanup(lambda: subprocess.run(["rm", "-rf", model], check=False))
-        (Path(model) / "config.json").write_text(json.dumps({"model_type": "inkling"}))
+        (Path(model) / "config.json").write_text(json.dumps({"model_type": "deepseek_v4"}))
         args = types.SimpleNamespace(model=model, cap=cap, ngen=256, api_key=None,
                                      no_attach=True, attach=None)
         with mock.patch.object(coli, "need_model"), \
              mock.patch.object(coli, "banner"), \
-             mock.patch.object(coli, "engine_for", return_value="/stub/inkling"), \
+             mock.patch.object(coli, "engine_for", return_value="/stub/deepseek_v4"), \
              mock.patch.object(coli, "env_for_engine", return_value={}), \
-             mock.patch.object(coli, "server_probe", return_value="inkling-colibri"), \
+             mock.patch.object(coli, "server_probe", return_value="deepseek-v4-flash-0731"), \
              mock.patch.object(coli, "chat_attached"), \
              mock.patch.object(coli, "Spinner", FakeSpinner), \
              mock.patch("subprocess.Popen", FakeProc):
@@ -123,10 +117,9 @@ class ChatCapForwardingTest(unittest.TestCase):
         cmd = self._chat_server_cmd(cap=32)
         self.assertIn("--cap", cmd)
         self.assertEqual(cmd[cmd.index("--cap") + 1], "32")
-        self.assertEqual(cmd[cmd.index("--arch") + 1], "inkling")
+        self.assertEqual(cmd[cmd.index("--arch") + 1], "deepseek_v4")
 
     def test_explicit_cap_zero_rides_along(self):
-        # explicit 0 = upstream RAM-auto for inkling, by request (#386 r2, F8)
         cmd = self._chat_server_cmd(cap=0)
         self.assertEqual(cmd[cmd.index("--cap") + 1], "0")
 
@@ -136,12 +129,7 @@ class ChatCapForwardingTest(unittest.TestCase):
 
 
 class BannerModelLineTest(unittest.TestCase):
-    """The banner's third line must describe the model that is loaded.
-
-    It said "GLM-5.2 · 744B MoE · int4 · streaming CPU" for every checkpoint,
-    because model_arch() answers "glm" for anything it does not recognise --
-    the right default for choosing an engine, and a wrong statement of fact.
-    """
+    """The banner names V4 and makes unsupported checkpoints explicit."""
 
     @classmethod
     def setUpClass(cls):
@@ -175,17 +163,9 @@ class BannerModelLineTest(unittest.TestCase):
         with mock.patch.object(self.coli.os.path, "getsize", fake_getsize):
             return self.coli.model_banner_line(str(directory))
 
-    def test_each_engine_names_itself(self):
-        for model_type, expected in (
-            ("glm5_moe", "GLM-5.2"),
-            ("inkling", "Inkling"),
-            ("kimi_k3", "Kimi K3"),
-            ("deepseek_v4", "DeepSeek V4 Flash"),
-            ("olmoe", "OLMoE"),
-        ):
-            with self.subTest(model_type=model_type):
-                line = self.line({"model_type": model_type, "n_routed_experts": 8})
-                self.assertTrue(line.startswith(expected), line)
+    def test_v4_names_itself(self):
+        line = self.line({"model_type": "deepseek_v4", "n_routed_experts": 256})
+        self.assertTrue(line.startswith("DeepSeek V4 Flash"), line)
 
     def test_deepseek_v4_is_not_read_as_glm(self):
         """The regression this exists for: a non-GLM checkpoint said GLM-5.2."""
@@ -193,32 +173,29 @@ class BannerModelLineTest(unittest.TestCase):
         self.assertNotIn("GLM", line)
         self.assertNotIn("744B", line)
 
-    def test_unknown_model_states_its_own_type(self):
-        """No forcing into the roster: an unknown checkpoint speaks for itself."""
+    def test_unknown_model_is_marked_unsupported(self):
         line = self.line({"model_type": "qwen3_moe", "num_hidden_layers": 48,
                           "n_routed_experts": 128})
         self.assertIn("qwen3_moe", line)
-        self.assertIn("48L x 128E", line)
-        self.assertNotIn("GLM", line)
+        self.assertIn("unsupported", line)
 
     def test_missing_model_type_does_not_invent_one(self):
         line = self.line({"num_hidden_layers": 32})
-        self.assertIn("unknown model", line)
-        self.assertNotIn("GLM-5.2", line)
+        self.assertIn("unsupported", line)
 
     def test_no_model_keeps_the_generic_tagline(self):
-        self.assertIn("GLM-5.2", self.coli.model_banner_line(None))
+        self.assertIn("DeepSeek V4 Flash", self.coli.model_banner_line(None))
 
     def test_unreadable_model_falls_back_instead_of_raising(self):
         """`coli info` banners before validating the path; it must not crash."""
-        self.assertIn("GLM-5.2", self.coli.model_banner_line("/nonexistent/xyz"))
+        self.assertIn("DeepSeek V4 Flash", self.coli.model_banner_line("/nonexistent/xyz"))
 
     def test_size_is_reported_without_rounding_to_zero(self):
-        small = self.line({"model_type": "olmoe"}, shard_bytes=4_200_000_000)
+        small = self.line({"model_type": "deepseek_v4"}, shard_bytes=4_200_000_000)
         self.assertIn("4.2 GB on disk", small)
-        large = self.line({"model_type": "glm5_moe"}, shard_bytes=372_000_000_000)
+        large = self.line({"model_type": "deepseek_v4"}, shard_bytes=372_000_000_000)
         self.assertIn("372 GB on disk", large)
-        tiny = self.line({"model_type": "olmoe"}, shard_bytes=3_000_000)
+        tiny = self.line({"model_type": "deepseek_v4"}, shard_bytes=3_000_000)
         self.assertIn("MB on disk", tiny)
 
     def test_model_is_keyword_only(self):
@@ -227,14 +204,8 @@ class BannerModelLineTest(unittest.TestCase):
             self.coli.banner("run", True)
 
 
-class OmpThreadsForEveryEngineTest(unittest.TestCase):
-    """#805 set OMP_NUM_THREADS from physical cores -- for glm only.
-
-    env_for_engine() forwarded to env_for() when arch was "glm" and built its
-    own environment otherwise, so inkling, kimi_k3 and olmoe kept
-    libgomp's nproc default: logical cores, a 2x over-subscription of a
-    memory-bound int4 GEMV on any SMT host.
-    """
+class V4OmpEnvironmentTest(unittest.TestCase):
+    """V4 retains control of its hybrid-core team inside the binary."""
 
     @classmethod
     def setUpClass(cls):
@@ -246,18 +217,6 @@ class OmpThreadsForEveryEngineTest(unittest.TestCase):
     def args(self):
         return types.SimpleNamespace(model="/x", ram=None, ctx=None, ngen=None,
                                      temp=None, cap=None)
-
-    def test_non_v4_sister_engines_get_physical_cores(self):
-        # clear=True: env_for_engine copies the real os.environ, so an
-        # operator's own OMP_NUM_THREADS export would make setdefault() keep
-        # their value instead of "6" and fail this assertion (#4 in the
-        # review that added this test).
-        with mock.patch.dict(os.environ, {}, clear=True), \
-             mock.patch("resource_plan.physical_cpu_count", return_value=6):
-            for arch in ("inkling", "kimi", "olmoe"):
-                with self.subTest(arch=arch):
-                    env = self.coli.env_for_engine(self.args(), arch)
-                    self.assertEqual(env.get("OMP_NUM_THREADS"), "6")
 
     def test_v4_leaves_thread_count_to_the_binary(self):
         with mock.patch.object(self.coli.sys, "platform", "linux"), \
