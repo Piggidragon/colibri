@@ -1368,6 +1368,11 @@ def read_engine_turn(stream, sentinel, on_bytes):
     }
 
 
+def v4_frame_fields(fields):
+    """Parse the key=value telemetry frames emitted by the V4 serve loop."""
+    return dict(field.split("=", 1) for field in fields[1:] if "=" in field)
+
+
 def model_arch(model):
     """Return the supported architecture, or ``None`` for another checkpoint."""
     try:
@@ -1440,6 +1445,8 @@ class Engine:
         self.kv_slots = kv_slots
         self.tiers = None
         self.hwinfo = None
+        self.v4 = None
+        self.v4_metrics = None
         self.emap = None
         self.hits = None
         self.hits_seq = 0                      # latest "TIERS" snapshot from the engine
@@ -1549,6 +1556,22 @@ class Engine:
                     self.tiers = {"vram": int(fields[1]), "ram": int(fields[2]),
                                   "disk": int(fields[3]), "vram_gb": float(fields[4]),
                                   "ram_gb": float(fields[5])}
+                elif kind == "V4INFO":
+                    self.v4 = v4_frame_fields(fields)
+                elif kind == "V4METRIC":
+                    values = v4_frame_fields(fields)
+                    try:
+                        self.v4_metrics = {
+                            "hit_rate": float(values["hit_rate"]),
+                            "requests": int(values["requests"]),
+                            "hits": int(values["hits"]),
+                            "misses": int(values["misses"]),
+                            "bytes": int(values["bytes"]),
+                            "drive0": int(values["drive0"]),
+                            "drive1": int(values["drive1"]),
+                        }
+                    except (KeyError, ValueError):
+                        raise RuntimeError(f"invalid V4 telemetry: {' '.join(fields)}")
                 elif kind == "ERROR" and len(fields) >= 2:
                     request_id = fields[1]
                     message = " ".join(fields[2:]) or "engine request failed"
@@ -2061,6 +2084,10 @@ class APIHandler(BaseHTTPRequestHandler):
                     if tiers: payload["tiers"] = tiers
                     hwinfo = getattr(self.server.engine, "hwinfo", None) if self.server.engine else None
                     if hwinfo: payload["hwinfo"] = hwinfo
+                    v4 = getattr(self.server.engine, "v4", None) if self.server.engine else None
+                    if v4: payload["v4"] = v4
+                    v4_metrics = getattr(self.server.engine, "v4_metrics", None) if self.server.engine else None
+                    if v4_metrics: payload["v4_metrics"] = v4_metrics
                 self.send_json(200, payload, request_id)
                 return
             if path == "/experts":

@@ -44,6 +44,11 @@ const message = (role: ChatMessage["role"], content: string): ChatMessage => {
   return { id, role, content }
 }
 
+const formatBytes = (bytes: number) => {
+  if (bytes < 1_000_000_000) return `${(bytes / 1_000_000).toFixed(0)} MB`
+  return `${(bytes / 1_000_000_000).toFixed(2)} GB`
+}
+
 export default function App() {
   const { t, locale, setLocale, locales } = useLocale()
 
@@ -262,6 +267,21 @@ export default function App() {
             {health.hwinfo.gpus > 0 ? <div className="hw-row"><MonitorDot className="size-3.5" /><span>{health.hwinfo.gpus}× GPU<small>{health.hwinfo.vram_total_gb.toFixed(0)} GB VRAM</small></span></div> : null}
             <div className="hw-row"><MemoryStick className="size-3.5" /><span>{health.hwinfo.ram_total_gb.toFixed(0)} GB RAM<small>{health.hwinfo.ram_avail_gb.toFixed(0)} GB free</small></span></div>
             <div className="hw-row"><HardDrive className="size-3.5" /><span>{health.hwinfo.cores} cores</span></div>
+          </div> : null}
+          {health?.v4 ? <div className="v4-panel">
+            <div className="v4-panel-head"><span>DeepSeek V4 Flash</span><code>{health.v4.ctx} ctx · {health.v4.kv} KV</code></div>
+            <div className="v4-tier-grid">
+              <span>KV <strong>{health.v4.kv_location}</strong></span>
+              <span>Dense <strong>{health.v4.dense}</strong></span>
+              <span>Head <strong>{health.v4.head}</strong></span>
+              <span>DSpark <strong>{health.v4.dspark}</strong></span>
+            </div>
+          </div> : null}
+          {health?.v4_metrics ? <div className="v4-metrics">
+            <span><strong>{health.v4_metrics.hit_rate.toFixed(1)}%</strong> expert-cache hits</span>
+            <span>{health.v4_metrics.hits.toLocaleString()} hits · {health.v4_metrics.misses.toLocaleString()} misses</span>
+            <span>{formatBytes(health.v4_metrics.bytes)} read this turn</span>
+            {health.v4_metrics.drive1 > 0 ? <span>SSD A {formatBytes(health.v4_metrics.drive0)} · SSD B {formatBytes(health.v4_metrics.drive1)}</span> : null}
           </div> : null}
           {health?.scheduler ? <>
             <div className="runtime-grid">

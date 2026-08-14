@@ -20,7 +20,7 @@ from openai_server import (APIError, APIHandler, APIServer, ClientCancelled,
                            _engine_error, cap_for_arch, conversation_cache_slot, model_arch,
                            generation_options, parse_tool_calls, read_engine_turn,
                            render_chat, render_chat_kimi, serve,
-                           split_thinking_reply, stop_policy, tune_child_env)
+                           split_thinking_reply, stop_policy, tune_child_env, v4_frame_fields)
 
 
 class FakeEngine:
@@ -662,6 +662,11 @@ class CapSentinelShimTest(unittest.TestCase):
         self.assertEqual(env["V4_MTP_DRAFT"], "3")
         self.assertEqual(env["V4_MTP_GB"], "0.45")
         self.assertEqual(env["V4_MTP_CONF"], "0.7")  # explicit override wins
+
+    def test_v4_telemetry_frame_preserves_tier_and_cache_values(self):
+        self.assertEqual(v4_frame_fields(
+            ["V4INFO", "ctx=32768", "kv=native", "kv_location=vram", "dense=vram"]),
+            {"ctx": "32768", "kv": "native", "kv_location": "vram", "dense": "vram"})
 
 
 class HTTPTest(unittest.TestCase):
